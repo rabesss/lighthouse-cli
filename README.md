@@ -795,7 +795,18 @@ Current student — BME (Biomedical Engineering), MIT Manipal:
 | 44351 | Electronic Circuits |
 | 44352 | Digital System Design |
 
-**Sem IV (AY 2025-26):** No courses yet (OrgUnitId 58272).
+**Sem IV (AY 2025-26)**
+
+| OrgUnitId | Course |
+|-----------|--------|
+| 58273 | Engineering Mathematics IV |
+| 58274 | Clinical Sciences |
+| 58275 | Biomedical Instrumentation |
+| 58276 | Biomechanics |
+| 58277 | Digital Signal Processing |
+| 58278 | Microcontrollers |
+| 59514 | Signal Processing Lab |
+| 59515 | Microcontroller Lab |
 
 ## Gotchas & Notes
 
