@@ -17,6 +17,7 @@ from .commands import (
     cmd_auth_refresh,
     cmd_auth_status,
     cmd_calendar,
+    cmd_config_courses,
     cmd_content,
     cmd_courses,
     cmd_download,
@@ -107,6 +108,46 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
 
 
 # ---------------------------------------------------------------------------
+# Config subgroup
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def config() -> None:
+    """Manage configuration (course tracking, semester mapping)."""
+
+
+@config.command("courses")
+@click.option("--add", default=None, help="Track a course by ID or name.")
+@click.option("--remove", default=None, help="Stop tracking a course by ID.")
+@click.option("-s", "--semester", default=None, help="Semester label to assign (used with --add).")
+@click.option("--list", "list_courses", is_flag=True, default=False, help="Show tracked courses.")
+@click.option("--reset", is_flag=True, default=False, help="Clear all course tracking config.")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON.")
+def config_courses(add: str | None, remove: str | None, semester: str | None, list_courses: bool, reset: bool, json_output: bool) -> None:
+    """Manage course tracking and semester mapping.
+
+    Without flags, runs interactive setup: shows all enrolled courses
+    and lets you pick which to track and assign semester labels.
+
+    \b
+    Examples:
+      lighthouse config courses                    # Interactive setup
+      lighthouse config courses --list             # Show tracked courses
+      lighthouse config courses --add 44347 -s "Sem IV"  # Track one course
+      lighthouse config courses --remove 44347     # Stop tracking a course
+      lighthouse config courses --reset            # Clear all tracking
+    """
+    raise SystemExit(cmd_config_courses(
+        add=add,
+        remove=remove,
+        semester=semester,
+        list_courses=list_courses,
+        reset=reset,
+        json_output=json_output,
+    ))
+
+
+# ---------------------------------------------------------------------------
 # Data commands
 # ---------------------------------------------------------------------------
 
@@ -118,11 +159,12 @@ def semesters(json_output: bool) -> None:
 
 
 @cli.command()
-@click.option("-s", "--semester", default=None, help="Filter by semester name or ID.")
+@click.option("-s", "--semester", default=None, help="Filter by semester label (requires course tracking config).")
+@click.option("--tracked", "tracked_only", is_flag=True, default=False, help="Show only tracked courses.")
 @click.option("--json", "json_output", is_flag=True, help="Output raw JSON.")
-def courses(semester: str | None, json_output: bool) -> None:
+def courses(semester: str | None, tracked_only: bool, json_output: bool) -> None:
     """List all courses."""
-    raise SystemExit(cmd_courses(semester=semester, json_output=json_output))
+    raise SystemExit(cmd_courses(semester=semester, tracked_only=tracked_only, json_output=json_output))
 
 
 @cli.command("content")
@@ -141,7 +183,7 @@ def content(course_id: str, json_output: bool) -> None:
 @click.option("--json", "json_output", is_flag=True, help="Output raw JSON.")
 @click.option("--force", is_flag=True, default=False, help="Wipe manifest and re-download everything.")
 @click.option("--types", default="file", help="Comma-separated content types to download (file,html). Default: file.")
-@click.option("-s", "--semester", default=None, help="Filter to a specific semester by name or ID.")
+@click.option("-s", "--semester", default=None, help="Filter to a specific semester (requires tracking config).")
 @click.option("--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID.")
 @click.option("--include-assignments", is_flag=True, default=False, help="Also download assignment attachments.")
 @click.option("--assignment", "assignment_id", default=None, type=int, help="Download a specific assignment folder's attachment(s).")
@@ -199,7 +241,7 @@ def download(
 @click.option("--json", "json_output", is_flag=True, help="Output raw JSON.")
 @click.option("--force", is_flag=True, default=False, help="Wipe manifest and re-download everything.")
 @click.option("--types", default="file", help="Comma-separated content types to sync (file,html). Default: file.")
-@click.option("-s", "--semester", default=None, help="Filter to a specific semester by name or ID.")
+@click.option("-s", "--semester", default=None, help="Filter to a specific semester (requires tracking config).")
 @click.option("--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID.")
 @click.option("--include-assignments", is_flag=True, default=False, help="Also sync assignment attachments.")
 def sync(

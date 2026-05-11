@@ -19,16 +19,44 @@ from typing import Any
 
 from .api import (
     BASE_URL,
+    CONFIG_DIR,
     DEFAULT_DOWNLOAD_DIR,
     CourseNotFoundError,
     LighthouseClient,
     NetworkError,
     SessionExpiredError,
+    ensure_config_dir,
     resolve_course_id,
 )
 from .auth import cmd_auth_login as _cmd_auth_login
 from .manifest import MANIFEST_FILENAME, Manifest, ManifestCorruptError, compute_sha256
 from .utils import _sanitize_filename
+
+# ---------------------------------------------------------------------------
+# Course config (user-defined course tracking / semester mapping)
+# ---------------------------------------------------------------------------
+
+COURSE_CONFIG_FILE = CONFIG_DIR / "course-config.json"
+
+
+def _load_course_config() -> dict[str, dict[str, str]]:
+    """Load course config from disk. Returns {org_unit_id: {name, semester}}."""
+    if not COURSE_CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(COURSE_CONFIG_FILE.read_text(encoding="utf-8"))
+        return data.get("tracked_courses", {})
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_course_config(config: dict[str, dict[str, str]]) -> None:
+    """Save course config to disk atomically."""
+    ensure_config_dir()
+    payload = {"tracked_courses": config}
+    tmp = COURSE_CONFIG_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(COURSE_CONFIG_FILE)
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -359,15 +387,12 @@ def cmd_semesters(json_output: bool = False) -> int:
 def cmd_courses(
     semester: str | None = None,
     json_output: bool = False,
+    tracked_only: bool = False,
 ) -> int:
-    """List courses, optionally filtered by semester."""
+    """List courses, optionally filtered by semester or tracked status."""
     client = LighthouseClient()
     try:
-        # Use enrollments API for the full course list (30 courses)
-        # instead of mycourses widget API (only 20 courses, missing labs/Sem IV)
         all_enrollments = client.get_course_enrollments()
-        # Only fetch semesters when filtering (they rarely change)
-        semesters = client.get_semesters() if semester else []
     except SessionExpiredError as e:
         _error(str(e))
         return 1
@@ -386,111 +411,42 @@ def cmd_courses(
         for e in all_enrollments
     ]
 
-    # Build semester lookup
-    sem_map = {s["OrgUnitId"]: s.get("Name", "") for s in semesters}
+    config = _load_course_config()
 
-    # Filter by semester if given
-    if semester:
-        # Match by semester OrgUnitId or name substring
-        matching_sems: list[dict[str, Any]] = []
-        for s in semesters:
-            sname = s.get("Name", "")
-            if semester == s["OrgUnitId"] or semester.lower() == sname.lower():
-                matching_sems.append(s)
-            # Also match roman numeral or segment exactly
-            elif semester.lower().strip() in [x.strip().lower() for x in sname.split("|")]:
-                matching_sems.append(s)
+    # Tag all courses with semester from config (if available)
+    for c in courses:
+        oid = str(c.get("OrgUnitId", ""))
+        entry = config.get(oid)
+        c["semester"] = entry.get("semester", "") if entry else ""
 
-        if not matching_sems:
-            _error(f"No semester matching '{semester}'. Run: lighthouse semesters")
+    # Filter by --tracked
+    if tracked_only:
+        if not config:
+            _error("No course config found. Run: lighthouse config courses")
             return 1
+        tracked_ids = set(config.keys())
+        courses = [c for c in courses if str(c.get("OrgUnitId", "")) in tracked_ids]
 
-        # Map courses to semesters using course-code year suffix matching.
-        #
-        # Semester codes use abbreviated years ("2024-25") while course codes
-        # use full years ("2024-2025"). We normalize both to full form for matching.
-        #
-        # Ambiguity resolution for semesters sharing the same year range
-        # (e.g. Sem III and Sem IV both have year "2025-2026"):
-        #   - Sem IV courses embed "_IV_" in their code before the year suffix
-        #     e.g. "009_MAT 2223_902_IV_2025-2026"
-        #   - Sem III courses have just the year suffix, no "_IV_"
-        #     e.g. "009_COURSE 2125_2025-2026"
-
-        def _normalize_year(year_str: str) -> str:
-            """Normalize abbreviated year to full form."""
-            if "-" not in year_str:
-                if len(year_str) == 2:
-                    return "20" + year_str
-                return year_str
-            parts = year_str.split("-")
-            if len(parts) == 2 and len(parts[1]) == 2:
-                parts[1] = parts[0][:2] + parts[1]
-            return "-".join(parts)
-
-        def _extract_semester_key(sem: dict) -> tuple[str, str]:
-            """Extract (normalized_year, roman_numeral) from a semester."""
-            name = sem.get("Name", "")
-            code = sem.get("Code", "")
-            roman = ""
-            rm = re.search(r'\bSem\s+([IVX]+)\b', name, re.IGNORECASE)
-            if rm:
-                roman = rm.group(1).upper()
-            code_parts = code.split("_")
-            year_part = code_parts[-1] if code_parts else ""
-            return _normalize_year(year_part), roman
-
-        sem_keys = [(s, *_extract_semester_key(s)) for s in matching_sems]
-
-        # Check if year ranges are ambiguous across ALL semesters (not just matched ones)
-        all_sem_keys = [(s, *_extract_semester_key(s)) for s in semesters]
-        year_groups: dict[str, list[tuple]] = {}
-        for s, yr, rn in all_sem_keys:
-            year_groups.setdefault(yr, []).append((s, yr, rn))
-
-        def _course_matches_year(code: str, year: str) -> bool:
-            parts = code.rsplit("_", 1)
-            if len(parts) < 2:
-                return False
-            course_year = _normalize_year(parts[-1])
-            return course_year == year
-
-        filtered = []
-        for c in courses:
-            code = str(c.get("Code", ""))
-            for sem, yr, roman in sem_keys:
-                group = year_groups[yr]
-                if len(group) == 1:
-                    if _course_matches_year(code, yr):
-                        filtered.append(c)
-                        break
-                else:
-                    code_upper = code.upper()
-                    has_year = _course_matches_year(code, yr)
-                    if not has_year:
-                        continue
-                    if roman == "IV":
-                        if "_IV_" in code_upper:
-                            filtered.append(c)
-                            break
-                    elif roman == "III":
-                        if "_IV_" not in code_upper:
-                            filtered.append(c)
-                            break
-                    else:
-                        filtered.append(c)
-                        break
+    # Filter by --semester
+    if semester:
+        if not config:
+            _error(
+                "No course config found. Semester filtering requires course tracking.\n"
+                "Run: lighthouse config courses"
+            )
+            return 1
+        sem_lower = semester.lower().strip()
+        filtered = [
+            c for c in courses
+            if c.get("semester", "").lower().strip() == sem_lower
+        ]
+        if not filtered:
+            _error(
+                f"No tracked courses mapped to semester '{semester}'.\n"
+                "Run: lighthouse config courses --list to see your mappings."
+            )
+            return 1
         courses = filtered
-
-        # Tag matched courses with semester name
-        for c in courses:
-            c["semester"] = matching_sems[0].get("Name", "") if len(matching_sems) == 1 else sem_map.get(c.get("OrgUnitId"), "")
-    else:
-        # Tag all courses with semester when no filter
-        # (reverse-lookup: try to match course code to semester year ranges)
-        if sem_map:
-            for c in courses:
-                c["semester"] = sem_map.get(c.get("OrgUnitId"), "")
 
     if json_output:
         _output_json(courses)
@@ -506,6 +462,165 @@ def cmd_courses(
             c.get("IsActive") and "Y" or "N",
         ])
     _print_table(["ID", "Name", "Semester", "Active"], rows, title=f"Courses ({len(rows)})")
+    return 0
+
+
+def cmd_config_courses(
+    add: str | None = None,
+    remove: str | None = None,
+    semester: str | None = None,
+    list_courses: bool = False,
+    reset: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Manage course tracking and semester mapping.
+
+    Without flags, runs an interactive setup that shows all enrolled courses
+    and lets you pick which to track and assign semester labels.
+    """
+    config = _load_course_config()
+
+    # --reset: clear all tracking
+    if reset:
+        _save_course_config({})
+        print("Course tracking config cleared.")
+        return 0
+
+    # --remove ID: untrack a course
+    if remove is not None:
+        if remove not in config:
+            _error(f"Course {remove} is not in your tracked courses.")
+            return 1
+        name = config[remove].get("name", remove)
+        del config[remove]
+        _save_course_config(config)
+        print(f"Stopped tracking {name} ({remove})")
+        return 0
+
+    # --list / --json: show tracked courses
+    if list_courses or json_output:
+        if not config:
+            print("No courses tracked. Run: lighthouse config courses (without flags) to set up.")
+            return 0
+        entries = [
+            {"id": oid, "name": entry.get("name", ""), "semester": entry.get("semester", "")}
+            for oid, entry in sorted(config.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0)
+        ]
+        if json_output:
+            _output_json(entries)
+            return 0
+        rows = [[e["id"], _short(e["name"], 45), e["semester"]] for e in entries]
+        _print_table(["ID", "Name", "Semester"], rows, title=f"Tracked Courses ({len(rows)})")
+        return 0
+
+    # --add ID [--semester LABEL]: track a single course
+    if add is not None:
+        client = LighthouseClient()
+        try:
+            all_enrollments = client.get_course_enrollments()
+        except (SessionExpiredError, Exception) as e:
+            _error(str(e))
+            return 1
+
+        # Find the course in enrollments
+        match = None
+        for e in all_enrollments:
+            oid = str(e.get("OrgUnit", {}).get("Id", ""))
+            name = e.get("OrgUnit", {}).get("Name", "")
+            if oid == add or name.lower() == add.lower():
+                match = (oid, name)
+                break
+
+        if not match:
+            _error(f"Course '{add}' not found in your enrollments. Run: lighthouse courses")
+            return 1
+
+        oid, name = match
+        config[oid] = {"name": name, "semester": semester or ""}
+        _save_course_config(config)
+        sem_label = f" -> {semester}" if semester else ""
+        print(f"Tracking {name} ({oid}){sem_label}")
+        return 0
+
+    # No flags: interactive setup
+    client = LighthouseClient()
+    try:
+        all_enrollments = client.get_course_enrollments()
+    except (SessionExpiredError, Exception) as e:
+        _error(str(e))
+        return 1
+
+    courses = [
+        {
+            "OrgUnitId": str(e["OrgUnit"]["Id"]),
+            "Name": e["OrgUnit"].get("Name", ""),
+            "Code": e["OrgUnit"].get("Code", ""),
+        }
+        for e in all_enrollments
+    ]
+
+    print("\nAvailable courses (from API):")
+    rows = []
+    for c in courses:
+        oid = c["OrgUnitId"]
+        tracked = config.get(oid)
+        status = f"-> {tracked['semester']}" if tracked and tracked.get("semester") else ("tracked" if tracked else "")
+        rows.append([oid, _short(c["Name"], 40), _short(c["Code"], 35), status])
+    _print_table(["ID", "Name", "Code", "Tracked"], rows, title=f"Enrolled Courses ({len(rows)})")
+
+    print("\nSelect courses to track (comma-separated IDs, or 'all'):")
+    try:
+        selection = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return 0
+
+    if not selection:
+        print("No changes made.")
+        return 0
+
+    # Resolve IDs
+    if selection.lower() == "all":
+        selected_ids = {c["OrgUnitId"] for c in courses}
+    else:
+        selected_ids = set()
+        for part in selection.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            # Allow fuzzy name matching too
+            matched = False
+            for c in courses:
+                if part == c["OrgUnitId"] or part.lower() in c["Name"].lower():
+                    selected_ids.add(c["OrgUnitId"])
+                    matched = True
+            if not matched:
+                print(f"  Warning: '{part}' not found, skipping.")
+
+    if not selected_ids:
+        print("No valid courses selected.")
+        return 1
+
+    # Prompt for semester assignment
+    course_lookup = {c["OrgUnitId"]: c["Name"] for c in courses}
+    for oid in sorted(selected_ids, key=lambda x: int(x) if x.isdigit() else 0):
+        name = course_lookup.get(oid, oid)
+        existing = config.get(oid, {}).get("semester", "")
+        prompt = f"  Semester for {name} ({oid})"
+        if existing:
+            prompt += f" [{existing}]"
+        prompt += ": "
+        try:
+            sem = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nSaving partial changes...")
+            break
+        config[oid] = {"name": name, "semester": sem or existing}
+
+    _save_course_config(config)
+    tracked_count = len([oid for oid in selected_ids if oid in config])
+    print(f"\nUpdated tracking config: {tracked_count} course(s) updated.")
+    print("View tracked courses: lighthouse config courses --list")
     return 0
 
 
@@ -943,76 +1058,38 @@ def _filter_courses_by_semester(
 ) -> list[int]:
     """Filter enrollments to courses belonging to a specific semester.
 
-    Matches by year suffix in course code (e.g. courses ending in "2025-2026").
-    When multiple semesters share the same year (Sem III and Sem IV both
-    "2025-2026"), uses _IV_ pattern to disambiguate: Sem IV courses have
-    "_IV_" before the year in their course code.
-
-    If semester has no year in its code (e.g. "S1", "S2"), matches by
-    substring: course code must contain the semester code.
+    Uses the user's course config (course-config.json) for semester mapping.
+    Falls back to returning all course IDs when no config exists.
     """
-    sem_code = semester.get("Code", "")
+    config = _load_course_config()
+
+    if not config:
+        # No config — fall back to all enrolled courses
+        return [
+            int(e.get("OrgUnit", {}).get("Id", 0))
+            for e in enrollments
+            if int(e.get("OrgUnit", {}).get("Id", 0)) > 0
+        ]
+
+    # Match semester name against config entries
     sem_name = semester.get("Name", "")
+    sem_lower = sem_name.lower().strip()
 
-    # Extract year from semester code (last segment after _)
-    def _extract_year(code: str) -> str:
-        if "_" not in code:
-            return ""
-        year_part = code.rsplit("_", 1)[-1]
-        # Normalize abbreviated year to full form (e.g. "2025-2026")
-        if "-" in year_part:
-            y_parts = year_part.split("-")
-            if len(y_parts) == 2 and len(y_parts[1]) == 2:
-                y_parts[1] = y_parts[0][:2] + y_parts[1]
-                return "-".join(y_parts)
-        return year_part
-
-    sem_year = _extract_year(sem_code)
-
-    # Extract Roman numeral from semester name for disambiguation
-    roman = ""
-    rm = re.search(r'\bSem\s+([IVX]+)\b', sem_name, re.IGNORECASE)
-    if rm:
-        roman = rm.group(1).upper()
-
+    # Try matching on the semester label stored in config
     result_ids: list[int] = []
-
     for e in enrollments:
         oid = int(e.get("OrgUnit", {}).get("Id", 0))
         if oid <= 0:
             continue
-
-        course_code = str(e.get("OrgUnit", {}).get("Code", ""))
-
-        if sem_year:
-            # Year-based matching
-            course_year = _extract_year(course_code.upper())
-            if course_year != sem_year:
-                continue
-            # Year matches — apply Roman numeral disambiguation
-            if roman == "IV":
-                if "_IV_" in course_code.upper():
-                    result_ids.append(oid)
-            elif roman == "III":
-                if "_IV_" not in course_code.upper():
-                    result_ids.append(oid)
-            elif roman == "II":
-                # Match courses with _II_ pattern in code (Sem II)
-                if "_II_" in course_code.upper() and "_III_" not in course_code.upper() and "_IV_" not in course_code.upper():
-                    result_ids.append(oid)
-            elif roman == "I":
-                # Match courses with _I_ but not _II_ (Sem I only)
-                if "_I_" in course_code.upper() and "_II_" not in course_code.upper() and "_III_" not in course_code.upper() and "_IV_" not in course_code.upper():
-                    result_ids.append(oid)
-            else:
-                result_ids.append(oid)
-        elif not sem_code:
-            # No year in semester code and no code — include all courses
+        entry = config.get(str(oid))
+        if not entry:
+            continue
+        sem_label = entry.get("semester", "").lower().strip()
+        if not sem_label:
+            continue
+        # Exact match on semester label
+        if sem_label == sem_lower:
             result_ids.append(oid)
-        else:
-            # No year in semester code but has a code pattern — use substring matching
-            if sem_code.upper() in course_code.upper():
-                result_ids.append(oid)
 
     return result_ids
 
@@ -1187,6 +1264,10 @@ def _download_multi_course(
     sem_name = sem.get("Name", "Unknown Semester")
 
     # Filter enrollments to semester
+    config = _load_course_config()
+    if not config:
+        print("Warning: No course config found. All courses will be included.", file=sys.stderr)
+        print("Run: lighthouse config courses to set up tracking.", file=sys.stderr)
     semester_course_ids = set(_filter_courses_by_semester(enrollments, sem))
 
     # Collect --also courses
@@ -1398,6 +1479,10 @@ def _sync_multi_course(
     sem_name = sem.get("Name", "Unknown Semester")
 
     # Filter enrollments to semester
+    config = _load_course_config()
+    if not config:
+        print("Warning: No course config found. All courses will be included.", file=sys.stderr)
+        print("Run: lighthouse config courses to set up tracking.", file=sys.stderr)
     semester_course_ids = set(_filter_courses_by_semester(enrollments, sem))
 
     # Collect --also courses

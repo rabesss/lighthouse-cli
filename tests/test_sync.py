@@ -595,6 +595,7 @@ class TestSyncAllCourses:
         """No course_id → sync all courses from latest semester (VAL-SYNC-011)."""
         output_dir = tmp_path / "sync_test"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
@@ -604,6 +605,13 @@ class TestSyncAllCourses:
             {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"}},
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
+
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         toc_course_a = {
             "Modules": [{
@@ -633,7 +641,8 @@ class TestSyncAllCourses:
                 return (b"content b", "b.pdf")
             return (b"content a", "a.pdf")
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=lambda: [
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "A"},
@@ -649,7 +658,6 @@ class TestSyncAllCourses:
 
             assert result.exit_code == 0
             # Should have synced only Sem II courses (highest OrgUnitId = 200)
-            # Sem II uses year "2024-2025" with _II_ pattern matching
             # Course A (Sem I) should NOT be synced
             assert not (output_dir / "Course A-111").exists(), "Course A (Sem I) should not be synced"
             # Course B (Sem II) should be synced
@@ -667,12 +675,20 @@ class TestSyncMultiCourseWithAssignments:
         """
         output_dir = tmp_path / "sync_assignments_test"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [{"OrgUnitId": 300, "Name": "Sem III", "Code": "S3"}]
         enrollments = [
             {"OrgUnit": {"Id": 311, "Name": "Signals", "Code": "S3"}},
             {"OrgUnit": {"Id": 322, "Name": "Physics", "Code": "S3"}},
         ]
+
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "311": {"name": "Signals", "semester": "Sem III"},
+                "322": {"name": "Physics", "semester": "Sem III"},
+            }
+        }))
 
         def get_content_toc(cid):
             return {
@@ -713,7 +729,8 @@ class TestSyncMultiCourseWithAssignments:
                 return b"hw1 content", "hw1.pdf"
             return b"lab1 content", "lab1.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=lambda: [
                  {"OrgUnitId": 311, "Name": "Signals", "Code": "S3"},

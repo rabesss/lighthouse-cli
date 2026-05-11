@@ -19,6 +19,27 @@ def cli_runner() -> CliRunner:
     return CliRunner()
 
 
+def _config_for(semesters, enrollments):
+    """Build a course-config.json dict mapping course IDs to semester labels.
+
+    Uses the semester name as the label for each enrollment (matched by code prefix).
+    """
+    tracked = {}
+    for e in enrollments:
+        oid = str(e["OrgUnit"]["Id"])
+        name = e["OrgUnit"]["Name"]
+        code = e["OrgUnit"].get("Code", "")
+        # Assign semester label based on which semester's code prefix matches
+        sem_label = ""
+        for s in semesters:
+            sname = s.get("Name", "")
+            if sname:
+                sem_label = sname
+                break
+        tracked[oid] = {"name": name, "semester": sem_label}
+    return {"tracked_courses": tracked}
+
+
 # ---------------------------------------------------------------------------
 # VAL-SYNC-011 & VAL-SYNC-032: Default to latest semester (highest OrgUnitId)
 # ---------------------------------------------------------------------------
@@ -30,15 +51,13 @@ class TestLatestSemesterResolution:
         """VAL-SYNC-011 & VAL-SYNC-032: Latest semester = highest OrgUnitId, not by date or name."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Old Sem", "Code": "OLD"},
             {"OrgUnitId": 200, "Name": "Newer Sem", "Code": "NEW"},
             {"OrgUnitId": 300, "Name": "Newest Sem", "Code": "NEWEST"},
         ]
-        # Sem 300 has courses 301, 302
-        # Sem 200 has courses 201, 202
-        # Sem 100 has course 101
         enrollments = [
             {"OrgUnit": {"Id": 101, "Name": "Old Course", "Code": "OLD"}},
             {"OrgUnit": {"Id": 201, "Name": "Newer Course", "Code": "NEW"}},
@@ -46,6 +65,17 @@ class TestLatestSemesterResolution:
             {"OrgUnit": {"Id": 301, "Name": "Newest Course", "Code": "NEWEST"}},
             {"OrgUnit": {"Id": 302, "Name": "Newest Course 2", "Code": "NEWEST"}},
         ]
+
+        # Map courses to their semester names
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "101": {"name": "Old Course", "semester": "Old Sem"},
+                "201": {"name": "Newer Course", "semester": "Newer Sem"},
+                "202": {"name": "Newer Course 2", "semester": "Newer Sem"},
+                "301": {"name": "Newest Course", "semester": "Newest Sem"},
+                "302": {"name": "Newest Course 2", "semester": "Newest Sem"},
+            }
+        }))
 
         def get_content_toc(cid):
             return {
@@ -69,7 +99,8 @@ class TestLatestSemesterResolution:
                 {"OrgUnitId": 302, "Name": "Newest Course 2", "Code": "NEWEST"},
             ]
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=get_courses), \
              patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
@@ -81,7 +112,6 @@ class TestLatestSemesterResolution:
             )
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            # Should only download courses from Sem 300 (highest OrgUnitId)
             course_dirs = list(output_dir.iterdir())
             course_names = {d.name for d in course_dirs}
             assert "Newest Course-301" in course_names
@@ -93,8 +123,8 @@ class TestLatestSemesterResolution:
         """VAL-SYNC-032: Sem II (highest OrgUnitId) should be selected even if other has later date."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
-        # Both semesters share year "2025-2026" in their codes
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2025-2026", "StartDate": "2026-09-01T00:00:00Z"},
             {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2025-2026", "StartDate": "2026-01-01T00:00:00Z"},
@@ -103,6 +133,13 @@ class TestLatestSemesterResolution:
             {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"}},
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2025-2026"}},
         ]
+
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
@@ -113,7 +150,8 @@ class TestLatestSemesterResolution:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"},
@@ -128,7 +166,6 @@ class TestLatestSemesterResolution:
             )
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            # Sem II (200) should be selected (highest OrgUnitId)
             course_dirs = {d.name for d in output_dir.iterdir()}
             assert "Course B-222" in course_dirs
             assert "Course A-111" not in course_dirs
@@ -142,9 +179,10 @@ class TestSemesterFilter:
     """Test --semester filter by name substring or exact ID."""
 
     def test_semester_filter_by_name_substring(self, cli_runner, tmp_path):
-        """--semester 'Sem III' downloads courses from Sem III (case-insensitive substring match)."""
+        """--semester 'Sem III' downloads courses mapped to Sem III."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
@@ -157,6 +195,14 @@ class TestSemesterFilter:
             {"OrgUnit": {"Id": 333, "Name": "Course C", "Code": "009_CourseC_0902_III_2025-2026"}},
         ]
 
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+                "333": {"name": "Course C", "semester": "Sem III"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -166,7 +212,8 @@ class TestSemesterFilter:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
@@ -188,9 +235,10 @@ class TestSemesterFilter:
             assert "Course B-222" not in course_dirs
 
     def test_semester_filter_by_exact_orgunitid(self, cli_runner, tmp_path):
-        """--semester with numeric ID matches exact OrgUnitId."""
+        """--semester with numeric ID matches exact semester OrgUnitId, filters courses by config."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
@@ -201,6 +249,13 @@ class TestSemesterFilter:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
 
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -210,7 +265,8 @@ class TestSemesterFilter:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
@@ -370,6 +426,7 @@ class TestAlsoFlag:
         """VAL-SYNC-013: --also adds ad-hoc courses by name/ID alongside semester scope."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
@@ -381,6 +438,14 @@ class TestAlsoFlag:
             {"OrgUnit": {"Id": 333, "Name": "Signals", "Code": "S1"}},
         ]
 
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+                "333": {"name": "Signals", "semester": "Sem I"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -390,7 +455,8 @@ class TestAlsoFlag:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
@@ -417,6 +483,7 @@ class TestAlsoFlag:
         """VAL-SYNC-038: --also referencing non-existent course produces error for that course only."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
@@ -426,6 +493,13 @@ class TestAlsoFlag:
             {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "S1"}},
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
         ]
+
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
@@ -438,7 +512,8 @@ class TestAlsoFlag:
                 raise CourseNotFoundError(f"Course 99999 not found")
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
@@ -561,6 +636,7 @@ class TestSyncMultiCourseScope:
         """Sync without COURSE_ID syncs all courses from latest semester."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
@@ -571,6 +647,13 @@ class TestSyncMultiCourseScope:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
 
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -580,7 +663,8 @@ class TestSyncMultiCourseScope:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
@@ -604,6 +688,7 @@ class TestSyncMultiCourseScope:
         """Sync --semester filters to specified semester."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
+        cfg_path = tmp_path / "course-config.json"
 
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
@@ -614,6 +699,13 @@ class TestSyncMultiCourseScope:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
 
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -623,7 +715,8 @@ class TestSyncMultiCourseScope:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},

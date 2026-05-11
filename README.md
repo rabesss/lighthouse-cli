@@ -224,7 +224,7 @@ ID      Name                   Code
 
 ---
 
-### `lighthouse courses [--semester FILTER] [--json]`
+### `lighthouse courses [--semester FILTER] [--tracked] [--json]`
 
 List courses visible to the authenticated user.
 
@@ -232,43 +232,96 @@ List courses visible to the authenticated user.
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--semester` | Filter by semester name (pipe-delimited segment match) or semester OrgUnitId |
+| `-s`, `--semester` | Filter by semester label (requires course tracking config) |
+| `--tracked` | Show only tracked courses |
 | `--json` | Output raw JSON |
 
-**API calls:**
-- `GET /d2l/le/manageCourses/api/mycourses` → `{Courses: [...]}`
-- `GET /d2l/le/manageCourses/api/mysemesters` (for filter resolution)
+**API call:** `GET /d2l/api/lp/1.47/enrollments/myenrollments/` (full course list)
 
-**Semester filter:** Uses pipe-delimited matching against semester names. For
-example, `"Sem I"` matches `AY 2024-25 | Sem I` but NOT `AY 2024-25 | Sem II`
-because it checks the full pipe-delimited segment. Supported filters:
-`"Sem I"`, `"Sem II"`, `"Sem III"`, `"Sem IV"`.
-
-Because the learner role cannot access the orgstructure API (returns 403),
-course-to-semester mapping uses course-code suffix heuristics:
-
-| Semester | Course code pattern | Example |
-|----------|---------------------|---------|
-| Sem I | ends with `_24` | `ENG_101_24` |
-| Sem II | contains `_2024-2025` | `ENG_201_2024-2025` |
-| Sem III | contains `_2025-2026` | `ENG_301_2025-2026` |
-| Sem IV | contains `_2025-2026` | `ENG_401_2025-2026` |
+**Semester filtering** requires course tracking config. Run
+`lighthouse config courses` first to select which courses to track and assign
+semester labels. Without config, all enrolled courses are shown (unfiltered).
 
 **Human output:**
 ```
 Courses (6)
-ID      Name                                 Active
-------  ------------------------------------  ------
-1001    Introduction to CS                   ✔
-1002    Linear Algebra                       ✔
-1003    Physics I                            ✔
-1004    Technical Writing                    ✔
-1005    Digital Logic                        ✔
-1006    Probability & Statistics             ✔
+ID      Name                   Semester    Active
+------  ---------------------- ----------- ------
+1001    Introduction to CS     Sem IV      Y
+1002    Linear Algebra         Sem IV      Y
+1003    Physics I                          Y
+1004    Technical Writing                  Y
+1005    Digital Logic                      Y
+1006    Probability & Statistics           Y
 ```
 
 **JSON output (`--json`):** Array of course objects with `OrgUnitId`, `Name`,
-`Code`, `IsActive`, etc.
+`Code`, `IsActive`, `semester`, etc.
+
+---
+
+### `lighthouse config courses [OPTIONS]`
+
+Manage course tracking and semester mapping.
+
+**Why tracking?** Because the learner role cannot access the D2L orgstructure
+API (returns 403), there's no reliable way to automatically map courses to
+semesters. Instead, you explicitly choose which courses to track and optionally
+assign semester labels. These labels are then used by `--semester` filtering
+in `courses`, `download`, and `sync`.
+
+**Config file:** `~/.config/lighthouse-cli/course-config.json`
+
+**Interactive setup (no flags):**
+
+```
+$ lighthouse config courses
+
+Available courses (from API):
+ID    Name                    Code                    Tracked
+44347 Signals & Systems       009_BME2125_2025-2026
+36060 PSUC                    PSUC_2024-2025
+44348 Eng Math III            009_MAT2223_2025-2026
+
+Select courses to track (comma-separated IDs, or 'all'): 44347,44348
+  Semester for Signals & Systems (44347): Sem IV
+  Semester for Eng Math III (44348): Sem III
+
+Updated tracking config: 2 course(s) updated.
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--add ID` | Track a course by ID or name |
+| `--remove ID` | Stop tracking a course by ID |
+| `-s`, `--semester` | Semester label to assign (used with `--add`) |
+| `--list` | Show currently tracked courses |
+| `--reset` | Clear all course tracking config |
+| `--json` | Output tracked courses as JSON |
+
+**Examples:**
+
+```bash
+# Interactive setup
+lighthouse config courses
+
+# Track a single course with semester label
+lighthouse config courses --add 44347 --semester "Sem IV"
+
+# Track a course by name, assign later
+lighthouse config courses --add "signals"
+
+# List tracked courses
+lighthouse config courses --list
+
+# Remove a course from tracking
+lighthouse config courses --remove 44347
+
+# Clear everything
+lighthouse config courses --reset
+```
 
 ---
 
@@ -771,13 +824,11 @@ All endpoints are relative to `https://lighthouse.manipal.edu`.
 - **GradeObjectIdentifier vs GradeObjectId:** The `myGradeValues` API returns
   `GradeObjectIdentifier` (a string), not `GradeObjectId` (an int). The merge
   logic in `cmd_grades` handles this by trying both field names.
-- **Semester filtering without orgstructure access:** The learner role gets
-  403 on the orgstructure API, so there's no direct way to discover which
-  course belongs to which semester. The tool uses course-code suffix
-  heuristics (`_24`, `_2024-2025`, `_2025-2026`) instead.
-- **Pipe-delimited semester matching:** Semester names like
-  `AY 2024-25 | Sem I` are split on `|` to get individual segments. This
-  prevents `"Sem I"` from matching `"Sem II"`.
+- **Semester filtering requires course tracking config:** Because the learner
+  role gets 403 on the D2L orgstructure API, there's no automatic way to map
+  courses to semesters. Run `lighthouse config courses` to set up tracking
+  and semester labels. Without config, `--semester` flags will prompt you to
+  set it up, and `download`/`sync` will include all courses.
 - **URL-encoded filenames in downloads:** The `Content-Disposition` header
   from the file-download API contains URL-encoded filenames
   (e.g. `%20` for spaces). The `_sanitize_filename` helper URL-decodes them.
