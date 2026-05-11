@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+v/
+htmlcov/
+.coverage
+coverage.xml
+
+# Factory droid
+.factory/
+droid-wiki/
+
+# Agent handoff docs (not part of the project)
+CONTEXT.md
+HANDOFF.md
