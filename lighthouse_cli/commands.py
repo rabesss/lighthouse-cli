@@ -415,7 +415,7 @@ def cmd_courses(
         #   - Sem IV courses embed "_IV_" in their code before the year suffix
         #     e.g. "009_MAT 2223_902_IV_2025-2026"
         #   - Sem III courses have just the year suffix, no "_IV_"
-        #     e.g. "009_BME 2125_2025-2026"
+        #     e.g. "009_COURSE 2125_2025-2026"
 
         def _normalize_year(year_str: str) -> str:
             """Normalize abbreviated year to full form."""

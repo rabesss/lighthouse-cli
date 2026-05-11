@@ -314,7 +314,7 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_outpu
     Use `lighthouse assignments COURSE_ID` to discover available folders with their IDs.
 
     Example:
-      lighthouse submit 44347 789 --file solution.pdf
+      lighthouse submit "signals" "Assignment 1" --file solution.pdf
       lighthouse submit signals "Assignment 1" --file solution.pdf --yes
 
     The command prompts for confirmation before submitting (course name, folder

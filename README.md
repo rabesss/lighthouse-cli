@@ -12,7 +12,7 @@ who want quick access to their courses from the shell.
 ## Quick Start
 
 ```bash
-cd ~/Desktop/clawds-code-crib/lighthouse-cli
+cd lighthouse-cli
 pip install -e .
 
 # Authenticate (headless browser SSO with 2FA support)
@@ -26,18 +26,18 @@ lighthouse auth status
 
 # Explore
 lighthouse courses
-lighthouse content 44347
-lighthouse download 44347 --dry-run
-lighthouse grades 36060
+lighthouse content "signals"
+lighthouse download "signals" --dry-run
+lighthouse grades
 
 # Incremental sync — only download new/changed files
-lighthouse sync 44347
+lighthouse sync "signals"
 
 # Assignments
-lighthouse assignments 44347
+lighthouse assignments "signals"
 
 # Submit a file to a dropbox folder
-lighthouse submit -f my_homework.pdf 44347 5678 --yes
+lighthouse submit -f my_homework.pdf "signals" "Homework 1" --yes
 ```
 
 > **Prerequisite for `auth refresh`:** Chrome/Chromium must be running with
@@ -50,45 +50,28 @@ lighthouse submit -f my_homework.pdf 44347 5678 --yes
 
 ## Architecture
 
-```
-┌──────────────────┐    Playwright    ┌──────────────────────┐
-│  Headless        │◄────────────────►│  lighthouse auth     │
-│  Chromium        │   SSO + 2FA      │  login               │
-└──────────────────┘                  └──────────┬───────────┘
-                                                  │ cookies
-                                                  ▼
-┌──────────────┐     CDP      ┌───────────────────────┐
-│  Browser     │◄────────────►│  lighthouse auth      │
-│  (Chrome)    │   port 34165 │  refresh              │
-└──────────────┘              └──────────┬────────────┘
-                                         │ cookies
-                                         ▼
-                              ~/.config/lighthouse-cli/
-                                 cookies.json
-                                         │
-┌──────────────┐    REST      ┌──────────┴───────────┐
-│  lighthouse  │◄────────────►│  lighthouse.manipal  │
-│  CLI         │   D2L API    │  .edu (D2L)          │
-└──────┬───────┘              └──────────────────────┘
-       │
-       │  ┌─────────────────┐     ┌─────────────────────┐
-       │  │  Manifest files  │     │  CredentialStore     │
-       │  │  .manifest.json  │     │  (Fernet + keyring)  │
-       │  └─────────────────┘     └─────────────────────┘
-       │
-       │  Manifest-based sync
-       │  (incremental, dedup)
-       │
-       ▼
-  ~/Downloads/lighthouse/
-    {course-name}/
-      .manifest.json        ← SHA-256 hashes per file
-      Unit 1/
-        file1.pdf
-        file2.pdf
+```mermaid
+graph TD
+    subgraph Auth
+        A1["lighthouse auth login<br/>(Playwright headless)"]
+        A2["lighthouse auth refresh<br/>(CDP from running browser)"]
+    end
+    A1 -->|SSO + 2FA| COOKIES["~/.config/lighthouse-cli/cookies.json"]
+    A2 -->|extract cookies| COOKIES
+
+    CLI["lighthouse CLI<br/>(Click)"] -->|lazy-loads| COOKIES
+    CLI -->|REST requests| API["D2L Brightspace API<br/>LE v1.93 / LP v1.59"]
+
+    CLI --> MANIFEST[".lighthouse.json<br/>(SHA-256 manifest per course)"]
+    CLI --> DOWNLOADS["~/Downloads/lighthouse/{course-name}/"]
+
+    subgraph Security
+        CRED["CredentialStore<br/>(Fernet + keyring)"]
+    end
+    A1 -.->|optional --save-credentials| CRED
+    A1 -.->|auto-loads| CRED
 ```
 
-- **Site:** lighthouse.manipal.edu runs D2L Brightspace LMS.
 - **Auth (CDP):** Session-based cookie auth. Four cookies are needed:
   `d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
   `d2lSameSiteCanaryB`. Extracted from the browser via Chrome DevTools
@@ -104,7 +87,7 @@ lighthouse submit -f my_homework.pdf 44347 5678 --yes
   `0600`). Override with `LIGHTHOUSE_CONFIG_DIR` env var.
 - **Download directory:** `~/Downloads/lighthouse/{course-name}/`. Downloads
   create course-name subdirectories. Override with `--output-dir` / `-o`.
-- **Manifest files:** `.manifest.json` files stored in download directories
+- **Manifest files:** `.lighthouse.json` files stored in download directories
   track SHA-256 hashes of previously downloaded files for incremental sync
   and deduplication.
 - **Session lifetime:** Cookies expire (typically when the browser session
@@ -141,9 +124,9 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ---
 
-### `lighthouse auth login [--cdp-port PORT] [--timeout SECONDS]`
+### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--save-credentials] [--json]`
 
-NEW headless browser authentication using Playwright. Launches headless
+Headless browser authentication using Playwright. Launches headless
 Chromium, navigates to the SSO login page, and waits for the user to
 complete authentication (including 2FA). Extracts session cookies and
 stores them.
@@ -152,18 +135,21 @@ stores them.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--cdp-port` | — | Optional CDP port for debugging the headless browser |
-| `--timeout` | `120` | Seconds to wait for authentication to complete (accounts for 2FA) |
+| `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
+| `--pass` | — | Password for Microsoft SSO (or `LIGHTHOUSE_PASSWORD` env var) |
+| `--totp` | — | 2FA code. Use `-` to read from stdin pipe |
+| `--save-credentials` | — | Store credentials encrypted for future use |
 | `--json` | — | Machine-readable output |
 
 **Authentication flow:**
 
 1. Launches headless Chromium via Playwright
 2. Navigates to the SSO login page
-3. Opens a visible browser window for user interaction
-4. Waits for the user to complete login (including 2FA if required)
+3. Fills credentials (from flags, env vars, stored credentials, or interactive prompt)
+4. Submits 2FA code (from `--totp`, stdin pipe, or interactive prompt)
 5. Extracts D2L session cookies from the authenticated session
-6. Stores cookies using `CredentialStore` (Fernet encryption with keyring fallback)
+6. Stores cookies to `~/.config/lighthouse-cli/cookies.json`
+7. Optionally saves credentials via `CredentialStore` (Fernet encryption with keyring fallback)
 
 **Human output:**
 ```
@@ -228,8 +214,8 @@ List all semesters visible to the authenticated user.
 Semesters
 ID      Name                   Code
 ------  ---------------------  -----------------
-58272   AY 2025-2026 | Sem IV  0902_IV_2025-2026
-58271   AY 2025-2026 | Sem III 0902_III_2025-2026
+24001   AY 2025-2026 | Sem IV  SEM_IV_2025-2026
+24000   AY 2025-2026 | Sem III SEM_III_2025-2026
 ...
 ```
 
@@ -263,22 +249,22 @@ course-to-semester mapping uses course-code suffix heuristics:
 
 | Semester | Course code pattern | Example |
 |----------|---------------------|---------|
-| Sem I | ends with `_24` | `BME_101_24` |
-| Sem II | contains `_2024-2025` | `BME_201_2024-2025` |
-| Sem III | contains `_2025-2026` | `BME_301_2025-2026` |
-| Sem IV | contains `_2025-2026` | `BME_401_2025-2026` |
+| Sem I | ends with `_24` | `ENG_101_24` |
+| Sem II | contains `_2024-2025` | `ENG_201_2024-2025` |
+| Sem III | contains `_2025-2026` | `ENG_301_2025-2026` |
+| Sem IV | contains `_2025-2026` | `ENG_401_2025-2026` |
 
 **Human output:**
 ```
 Courses (6)
 ID      Name                                 Active
 ------  ------------------------------------  ------
-44347   Signals & Systems                    ✔
-44348   Engineering Mathematics III          ✔
-44349   Anatomy & Physiology                 ✔
-44350   Network Analysis                     ✔
-44351   Electronic Circuits                  ✔
-44352   Digital System Design                ✔
+1001    Introduction to CS                   ✔
+1002    Linear Algebra                       ✔
+1003    Physics I                            ✔
+1004    Technical Writing                    ✔
+1005    Digital Logic                        ✔
+1006    Probability & Statistics             ✔
 ```
 
 **JSON output (`--json`):** Array of course objects with `OrgUnitId`, `Name`,
@@ -294,7 +280,7 @@ Show the content tree (modules > submodules > topics) for a course.
 
 | Argument | Description |
 |----------|-------------|
-| `COURSE_ID` | Numeric OrgUnitId (e.g. `44347`) **or** name substring (e.g. `signals`) |
+| `COURSE_ID` | Numeric OrgUnitId (e.g. `1001`) **or** name substring (e.g. `signals`) |
 
 **Flags:** `--json`
 
@@ -306,12 +292,12 @@ code 1.
 
 **Human output:**
 ```
-📁 Unit 1 - Introduction to Signals
-  📄 L1-L2 Introduction to computing.pdf  [id:12345]
-  📄 L3 Signal Classification.pdf          [id:12346]
+📁 Unit 1 - Introduction
+  📄 L1-L2 Introduction to computing.pdf  [id:2345]
+  📄 L3 Signal Classification.pdf          [id:2346]
 📁 Unit 2 - Systems
-  📄 L4 LTI Systems.pdf                   [id:12347]
-  🔗 Reference Material                   [id:12348]
+  📄 L4 LTI Systems.pdf                   [id:2347]
+  🔗 Reference Material                   [id:2348]
 ```
 
 Icons: `📁` module, `📄` file, `🔗` link, `📎` other.
@@ -350,29 +336,29 @@ Download files from a course.
 
 Downloads preserve the module path structure from the content tree. Only
 topics with `TypeIdentifier == "File"` are downloaded (links are skipped).
-Downloads now create course-name subdirectories (e.g.
-`~/Downloads/lighthouse/Signals & Systems/` instead of
-`~/Downloads/lighthouse/44347/`).
+Downloads create course-name subdirectories (e.g.
+`~/Downloads/lighthouse/Introduction to CS/` instead of
+`~/Downloads/lighthouse/1001/`).
 
 **Human output (single file):**
 ```
-Downloaded: ~/Downloads/lighthouse/Signals & Systems/Unit 1/L1-L2 Introduction.pdf (245.3 KB)
+Downloaded: ~/Downloads/lighthouse/Introduction to CS/Unit 1/L1-L2 Introduction.pdf (245.3 KB)
 ```
 
 **Human output (all files, `--dry-run`):**
 ```
-Would download 12 files to ~/Downloads/lighthouse/Signals & Systems/
+Would download 12 files to ~/Downloads/lighthouse/Introduction to CS/
 
-  [12345] L1-L2 Introduction to computing.pdf
-  [12346] L3 Signal Classification.pdf
-  [12347] L4 LTI Systems.pdf
+  [2345] L1-L2 Introduction to computing.pdf
+  [2346] L3 Signal Classification.pdf
+  [2347] L4 LTI Systems.pdf
   ...
 ```
 
 **JSON output (`--json`, `--dry-run`):**
 ```json
 [
-  {"topic_id": 12345, "title": "L1-L2 Introduction to computing.pdf", "path": "Unit 1/L1-L2 Introduction to computing.pdf"},
+  {"topic_id": 2345, "title": "L1-L2 Introduction to computing.pdf", "path": "Unit 1/L1-L2 Introduction to computing.pdf"},
   ...
 ]
 ```
@@ -380,7 +366,7 @@ Would download 12 files to ~/Downloads/lighthouse/Signals & Systems/
 **JSON output (`--json`, single file download):**
 ```json
 {
-  "path": "/home/user/Downloads/lighthouse/Signals & Systems/L1-L2 Introduction.pdf",
+  "path": "/home/user/Downloads/lighthouse/Introduction to CS/L1-L2 Introduction.pdf",
   "size_kb": 245.3,
   "filename": "L1-L2 Introduction.pdf"
 }
@@ -412,7 +398,7 @@ manifest-based tracking with SHA-256 dedup.
 
 **How it works:**
 
-1. Loads the manifest file (`.manifest.json`) from the download directory
+1. Loads the manifest file (`.lighthouse.json`) from the download directory
 2. Fetches the current content tree from the API
 3. Computes SHA-256 hashes for each file in the tree
 4. Compares against manifest — only downloads files that are new or have
@@ -420,15 +406,17 @@ manifest-based tracking with SHA-256 dedup.
 5. Updates the manifest with current file hashes
 6. Reports orphaned topics (files in manifest but no longer in content tree)
 
-**Manifest files:** Stored as `.manifest.json` in the download directory.
-Contains a mapping of file paths to their SHA-256 hashes:
+**Manifest files:** Stored as `.lighthouse.json` in the download directory.
+Contains a mapping of topic IDs to their SHA-256 hashes:
 
 ```json
 {
-  "Unit 1/L1-L2 Introduction.pdf": {
+  "1234": {
     "sha256": "a1b2c3d4...",
-    "topic_id": 12345,
-    "last_synced": "2025-05-10T14:30:00Z"
+    "filename": "L1-L2 Introduction.pdf",
+    "size": 250880,
+    "downloaded_at": "2025-05-10T14:30:00Z",
+    "last_modified": "2025-05-09T08:00:00Z"
   }
 }
 ```
@@ -440,7 +428,7 @@ Contains a mapping of file paths to their SHA-256 hashes:
 
 **Human output:**
 ```
-Syncing Signals & Systems...
+Syncing Introduction to CS...
   New:      3 files
   Updated:  1 file
   Unchanged: 8 files
@@ -451,7 +439,7 @@ Syncing Signals & Systems...
 **JSON output (`--json`):**
 ```json
 {
-  "course_id": 44347,
+  "course_id": 1001,
   "new": 3,
   "updated": 1,
   "unchanged": 8,
@@ -483,21 +471,21 @@ pagination automatically)
 
 **Human output:**
 ```
-Assignments – Signals & Systems
+Assignments – Introduction to CS
 ID    Name                          Due Date            Status
 ----  ----------------------------  ------------------  --------
-5678  Homework 1                    2025-05-15 23:59    Open
-5679  Lab Report 2                  2025-05-20 23:59    Open
-5680  Final Project                 2025-06-01 23:59    Closed
+101   Homework 1                    2025-05-15 23:59    Open
+102   Lab Report 2                  2025-05-20 23:59    Open
+103   Final Project                 2025-06-01 23:59    Closed
 ```
 
 **JSON output (`--json`):**
 ```json
 {
-  "course_id": 44347,
+  "course_id": 1001,
   "assignments": [
     {
-      "Id": 5678,
+      "Id": 101,
       "Name": "Homework 1",
       "DueDate": "2025-05-15T23:59:00Z",
       "Availability": {
@@ -534,7 +522,7 @@ values API matched against `Id` from the schema API. Shows
 
 **Human output:**
 ```
-Grades – PSUC
+Grades – Technical Writing
 Item                    Grade    Weight  Type
 ----------------------  -------  ------  --------
 CAT 1                   18/20    15%     Points
@@ -545,7 +533,7 @@ Midterm                 –/50     25%     Points
 **JSON output (`--json`):**
 ```json
 {
-  "course_id": 36060,
+  "course_id": 1004,
   "grades": [
     {"name": "CAT 1", "grade": "18/20", "weight": "15%", "type": "Points"},
     {"name": "Assignment 1", "grade": "9/10", "weight": "10%", "type": "Points"},
@@ -595,16 +583,16 @@ Submit a file to a D2L dropbox folder.
 
 **Human output:**
 ```
-Submit homework.pdf to "Homework 1" in Signals & Systems? [y/N]: y
-Submitted successfully. Submission ID: 12345
+Submit homework.pdf to "Homework 1" in Introduction to CS? [y/N]: y
+Submitted successfully. Submission ID: 5001
 ```
 
 **JSON output (`--json`):**
 ```json
 {
-  "submission_id": 12345,
-  "folder_id": 5678,
-  "course_id": 44347,
+  "submission_id": 5001,
+  "folder_id": 101,
+  "course_id": 1001,
   "file": "homework.pdf",
   "submitted_at": "2025-05-10T15:30:00Z"
 }
@@ -629,20 +617,20 @@ courses (courses with no announcements are skipped silently).
 
 **Human output:**
 ```
-📢 Signals & Systems
-  [2025-05-08 14:30] Midsem schedule update
-    The midsem examination for Signals & Systems has been rescheduled...
+📢 Introduction to CS
+  [2025-05-08 14:30] Midterm schedule update
+    The midterm examination has been rescheduled...
     📎 updated_schedule.pdf (156 KB)
 ```
 
 **JSON output (`--json`):**
 ```json
 {
-  "course_id": 44347,
+  "course_id": 1001,
   "announcements": [
     {
       "Id": 9999,
-      "Title": "Midsem schedule update",
+      "Title": "Midterm schedule update",
       "Body": {"Text": "...", "Html": "..."},
       "CreatedDate": "2025-05-08T14:30:00Z",
       "Attachments": [...]
@@ -669,24 +657,24 @@ Show calendar events. If `COURSE_ID` is omitted, shows events for all courses.
 
 **Human output:**
 ```
-Calendar – Signals & Systems
+Calendar – Introduction to CS
 Date              Title                        Course
 ----------------  ---------------------------- ----------------------
-2025-05-15 10:00  Midsem Examination           Signals & Systems
-2025-05-20 23:59  Assignment 3 Deadline        Signals & Systems
+2025-05-15 10:00  Midterm Examination           Introduction to CS
+2025-05-20 23:59  Assignment 3 Deadline         Introduction to CS
 ```
 
 **JSON output (`--json`):**
 ```json
 {
-  "course_id": 44347,
+  "course_id": 1001,
   "events": [
     {
       "CalendarEventId": "...",
-      "Title": "Midsem Examination",
+      "Title": "Midterm Examination",
       "StartDateTime": "2025-05-15T10:00:00Z",
       "EndDateTime": "2025-05-15T12:00:00Z",
-      "OrgUnitName": "Signals & Systems"
+      "OrgUnitName": "Introduction to CS"
     }
   ]
 }
@@ -711,27 +699,46 @@ automatically — follows `Next` links until exhausted)
 
 **Human output:**
 ```
-Quizzes – Signals & Systems
+Quizzes – Introduction to CS
 ID    Name                          Start               End
 ----  ----------------------------  ------------------  ------------------
-101   Quiz 1 - Signal Basics        2025-05-10 10:00    2025-05-10 10:30
-102   Quiz 2 - Fourier Transform    2025-05-17 10:00    2025-05-17 10:30
+201   Quiz 1 - Basics              2025-05-10 10:00    2025-05-10 10:30
+202   Quiz 2 - Advanced Topics     2025-05-17 10:00    2025-05-17 10:30
 ```
 
 **JSON output (`--json`):**
 ```json
 {
-  "course_id": 44347,
+  "course_id": 1001,
   "quizzes": [
     {
-      "QuizId": 101,
-      "Name": "Quiz 1 - Signal Basics",
+      "QuizId": 201,
+      "Name": "Quiz 1 - Basics",
       "StartDate": "2025-05-10T10:00:00Z",
       "EndDate": "2025-05-10T10:30:00Z"
     }
   ]
 }
 ```
+
+---
+
+### `lighthouse quiz COURSE_ID QUIZ_ID [--json]`
+
+Show detailed info for a specific quiz (settings, time limits, attempt rules, dates).
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `COURSE_ID` | Yes | Numeric OrgUnitId or name substring |
+| `QUIZ_ID` | Yes | Numeric quiz ID |
+
+**Flags:** `--json`
+
+**API call:** `GET /d2l/api/le/1.93/{orgId}/quizzes/{quizId}`
+
+Note: quiz questions and past attempts return 403 for learner role. Only quiz metadata is accessible via the API.
 
 ## API Endpoints
 
@@ -743,7 +750,7 @@ All endpoints are relative to `https://lighthouse.manipal.edu`.
 | Semesters | GET | `/d2l/le/manageCourses/api/mysemesters` | |
 | Departments | GET | `/d2l/le/manageCourses/api/mydepartments` | |
 | Roles | GET | `/d2l/le/manageCourses/api/myroles` | |
-| Courses | GET | `/d2l/le/manageCourses/api/mycourses` | Returns `{Courses: [...]}` |
+| Courses (enrollments) | GET | `/d2l/api/lp/1.47/enrollments/myenrollments/` | Full course list (paginated) |
 | Content TOC | GET | `/d2l/api/le/1.93/{orgId}/content/toc` | Nested Modules/Topics |
 | Topic details | GET | `/d2l/api/le/1.93/{orgId}/content/topics/{topicId}` | Returns topic details including HTML content |
 | File download | GET | `/d2l/api/le/1.93/{orgId}/content/topics/{topicId}/file` | Binary response with `Content-Disposition` |
@@ -755,58 +762,6 @@ All endpoints are relative to `https://lighthouse.manipal.edu`.
 | My grades | GET | `/d2l/api/le/1.93/{orgId}/grades/values/myGradeValues/` | Returns `GradeObjectIdentifier` (string) |
 | Quizzes | GET | `/d2l/api/le/1.93/{orgId}/quizzes/` | Paginated: `{Objects: [...], Next: url\|null}` |
 | Calendar | GET | `/d2l/api/le/1.93/{orgId}/calendar/events/` | |
-
-## Course Map
-
-Current student — BME (Biomedical Engineering), MIT Manipal:
-
-**Sem I (AY 2024-25)**
-
-| OrgUnitId | Course |
-|-----------|--------|
-| 29728 | Mechanics of Solids |
-| 29731 | Basic Electronics |
-| 29733 | Communication Skills |
-| 29734 | Engineering Mathematics I |
-| 29735 | Basic Mechanical Engineering |
-| 29736 | Engineering Physics |
-
-**Sem II (AY 2024-25)**
-
-| OrgUnitId | Course |
-|-----------|--------|
-| 36040 | Engineering Mathematics II |
-| 36059 | Biology |
-| 36060 | PSUC |
-| 36061 | Environmental Studies |
-| 36062 | Engineering Chemistry |
-| 363 | Basic Electrical Technology |
-| 36064 | Basic Electronics |
-| 36067 | Engineering Physics |
-
-**Sem III (AY 2025-26)**
-
-| OrgUnitId | Course |
-|-----------|--------|
-| 44347 | Signals & Systems |
-| 44348 | Engineering Mathematics III |
-| 44349 | Anatomy & Physiology |
-| 44350 | Network Analysis |
-| 44351 | Electronic Circuits |
-| 44352 | Digital System Design |
-
-**Sem IV (AY 2025-26)**
-
-| OrgUnitId | Course |
-|-----------|--------|
-| 58273 | Engineering Mathematics IV |
-| 58274 | Clinical Sciences |
-| 58275 | Biomedical Instrumentation |
-| 58276 | Biomechanics |
-| 58277 | Digital Signal Processing |
-| 58278 | Microcontrollers |
-| 59514 | Signal Processing Lab |
-| 59515 | Microcontroller Lab |
 
 ## Gotchas & Notes
 
@@ -833,7 +788,7 @@ Current student — BME (Biomedical Engineering), MIT Manipal:
   `COURSE_ID`, it performs case-insensitive substring matching against course
   names. If exactly one match, it proceeds. If ambiguous, it lists all
   matches and exits with code 1.
-- **Manifest corruption:** If a `.manifest.json` file becomes corrupted, the
+- **Manifest corruption:** If a `.lighthouse.json` file becomes corrupted, the
   sync command will warn and treat all files as new. Delete the manifest to
   force a full re-sync.
 - **Orphaned topics:** Files that appear in the manifest but are no longer in
@@ -866,49 +821,49 @@ programmatically. Here's the recommended workflow:
 
 3. Always use --json for structured output
    $ lighthouse courses --json
-   $ lighthouse content 44347 --json
-   $ lighthouse grades 36060 --json
+   $ lighthouse content "signals" --json
+   $ lighthouse grades --json
 
 4. Course IDs can be numeric or fuzzy name substrings
-   $ lighthouse content signals --json
-   # resolves "signals" -> OrgUnitId 44347
+   $ lighthouse content "signals" --json
+   # resolves "signals" -> OrgUnitId (from courses API)
 
 5. Preview downloads before committing
-   $ lighthouse download 44347 --dry-run --json
+   $ lighthouse download "signals" --dry-run --json
    # returns [{topic_id, title, path}, ...]
 
 6. Download specific files
-   $ lighthouse download 44347 12345 --json
+   $ lighthouse download "signals" 2345 --json
    # returns {path, size_kb, filename}
 
 7. Download all files from a course
-   $ lighthouse download 44347
-   # saves to ~/Downloads/lighthouse/Signals & Systems/
+   $ lighthouse download "signals"
+   # saves to ~/Downloads/lighthouse/{course-name}/
 
 8. Download including assignment attachments
-   $ lighthouse download 44347 --include-assignments --json
+   $ lighthouse download "signals" --include-assignments --json
 
 9. Filter downloads by file type
-   $ lighthouse download 44347 --types pdf,docx --json
+   $ lighthouse download "signals" --types pdf,docx --json
 
 10. Incremental sync — only download new/changed files
-    $ lighthouse sync 44347 --json
+    $ lighthouse sync "signals" --json
     # returns {new, updated, unchanged, orphaned, downloaded_bytes}
 
 11. Sync multiple courses at once
-    $ lighthouse sync 44347 --also 44348 --also 44349 --json
+    $ lighthouse sync "signals" --also "math" --also "physics" --json
 
 12. Check assignments for a course
-    $ lighthouse assignments 44347 --json
+    $ lighthouse assignments "signals" --json
     # returns [{Id, Name, DueDate, Availability}, ...]
 
 13. Submit a file to a dropbox folder
-    $ lighthouse submit -f homework.pdf 44347 5678 --yes --json
+    $ lighthouse submit -f homework.pdf "signals" "Homework 1" --yes --json
     # returns {submission_id, folder_id, course_id, file, submitted_at}
 
 14. Resolve folder ID by name
-    $ lighthouse submit -f report.pdf 44347 "Homework 1" --yes --json
-    # resolves "Homework 1" -> folder ID 5678
+    $ lighthouse submit -f report.pdf "signals" "Lab Report" --yes --json
+    # resolves "Lab Report" -> folder ID
 ```
 
 **Tips for agents:**
@@ -920,9 +875,7 @@ programmatically. Here's the recommended workflow:
   filter locally.
 - The `content` command's JSON output contains the full nested module tree
   with `TopicId` values needed for targeted downloads.
-- Use `sync` instead of `download` for repeated interactions — it's
-  bandwidth-efficient and tracks changes via manifests.
-- Manifest files (`.manifest.json`) enable deduplication: re-running sync
+- Manifest files (`.lighthouse.json`) enable deduplication: re-running sync
   skips unchanged files and only downloads new/modified ones.
 - Orphaned topics in sync output indicate files that were removed from the
   LMS content tree but still exist locally.
@@ -974,7 +927,7 @@ lighthouse-cli/
   auth (including 2FA), extracts session cookies.
 - `CredentialStore` (auth.py) — Secure credential storage using Fernet
   symmetric encryption with OS keyring fallback.
-- `Manifest` (manifest.py) — Manages `.manifest.json` files in download
+- `Manifest` (manifest.py) — Manages `.lighthouse.json` files in download
   directories. Tracks file paths with SHA-256 hashes. Supports atomic writes
   to prevent corruption.
 - `_sanitize_filename()` (utils.py) — URL-decodes and sanitizes filenames
