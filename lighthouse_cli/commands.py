@@ -55,8 +55,15 @@ def _save_course_config(config: dict[str, dict[str, str]]) -> None:
     ensure_config_dir()
     payload = {"tracked_courses": config}
     tmp = COURSE_CONFIG_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(COURSE_CONFIG_FILE)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(COURSE_CONFIG_FILE)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -1055,13 +1062,20 @@ def _resolve_also_course(
 def _filter_courses_by_semester(
     enrollments: list[dict[str, Any]],
     semester: dict[str, Any],
+    semester_filter: str | None = None,
+    config: dict[str, dict[str, str]] | None = None,
 ) -> list[int]:
     """Filter enrollments to courses belonging to a specific semester.
 
     Uses the user's course config (course-config.json) for semester mapping.
     Falls back to returning all course IDs when no config exists.
+
+    When semester_filter is provided, matches it directly against the user's
+    config labels (e.g. "Sem IV"). When None (latest semester), uses
+    substring matching of the API semester Name against config labels.
     """
-    config = _load_course_config()
+    if config is None:
+        config = _load_course_config()
 
     if not config:
         # No config — fall back to all enrolled courses
@@ -1071,11 +1085,25 @@ def _filter_courses_by_semester(
             if int(e.get("OrgUnit", {}).get("Id", 0)) > 0
         ]
 
-    # Match semester name against config entries
-    sem_name = semester.get("Name", "")
-    sem_lower = sem_name.lower().strip()
+    # Determine the target semester label to match against config entries
+    if semester_filter:
+        filter_lower = semester_filter.lower().strip()
+        # If the filter is a numeric OrgUnitId, the resolved semester's Name
+        # is the authoritative source — use substring matching against config
+        # labels (same as the no-filter path).
+        try:
+            int(semester_filter)
+            # Numeric filter — use resolved semester Name
+            target_lower = None
+        except ValueError:
+            # Text filter — compare directly against config labels
+            target_lower = filter_lower
+    else:
+        # No filter (latest semester) — use the API semester Name for
+        # substring matching against config labels, so "AY 2024-25 | Sem II"
+        # matches a config label of "Sem II".
+        target_lower = None
 
-    # Try matching on the semester label stored in config
     result_ids: list[int] = []
     for e in enrollments:
         oid = int(e.get("OrgUnit", {}).get("Id", 0))
@@ -1087,9 +1115,19 @@ def _filter_courses_by_semester(
         sem_label = entry.get("semester", "").lower().strip()
         if not sem_label:
             continue
-        # Exact match on semester label
-        if sem_label == sem_lower:
-            result_ids.append(oid)
+        if target_lower is not None:
+            # Exact match on config label vs user-provided text filter
+            if sem_label == target_lower:
+                result_ids.append(oid)
+        else:
+            # Substring: check if config label matches a pipe-delimited
+            # segment of the API semester Name. This handles cases like
+            # "AY 2024-25 | Sem II" matching config label "Sem II" while
+            # avoiding "Sem I" matching "Sem II".
+            sem_name_lower = semester.get("Name", "").lower().strip()
+            segments = [s.strip() for s in sem_name_lower.split("|")]
+            if sem_label in segments:
+                result_ids.append(oid)
 
     return result_ids
 
@@ -1268,7 +1306,9 @@ def _download_multi_course(
     if not config:
         print("Warning: No course config found. All courses will be included.", file=sys.stderr)
         print("Run: lighthouse config courses to set up tracking.", file=sys.stderr)
-    semester_course_ids = set(_filter_courses_by_semester(enrollments, sem))
+    semester_course_ids = set(_filter_courses_by_semester(
+        enrollments, sem, semester_filter=semester_filter, config=config or None,
+    ))
 
     # Collect --also courses
     also_ids: list[int] = []
@@ -1483,7 +1523,9 @@ def _sync_multi_course(
     if not config:
         print("Warning: No course config found. All courses will be included.", file=sys.stderr)
         print("Run: lighthouse config courses to set up tracking.", file=sys.stderr)
-    semester_course_ids = set(_filter_courses_by_semester(enrollments, sem))
+    semester_course_ids = set(_filter_courses_by_semester(
+        enrollments, sem, semester_filter=semester_filter, config=config or None,
+    ))
 
     # Collect --also courses
     also_ids: list[int] = []
