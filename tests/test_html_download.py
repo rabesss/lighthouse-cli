@@ -10,8 +10,7 @@ The key fix verified here: `api.py:get_topic_html` now calls `_sanitize_filename
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner

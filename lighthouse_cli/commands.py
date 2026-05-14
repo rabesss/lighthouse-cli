@@ -8,27 +8,26 @@ both human-readable (rich tables / plain text) and --json mode.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
-import urllib.parse
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .api import (
-    BASE_URL,
-    CONFIG_DIR,
-    DEFAULT_DOWNLOAD_DIR,
     CourseNotFoundError,
     LighthouseClient,
-    NetworkError,
     SessionExpiredError,
-    ensure_config_dir,
     resolve_course_id,
 )
-from .auth import cmd_auth_login as _cmd_auth_login
+from .config import BASE_URL, CONFIG_DIR, DEFAULT_DOWNLOAD_DIR, ensure_config_dir
+
+# ---------------------------------------------------------------------------
+# Auth commands
+# ---------------------------------------------------------------------------
+
 from .manifest import MANIFEST_FILENAME, Manifest, ManifestCorruptError, compute_sha256
 from .utils import _sanitize_filename
 
@@ -129,6 +128,65 @@ def _error(msg: str) -> None:
     print(f"Error: {msg}", file=sys.stderr)
 
 
+def _download_and_persist_topic(
+    client: LighthouseClient,
+    org_id: int,
+    topic: dict,
+    dest: Path,
+    manifest: Manifest,
+) -> tuple[bytes, str, Path]:
+    """Download a single topic and write it to disk, updating the manifest.
+
+    Returns (content, sanitized_name, filepath) on success.
+    Raises on failure so callers can decide error handling.
+    """
+    tid = str(topic["topic_id"])
+    topic_type = topic.get("type", "").lower()
+    if topic_type == "html":
+        content, sanitized_name = client.get_topic_html(org_id, int(tid))
+    else:
+        content, filename = client.download_topic_file(org_id, int(tid))
+        sanitized_name = _sanitize_filename(filename)
+    rel_path = Path(topic["path"]).parent
+    file_dest = dest / rel_path
+    file_dest.mkdir(parents=True, exist_ok=True)
+    filepath = file_dest / sanitized_name
+    filepath.write_bytes(content)
+    last_mod = topic.get("last_modified") or ""
+    manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=last_mod)
+    return content, sanitized_name, filepath
+
+
+def _parse_type_filter(types: str) -> set[str]:
+    """Parse a comma-separated content-type filter string into a validated set.
+
+    Accepts "file", "html", or comma-separated combos. Unknown types
+    produce a warning and are dropped. Returns ``{"file"}`` when nothing
+    valid remains.
+    """
+    type_set = {t.strip().lower() for t in types.split(",")}
+    valid = {"file", "html"}
+    unknown = type_set - valid
+    for u in sorted(unknown):
+        _error(f"Unknown content type: {u}")
+    type_set = (type_set & valid) or {"file"}
+    return type_set
+
+
+def _filter_topics_by_type(
+    modules: list[dict], type_set: set[str]
+) -> list[dict]:
+    """Flatten topic tree and keep only topics matching *type_set*.
+
+    Returns a list of topic dicts whose ``type`` (lowercased) is present
+    in *type_set* (e.g. ``{"file"}`` or ``{"file", "html"}``).
+    """
+    all_topics = _flatten_all_topics(modules)
+    return [
+        t for t in all_topics if t.get("type", "").lower() in type_set
+    ]
+
+
 def _short(text: str, max_len: int = 50) -> str:
     """Truncate text with ellipsis."""
     if len(text) <= max_len:
@@ -159,10 +217,10 @@ def _utc_now_iso() -> str:
 def _for_course_or_all(
     client: LighthouseClient,
     course_id: str | None,
-    single_fn,
+    single_fn: Callable[..., int | dict],
     json_output: bool,
     collection_key: str,
-):
+) -> int:
     """Run single_fn for one course or all courses.
 
     In --json mode, collects all results into a single JSON array (fixes
@@ -174,9 +232,9 @@ def _for_course_or_all(
     Args:
         client: LighthouseClient instance.
         course_id: Course identifier (name/ID) or None for all courses.
-        single_fn: callable(client, org_id, json_output, title=) -> dict | None
-            Must return a dict (the JSON payload) when json_output=True,
-            or an int exit-code when json_output=False.
+        single_fn: callable(client, org_id, json_output, title=) -> int | dict
+            Returns an int exit code when json_output=False,
+            or a dict (the JSON payload) when json_output=True.
         json_output: Whether --json was passed.
         collection_key: Key name for the per-course payload (e.g. "grades",
             "announcements", "events", "quizzes").
@@ -208,8 +266,8 @@ def _for_course_or_all(
                     payload = future.result()
                     if payload is not None:
                         results.append(payload)
-                except Exception:
-                    pass  # skip courses with errors
+                except Exception as e:
+                    print(f"Warning: skipping course: {e}", file=sys.stderr)
         # Sort by course_id for deterministic output
         results.sort(key=lambda r: r.get("course_id", 0))
         _output_json(results)
@@ -217,25 +275,19 @@ def _for_course_or_all(
     else:
         # Parallel fetch, then sequential display (preserves readable order)
         with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = {
-                pool.submit(single_fn, client, int(c["OrgUnitId"]), False, title=c.get("Name", "")): c
-                for c in courses
-            }
-            # Collect results in submission order for readable output
-            ordered = []
+            future_to_id: dict[Any, int] = {}
             for c in courses:
                 oid = int(c["OrgUnitId"])
-                name = c.get("Name", "")
-                # Find the matching future
-                for f, fc in futures.items():
-                    if int(fc["OrgUnitId"]) == oid:
-                        try:
-                            r = f.result()
-                            if r:
-                                rc = r
-                        except Exception:
-                            pass
-                        break
+                f = pool.submit(single_fn, client, oid, False, title=c.get("Name", ""))
+                future_to_id[f] = oid
+            for f in as_completed(future_to_id):
+                oid = future_to_id[f]
+                try:
+                    r = f.result()
+                    if r:
+                        rc = r
+                except Exception as e:
+                    print(f"Warning: course {oid} failed: {e}", file=sys.stderr)
         return rc
 
 
@@ -342,37 +394,6 @@ def cmd_auth_refresh(cdp_port: int | None = None, json_output: bool = False) -> 
         return 1
 
 
-def cmd_auth_login(
-    username: str | None = None,
-    password: str | None = None,
-    totp: str | None = None,
-    totp_stdin: bool = False,
-    save_credentials: bool = False,
-    json_output: bool = False,
-) -> int:
-    """Headless browser login via Microsoft SSO with 2FA.
-
-    Supports flexible credential input:
-    - --user/--pass flags (highest priority)
-    - LIGHTHOUSE_USERNAME/PASSWORD env vars
-    - Stored encrypted credentials (from --save-credentials on previous run)
-    - Interactive prompts (if TTY)
-
-    Supports flexible 2FA input:
-    - --totp <code> flag
-    - --totp - (read from stdin pipe)
-    - Interactive prompt (if TTY)
-    """
-    return _cmd_auth_login(
-        username=username,
-        password=password,
-        totp_code=totp,
-        totp_stdin=totp_stdin,
-        save_credentials=save_credentials,
-        json_output=json_output,
-    )
-
-
 def cmd_semesters(json_output: bool = False) -> int:
     """List all semesters."""
     client = LighthouseClient()
@@ -466,7 +487,7 @@ def cmd_courses(
             str(c.get("OrgUnitId", "")),
             _short(c.get("Name", ""), 40),
             sem_col,
-            c.get("IsActive") and "Y" or "N",
+            "Y" if c.get("IsActive") else "N",
         ])
     _print_table(["ID", "Name", "Semester", "Active"], rows, title=f"Courses ({len(rows)})")
     return 0
@@ -802,15 +823,7 @@ def _sync_single_course(
         _error(str(e))
         return 1
 
-    type_set = {t.strip().lower() for t in types.split(",")}
-    valid_types = {"file", "html"}
-    invalid_types = type_set - valid_types
-    if invalid_types:
-        for it in invalid_types:
-            _error(f"Unknown content type: {it}")
-        type_set = type_set & valid_types
-    if not type_set:
-        type_set = {"file"}
+    type_set = _parse_type_filter(types)
 
     folder_name = _resolve_course_folder_name(course_name, org_id)
     dest = root / folder_name
@@ -827,14 +840,7 @@ def _sync_single_course(
     except Exception:
         manifest = Manifest()
 
-    all_topics = _flatten_all_topics(toc.get("Modules", []))
-    downloadable = []
-    for t in all_topics:
-        type_id = t.get("type", "").lower()
-        if type_id == "file" and "file" in type_set:
-            downloadable.append(t)
-        elif type_id == "html" and "html" in type_set:
-            downloadable.append(t)
+    downloadable = _filter_topics_by_type(toc.get("Modules", []), type_set)
 
     if not downloadable and not include_assignments:
         if json_output:
@@ -866,18 +872,7 @@ def _sync_single_course(
                 continue
             # Changed — re-download
             try:
-                topic_type = topic.get("type", "").lower()
-                if topic_type == "html":
-                    content, sanitized_name = client.get_topic_html(org_id, int(tid))
-                else:
-                    content, filename = client.download_topic_file(org_id, int(tid))
-                    sanitized_name = _sanitize_filename(filename)
-                rel_path = Path(topic["path"]).parent
-                file_dest = dest / rel_path
-                file_dest.mkdir(parents=True, exist_ok=True)
-                filepath = file_dest / sanitized_name
-                filepath.write_bytes(content)
-                manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=last_mod)
+                content, sanitized_name, filepath = _download_and_persist_topic(client, org_id, topic, dest, manifest)
                 updated_entries.append({"topic_id": tid, "filename": sanitized_name, "path": str(filepath.relative_to(dest)), "size_kb": round(len(content) / 1024, 1), "sha256": manifest.get(tid).get("sha256", "")})
             except Exception as e:
                 errors.append({"topic_id": tid, "error": str(e)})
@@ -885,18 +880,7 @@ def _sync_single_course(
 
         # New topic
         try:
-            topic_type = topic.get("type", "").lower()
-            if topic_type == "html":
-                content, sanitized_name = client.get_topic_html(org_id, int(tid))
-            else:
-                content, filename = client.download_topic_file(org_id, int(tid))
-                sanitized_name = _sanitize_filename(filename)
-            rel_path = Path(topic["path"]).parent
-            file_dest = dest / rel_path
-            file_dest.mkdir(parents=True, exist_ok=True)
-            filepath = file_dest / sanitized_name
-            filepath.write_bytes(content)
-            manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=last_mod)
+            content, sanitized_name, filepath = _download_and_persist_topic(client, org_id, topic, dest, manifest)
             downloaded_entries.append({"topic_id": tid, "filename": sanitized_name, "path": str(filepath.relative_to(dest)), "size_kb": round(len(content) / 1024, 1), "sha256": manifest.get(tid).get("sha256", "")})
         except Exception as e:
             errors.append({"topic_id": tid, "error": str(e)})
@@ -1154,24 +1138,9 @@ def _download_single_course(
         _error(str(e))
         return 1
 
-    type_set = {t.strip().lower() for t in types.split(",")}
-    valid_types = {"file", "html"}
-    invalid_types = type_set - valid_types
-    if invalid_types:
-        for it in invalid_types:
-            _error(f"Unknown content type: {it}")
-        type_set = type_set & valid_types
-    if not type_set:
-        type_set = {"file"}
+    type_set = _parse_type_filter(types)
 
-    all_topics = _flatten_all_topics(toc.get("Modules", []))
-    downloadable = []
-    for t in all_topics:
-        type_id = t.get("type", "").lower()
-        if type_id == "file" and "file" in type_set:
-            downloadable.append(t)
-        elif type_id == "html" and "html" in type_set:
-            downloadable.append(t)
+    downloadable = _filter_topics_by_type(toc.get("Modules", []), type_set)
 
     if not downloadable and not include_assignments:
         if json_output:
@@ -1206,20 +1175,8 @@ def _download_single_course(
     errors = []
     for i, topic in enumerate(downloadable, 1):
         tid = topic["topic_id"]
-        topic_type = topic.get("type", "").lower()
         try:
-            if topic_type == "html":
-                content, sanitized_name = client.get_topic_html(org_id, tid)
-            else:
-                content, filename = client.download_topic_file(org_id, tid)
-                sanitized_name = _sanitize_filename(filename)
-            rel_path = Path(topic["path"]).parent
-            file_dest = dest / rel_path
-            file_dest.mkdir(parents=True, exist_ok=True)
-            filepath = file_dest / sanitized_name
-            filepath.write_bytes(content)
-            last_mod = topic.get("last_modified") or ""
-            manifest.add_entry(str(tid), content=content, filename=sanitized_name, last_modified=last_mod)
+            content, sanitized_name, filepath = _download_and_persist_topic(client, org_id, topic, dest, manifest)
             downloaded.append({"topic_id": tid, "filename": sanitized_name, "size": len(content), "path": str(filepath.relative_to(dest))})
             if not json_output:
                 print(f"  [{i}/{len(downloadable)}] {filepath.relative_to(dest)} ({len(content)/1024:.0f} KB)")
@@ -1253,9 +1210,7 @@ def _download_single_course(
         _output_json(result_data)
         return 0  # JSON was already output
     else:
-        total_content = len(downloaded)
         total_assign = len(assignments_downloaded)
-        total = total_content + total_assign
         if total_assign > 0:
             print(f"\nAssignments: {total_assign} attachment(s) downloaded")
         print(f"\nDone: {len(downloaded)}/{len(downloadable)} files downloaded to {dest}")
@@ -1346,18 +1301,9 @@ def _download_multi_course(
                 rc = 1
                 continue
 
-            type_set = {t.strip().lower() for t in types.split(",")}
-            valid_types = {"file", "html"}
-            type_set = (type_set & valid_types) or {"file"}
+            type_set = _parse_type_filter(types)
 
-            all_topics = _flatten_all_topics(toc.get("Modules", []))
-            downloadable = []
-            for t in all_topics:
-                type_id = t.get("type", "").lower()
-                if type_id == "file" and "file" in type_set:
-                    downloadable.append(t)
-                elif type_id == "html" and "html" in type_set:
-                    downloadable.append(t)
+            downloadable = _filter_topics_by_type(toc.get("Modules", []), type_set)
 
             folder_name = _resolve_course_folder_name(cname, cid)
             dest = root / folder_name
@@ -1388,21 +1334,9 @@ def _download_multi_course(
             sha_hashes: dict[str, list[dict]] = {}
             for topic in downloadable:
                 tid = topic["topic_id"]
-                topic_type = topic.get("type", "").lower()
                 try:
-                    if topic_type == "html":
-                        content, sanitized_name = client.get_topic_html(cid, tid)
-                    else:
-                        content, filename = client.download_topic_file(cid, tid)
-                        sanitized_name = _sanitize_filename(filename)
-                    rel_path = Path(topic["path"]).parent
-                    file_dest = dest / rel_path
-                    file_dest.mkdir(parents=True, exist_ok=True)
-                    filepath = file_dest / sanitized_name
-                    filepath.write_bytes(content)
-                    last_mod = topic.get("last_modified") or ""
+                    content, sanitized_name, filepath = _download_and_persist_topic(client, cid, topic, dest, manifest)
                     file_hash = compute_sha256(content)
-                    manifest.add_entry(str(tid), content=content, filename=sanitized_name, last_modified=last_mod)
                     sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": sanitized_name})
                     downloaded.append({
                         "topic_id": tid,
@@ -1563,18 +1497,9 @@ def _sync_multi_course(
                 rc = 1
                 continue
 
-            type_set = {t.strip().lower() for t in types.split(",")}
-            valid_types = {"file", "html"}
-            type_set = (type_set & valid_types) or {"file"}
+            type_set = _parse_type_filter(types)
 
-            all_topics = _flatten_all_topics(toc.get("Modules", []))
-            downloadable = []
-            for t in all_topics:
-                type_id = t.get("type", "").lower()
-                if type_id == "file" and "file" in type_set:
-                    downloadable.append(t)
-                elif type_id == "html" and "html" in type_set:
-                    downloadable.append(t)
+            downloadable = _filter_topics_by_type(toc.get("Modules", []), type_set)
 
             folder_name = _resolve_course_folder_name(cname, cid)
             dest = root / folder_name
@@ -1615,19 +1540,8 @@ def _sync_multi_course(
                             sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": existing.get("filename", "")})
                         continue
                     try:
-                        topic_type = topic.get("type", "").lower()
-                        if topic_type == "html":
-                            content, sanitized_name = client.get_topic_html(cid, int(tid))
-                        else:
-                            content, filename = client.download_topic_file(cid, int(tid))
-                            sanitized_name = _sanitize_filename(filename)
-                        rel_path = Path(topic["path"]).parent
-                        file_dest = dest / rel_path
-                        file_dest.mkdir(parents=True, exist_ok=True)
-                        filepath = file_dest / sanitized_name
-                        filepath.write_bytes(content)
+                        content, sanitized_name, filepath = _download_and_persist_topic(client, cid, topic, dest, manifest)
                         file_hash = compute_sha256(content)
-                        manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=last_mod)
                         sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": sanitized_name})
                         updated_entries.append({
                             "topic_id": tid,
@@ -1642,19 +1556,8 @@ def _sync_multi_course(
                     continue
 
                 try:
-                    topic_type = topic.get("type", "").lower()
-                    if topic_type == "html":
-                        content, sanitized_name = client.get_topic_html(cid, int(tid))
-                    else:
-                        content, filename = client.download_topic_file(cid, int(tid))
-                        sanitized_name = _sanitize_filename(filename)
-                    rel_path = Path(topic["path"]).parent
-                    file_dest = dest / rel_path
-                    file_dest.mkdir(parents=True, exist_ok=True)
-                    filepath = file_dest / sanitized_name
-                    filepath.write_bytes(content)
+                    content, sanitized_name, filepath = _download_and_persist_topic(client, cid, topic, dest, manifest)
                     file_hash = compute_sha256(content)
-                    manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=last_mod)
                     sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": sanitized_name})
                     downloaded_entries.append({
                         "topic_id": tid,
@@ -2113,7 +2016,8 @@ def _show_announcements(
     except SessionExpiredError as e:
         _error(str(e))
         return 1
-    except Exception:
+    except Exception as e:
+        print(f"Warning: failed to fetch announcements: {e}", file=sys.stderr)
         if json_output:
             return {"course_id": org_id, "announcements": []}
         return 0
@@ -2168,7 +2072,8 @@ def _show_calendar(
     except SessionExpiredError as e:
         _error(str(e))
         return 1
-    except Exception:
+    except Exception as e:
+        print(f"Warning: failed to fetch calendar: {e}", file=sys.stderr)
         if json_output:
             return {"course_id": org_id, "events": []}
         return 0
@@ -2231,7 +2136,8 @@ def _show_course_assignments(
     except SessionExpiredError as e:
         _error(str(e))
         return 1
-    except Exception:
+    except Exception as e:
+        print(f"Warning: failed to fetch assignments: {e}", file=sys.stderr)
         if json_output:
             return {"course_id": org_id, "assignments": []}
         return 0
@@ -2302,13 +2208,6 @@ def _show_course_assignments(
     for a in assignments:
         due = _fmt_date(a["due_date"])
         count = a["attachment_count"]
-        avail_note = ""
-        if a["availability"]:
-            avail = a["availability"]
-            if avail.get("start"):
-                avail_note = f" (opens {_fmt_date(avail['start'])})"
-            elif avail.get("end"):
-                avail_note = f" (closed {_fmt_date(avail['end'])})"
         name = _short(a["name"], 40)
         rows.append([str(a["folder_id"]), name, due, str(count)])
     _print_table(["ID", "Name", "Due Date", "Attachments"], rows)
@@ -2331,6 +2230,22 @@ def _show_course_assignments(
 
 
 def cmd_quizzes(
+    course_id: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Show quizzes for a course or all courses."""
+    client = LighthouseClient()
+    try:
+        return _for_course_or_all(client, course_id, _show_course_quizzes, json_output, "quizzes")
+    except (SessionExpiredError, CourseNotFoundError) as e:
+        _error(str(e))
+        return 1
+    except Exception as e:
+        _error(str(e))
+        return 1
+
+
+def _show_course_quizzes(
     client: LighthouseClient,
     org_id: int,
     json_output: bool,
@@ -2342,7 +2257,8 @@ def cmd_quizzes(
     except SessionExpiredError as e:
         _error(str(e))
         return 1
-    except Exception:
+    except Exception as e:
+        print(f"Warning: failed to fetch quizzes: {e}", file=sys.stderr)
         if json_output:
             return {"course_id": org_id, "quizzes": []}
         return 0
@@ -2638,10 +2554,4 @@ def _resolve_course_folder_name(course_name: str, org_unit_id: int) -> str:
     return f"{base}-{org_unit_id}"
 
 
-def _resolve_course_folder_name_sanitized(course_name: str, org_unit_id: int) -> str:
-    """Resolve the course folder name without disambiguation suffix.
 
-    Two courses with the same Name get disambiguated by appending -OrgUnitId.
-    This version returns the folder name without the suffix (for parent dir).
-    """
-    return _sanitize_filename(course_name)

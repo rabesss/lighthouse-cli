@@ -12,8 +12,13 @@ license = {text = "MIT"}
 dependencies = [
     "click>=8.1",
     "requests>=2.31",
-    "rich>=13.0",
+    "playwright>=1.40",
+    "keyring>=24.0",
+    "cryptography>=41.0",
 ]
+
+[project.optional-dependencies]
+rich = ["rich>=13.0"]
 
 [project.scripts]
 lighthouse = "lighthouse_cli.cli:cli"

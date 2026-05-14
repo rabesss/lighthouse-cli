@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -93,7 +91,7 @@ def test_corrupted_credentials_fallback(
     credentials_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Corrupted credentials.json falls back to prompt (returns None)."""
+    """Corrupted credentials.json raises CredentialStoreError."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
     # Write garbage
@@ -102,9 +100,8 @@ def test_corrupted_credentials_fallback(
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "")
 
     store = CredentialStore()
-    loaded = store.load()
-    # Should return None for corrupted file
-    assert loaded is None
+    with pytest.raises(CredentialStoreError):
+        store.load()
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +124,8 @@ def test_encryption_key_change_graceful(
     # by patching keyring to raise an exception
     with patch("keyring.get_password", side_effect=Exception("Keyring unavailable")):
         store2 = CredentialStore()
-        loaded = store2.load()
-        assert loaded is None
+        with pytest.raises(CredentialStoreError):
+            store2.load()
 
 
 # ---------------------------------------------------------------------------

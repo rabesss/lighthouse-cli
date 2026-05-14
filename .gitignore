@@ -27,3 +27,6 @@ droid-wiki/
 # Agent handoff docs (not part of the project)
 CONTEXT.md
 HANDOFF.md
+
+# Desloppify local state
+.desloppify/

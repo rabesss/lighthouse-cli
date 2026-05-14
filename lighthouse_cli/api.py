@@ -1,42 +1,24 @@
-"""HTTP client, authentication, and configuration for lighthouse-cli.
+"""HTTP client and authentication for lighthouse-cli.
 
-Handles cookie-based session auth against D2L Brightspace APIs,
-config directory management, and all low-level HTTP interactions.
+Handles cookie-based session auth against D2L Brightspace APIs
+and all low-level HTTP interactions.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
-import sys
 import time
-import urllib.parse
-from pathlib import Path
 from typing import Any
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-BASE_URL = "https://lighthouse.manipal.edu"
-API_LE = f"{BASE_URL}/d2l/api/le/1.93"
-API_LP = f"{BASE_URL}/d2l/api/lp/1.59"
-
-# Cookie names we care about
-COOKIE_NAMES = (
-    "d2lSameSiteCanaryA",
-    "d2lSameSiteCanaryB",
-    "d2lSecureSessionVal",
-    "d2lSessionVal",
+from .config import (
+    API_LE,
+    BASE_URL,
+    load_cookies,
+    save_cookies,
 )
-
-# Paths
-CONFIG_DIR = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
-COOKIE_FILE = CONFIG_DIR / "cookies.json"
-DEFAULT_DOWNLOAD_DIR = Path("~/Downloads/lighthouse").expanduser()
 
 # CDP port for browser-harness
 DEFAULT_CDP_PORT = 34165
@@ -56,48 +38,6 @@ class NetworkError(Exception):
 
 class CourseNotFoundError(Exception):
     """Raised when a requested org-unit-id is not in the user's course list."""
-
-
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
-
-def ensure_config_dir() -> Path:
-    """Create the config directory if it doesn't exist with 0700 permissions."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        CONFIG_DIR.chmod(0o700)
-    except OSError:
-        pass
-    return CONFIG_DIR
-
-
-def load_cookies() -> dict[str, str]:
-    """Load cookies from disk. Returns empty dict if file is missing."""
-    if not COOKIE_FILE.exists():
-        return {}
-    try:
-        data = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
-        return {k: v for k, v in data.items() if k in COOKIE_NAMES}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_cookies(cookies: dict[str, str]) -> None:
-    """Persist cookies to disk atomically (temp file + rename)."""
-    ensure_config_dir()
-    # Atomic write: write to temp file, then rename to avoid corruption
-    tmp_file = COOKIE_FILE.with_suffix(".tmp")
-    try:
-        tmp_file.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
-        # Restrict permissions since these are session secrets
-        tmp_file.chmod(0o600)
-        tmp_file.replace(COOKIE_FILE)
-    except OSError:
-        # Clean up temp file on failure
-        if tmp_file.exists():
-            tmp_file.unlink()
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +76,15 @@ class LighthouseClient:
     _MAX_RETRIES = 3
     _RETRY_BACKOFF = 2  # base seconds for exponential backoff
 
-    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    def _request(self, method: str, url: str, _skip_raise: bool = False, **kwargs: Any) -> requests.Response:
         """Make an authenticated request with rate-limit retry.
 
         Retries on HTTP 429 (Too Many Requests) with exponential backoff,
         respecting the Retry-After header when present.
+
+        Args:
+            _skip_raise: If True, skip raise_for_status() and return the raw
+                response. Caller handles error status codes.
         """
         cookies = self.cookies
         if not cookies:
@@ -148,7 +92,6 @@ class LighthouseClient:
                 "No cookies found. Run: lighthouse auth refresh"
             )
 
-        last_exc: Exception | None = None
         for attempt in range(self._MAX_RETRIES + 1):
             resp = self._session.request(
                 method,
@@ -179,14 +122,14 @@ class LighthouseClient:
                 time.sleep(wait)
                 continue
 
-            resp.raise_for_status()
+            if not _skip_raise:
+                resp.raise_for_status()
             return resp
 
-        # Should not reach here, but just in case
-        if last_exc:
-            raise last_exc
-        resp.raise_for_status()
-        return resp  # type: ignore[unreachable]
+        # All retries exhausted
+        raise NetworkError(
+            f"Request failed after {self._MAX_RETRIES + 1} attempts: {url}"
+        )
 
     def get(self, path: str, **kwargs: Any) -> requests.Response:
         """GET request with full URL construction from path."""
@@ -215,7 +158,6 @@ class LighthouseClient:
         """
         url: str | None = path
         all_items: list[dict[str, Any]] = []
-        first = True
         while url:
             data = self.get_json(url)
             # Handle plain array responses (no pagination wrapper)
@@ -223,11 +165,6 @@ class LighthouseClient:
                 return data
             all_items.extend(data.get(items_key, []))
             url = data.get("Next")
-            if first and url is None:
-                # Single-page response — if items_key is "Objects" but it's empty,
-                # the endpoint might use a different key or return plain array.
-                # Return what we have.
-                first = False
         return all_items
 
     def get_raw(self, path: str, **kwargs: Any) -> tuple[bytes, dict[str, str]]:
@@ -420,28 +357,20 @@ class LighthouseClient:
         body_stream = io.BytesIO(body_bytes + file_bytes + footer)
 
         url = f"{API_LE}/{org_unit_id}/dropbox/folders/{folder_id}/submissions/mysubmissions/"
-        headers = {
-            "Content-Type": f"multipart/mixed; boundary={boundary}",
-            "Content-Length": str(len(body_bytes) + len(file_bytes) + len(footer)),
-        }
-        resp = self._session.request(
-            "POST",
-            url,
-            cookies=self.cookies,
-            data=body_stream.getvalue(),
-            headers=headers,
-            timeout=60,
-        )
+        try:
+            resp = self._request(
+                "POST",
+                url,
+                data=body_stream.getvalue(),
+                headers={
+                    "Content-Type": f"multipart/mixed; boundary={boundary}",
+                    "Content-Length": str(len(body_bytes) + len(file_bytes) + len(footer)),
+                },
+                _skip_raise=True,
+            )
+        except (SessionExpiredError, NetworkError):
+            raise
 
-        # D2L redirects to login page when session is dead
-        if resp.status_code in (301, 302, 303, 307, 308):
-            raise SessionExpiredError(
-                "Session expired. Run: lighthouse auth refresh"
-            )
-        if resp.status_code == 401:
-            raise SessionExpiredError(
-                "Session expired. Run: lighthouse auth refresh"
-            )
         if resp.status_code == 403:
             raise PermissionError(
                 f"Permission denied to submit to folder {folder_id}. "
@@ -453,7 +382,6 @@ class LighthouseClient:
                 "Run: lighthouse assignments"
             )
         if resp.status_code == 500:
-            # Parse D2L error from JSON body
             try:
                 err_data = resp.json()
                 detail = err_data.get("detail", err_data.get("message", str(err_data)))
@@ -541,13 +469,10 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
     try:
         return _refresh_via_cdp_websocket(port)
     except Exception as exc:
-        print(
-            f"Failed to extract cookies from browser: {exc}\n"
-            "Make sure Chrome/Chromium is running with --remote-debugging-port="
-            f"{port}",
-            file=sys.stderr,
+        raise NetworkError(
+            f"Failed to extract cookies from browser: {exc}. "
+            f"Make sure Chrome/Chromium is running with --remote-debugging-port={port}"
         )
-        sys.exit(1)
 
 
 def _refresh_via_browser_harness(port: int) -> dict[str, str]:
@@ -578,7 +503,6 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
 
 def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
     """Direct CDP cookie extraction using websocket-client (or raw http)."""
-    import subprocess
     import urllib.request
 
     # Get browser websocket URL

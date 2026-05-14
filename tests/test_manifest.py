@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 from lighthouse_cli.manifest import (
     Manifest,
     ManifestCorruptError,
-    ManifestValidationError,
     REQUIRED_ENTRY_KEYS,
     compute_sha256,
     MANIFEST_FILENAME,

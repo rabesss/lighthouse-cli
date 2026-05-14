@@ -8,8 +8,6 @@ Provides reusable fixtures for:
 
 from __future__ import annotations
 
-import json
-import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -18,7 +16,6 @@ import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
-from lighthouse_cli.cli import cli
 
 
 # ---------------------------------------------------------------------------

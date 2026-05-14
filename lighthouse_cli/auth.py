@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,13 +21,8 @@ from playwright.sync_api import sync_playwright
 SyncPlaywright = sync_playwright
 
 # Config directory and cookie file paths
-from .api import (
-    CONFIG_DIR,
-    COOKIE_FILE,
-    LighthouseClient,
-    ensure_config_dir,
-    save_cookies,
-)
+from .config import CONFIG_DIR, ensure_config_dir, save_cookies
+from .api import LighthouseClient
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -440,7 +434,10 @@ class CredentialStore:
 
         Returns:
             Tuple of (username, password) if credentials exist and decrypt successfully.
-            None if credentials file doesn't exist, is corrupted, or keyring is unavailable.
+            None if credentials file doesn't exist.
+
+        Raises:
+            CredentialStoreError: If the file exists but is corrupted or keyring is unavailable.
         """
         if not self.credentials_file.exists():
             return None
@@ -451,9 +448,14 @@ class CredentialStore:
             decrypted = fernet.decrypt(encrypted)
             data = json.loads(decrypted.decode("utf-8"))
             return data.get("username", ""), data.get("password", "")
-        except Exception:
-            # Corrupted file or keyring unavailable
-            return None
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CredentialStoreError(
+                f"Credentials file is corrupted: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise CredentialStoreError(
+                f"Failed to load credentials: {exc}"
+            ) from exc
 
     def exists(self) -> bool:
         """Check if stored credentials exist."""
@@ -463,37 +465,6 @@ class CredentialStore:
 # ---------------------------------------------------------------------------
 # Interactive credential helpers
 # ---------------------------------------------------------------------------
-
-def _prompt_for_credentials(
-    require_user: bool = True,
-    require_pass: bool = True,
-) -> tuple[str, str]:
-    """Prompt interactively for username and password.
-
-    Uses getpass for masked password input.
-    """
-    import getpass
-
-    if require_user:
-        username = input("Username (email): ").strip()
-    else:
-        username = ""
-
-    if require_pass:
-        password = getpass.getpass("Password: ").strip()
-    else:
-        password = ""
-
-    return username, password
-
-
-def _prompt_for_totp() -> str:
-    """Prompt interactively for 2FA code."""
-    import getpass
-    code = getpass.getpass("Enter 2FA code: ").strip()
-    if not code:
-        raise AuthenticationError("2FA code cannot be empty")
-    return code
 
 
 def _is_interactive() -> bool:
@@ -550,7 +521,10 @@ def cmd_auth_login(
         # Try stored credentials if no credentials found
         if not username or not password:
             store = CredentialStore()
-            stored = store.load()
+            try:
+                stored = store.load()
+            except CredentialStoreError:
+                stored = None
             if stored:
                 if not username:
                     username = stored[0]
@@ -625,7 +599,6 @@ def cmd_auth_login(
         save_cookies(cookies)
 
         # --- Verify session ---
-        from .api import LighthouseClient
         client = LighthouseClient()
         if not client.check_auth():
             if json_output:
