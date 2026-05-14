@@ -13,7 +13,6 @@ import click
 from . import __version__
 from .commands import (
     cmd_announcements,
-    cmd_auth_login,
     cmd_auth_refresh,
     cmd_auth_status,
     cmd_calendar,
@@ -29,6 +28,7 @@ from .commands import (
     cmd_assignments,
     cmd_submit,
 )
+from .auth import cmd_auth_login
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
     raise SystemExit(cmd_auth_login(
         username=username,
         password=password,
-        totp=totp,
+        totp_code=totp,
         totp_stdin=(totp == "-"),
         save_credentials=save_credentials,
         json_output=json_output,

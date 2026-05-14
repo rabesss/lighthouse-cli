@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 from click.testing import CliRunner
 
 from lighthouse_cli.cli import cli
@@ -14,7 +12,6 @@ from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.commands import (
     _load_course_config,
     _save_course_config,
-    COURSE_CONFIG_FILE,
 )
 
 

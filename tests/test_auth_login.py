@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -134,7 +133,7 @@ def test_credentials_via_flags_skip_prompt(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -180,7 +179,7 @@ def test_credentials_via_env_vars(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -221,7 +220,7 @@ def test_flags_take_precedence_over_env_vars(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -269,7 +268,7 @@ def test_totp_flag_submits_code(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -311,7 +310,7 @@ def test_totp_stdin_pipe(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -447,7 +446,7 @@ def test_cookies_saved_to_file(
     mock_authenticator.authenticate.return_value = cookies
 
     with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-        with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.check_auth.return_value = True
             mock_client.cookies = cookies
@@ -494,7 +493,7 @@ def test_post_login_session_verification(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -537,7 +536,7 @@ def test_auth_status_works_after_login(
     api_module.COOKIE_FILE = cookies_path
 
     with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
-        with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls2:
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls2:
             mock_client = MagicMock()
             mock_client.check_auth.return_value = True
             mock_client.cookies = cookies
@@ -737,13 +736,16 @@ def test_concurrent_auth_no_corruption(
         "d2lSameSiteCanaryB": "canaryB2",
     }
 
-    # Use api.save_cookies directly
+    # Use config.save_cookies directly
+    import lighthouse_cli.config as config_module
     import lighthouse_cli.api as api_module
     import threading
 
-    # Point api module's CONFIG_DIR to our tmp config_dir
+    # Point config module's CONFIG_DIR to our tmp config_dir
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    # Force re-read of env var by patching the global
+    # Force re-read of env var by patching the globals
+    config_module.CONFIG_DIR = config_dir
+    config_module.COOKIE_FILE = config_dir / "cookies.json"
     api_module.CONFIG_DIR = config_dir
     api_module.COOKIE_FILE = config_dir / "cookies.json"
 
@@ -751,7 +753,7 @@ def test_concurrent_auth_no_corruption(
 
     def write(value: dict) -> None:
         try:
-            api_module.save_cookies(value)
+            config_module.save_cookies(value)
         except Exception as e:
             errors.append(e)
 
@@ -786,8 +788,11 @@ def test_config_directory_auto_created(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    # Point api module's CONFIG_DIR to our tmp config_dir
+    # Point config/api modules' CONFIG_DIR to our tmp config_dir
     import lighthouse_cli.api as api_module
+    import lighthouse_cli.config as config_module
+    config_module.CONFIG_DIR = config_dir
+    config_module.COOKIE_FILE = config_dir / "cookies.json"
     api_module.CONFIG_DIR = config_dir
     api_module.COOKIE_FILE = config_dir / "cookies.json"
 
@@ -802,7 +807,7 @@ def test_config_directory_auto_created(
     mock_authenticator.authenticate.return_value = cookies
 
     with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-        with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.check_auth.return_value = True
             mock_client.cookies = cookies
@@ -847,7 +852,7 @@ def test_json_output_success(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -1072,7 +1077,7 @@ def test_password_not_logged(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -1140,7 +1145,7 @@ def test_exit_code_success(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -1365,7 +1370,7 @@ def test_interactive_totp_prompt_cmd_passes_none(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = True
                 mock_client.cookies = cookies
@@ -1420,7 +1425,7 @@ def test_stored_credentials_loaded_on_subsequent_run(
 
         with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
             with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-                with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+                with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                     mock_client = MagicMock()
                     mock_client.check_auth.return_value = True
                     mock_client.cookies = cookies
@@ -1470,7 +1475,7 @@ def test_auth_commands_compatible_with_login_cookies(
 
     # Verify auth status works
     with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
-        with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls2:
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls2:
             mock_client = MagicMock()
             mock_client.check_auth.return_value = True
             mock_client.cookies = cookies
@@ -1510,7 +1515,7 @@ def test_cookies_saved_even_if_verification_fails(
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.api.LighthouseClient") as mock_client_cls:
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
                 mock_client = MagicMock()
                 mock_client.check_auth.return_value = False  # Verification FAILS
                 mock_client.cookies = cookies

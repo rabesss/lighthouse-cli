@@ -27,16 +27,13 @@ Covers:
 from __future__ import annotations
 
 import json as json_module
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, ANY
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
-from lighthouse_cli.commands import cmd_submit
 
 
 # ---------------------------------------------------------------------------
