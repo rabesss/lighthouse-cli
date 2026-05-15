@@ -142,7 +142,7 @@ def _download_and_persist_topic(
     """
     tid = topic.get("topic_id")
     if tid is None:
-        raise ValueError(f"Topic missing 'TopicId': {topic.get('title', 'unknown')}")
+        raise ValueError(f"Topic missing 'topic_id': {topic.get('title', 'unknown')}")
     tid = str(tid)
     topic_type = topic.get("type", "").lower()
     if topic_type == "html":
