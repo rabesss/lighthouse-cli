@@ -76,7 +76,7 @@ class LighthouseClient:
     _MAX_RETRIES = 3
     _RETRY_BACKOFF = 2  # base seconds for exponential backoff
 
-    def _request(self, method: str, url: str, _skip_raise: bool = False, **kwargs: Any) -> requests.Response:
+    def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, **kwargs: Any) -> requests.Response:
         """Make an authenticated request with rate-limit retry.
 
         Retries on HTTP 429 (Too Many Requests) with exponential backoff,
@@ -85,6 +85,7 @@ class LighthouseClient:
         Args:
             _skip_raise: If True, skip raise_for_status() and return the raw
                 response. Caller handles error status codes.
+            _timeout: Request timeout in seconds (default 30).
         """
         cookies = self.cookies
         if not cookies:
@@ -98,7 +99,7 @@ class LighthouseClient:
                 url,
                 cookies=cookies,
                 allow_redirects=False,
-                timeout=30,
+                timeout=_timeout,
                 **kwargs,
             )
 
@@ -367,9 +368,16 @@ class LighthouseClient:
                     "Content-Length": str(len(body_bytes) + len(file_bytes) + len(footer)),
                 },
                 _skip_raise=True,
+                _timeout=60,
             )
         except (SessionExpiredError, NetworkError):
             raise
+
+        # D2L redirects to login page when session is dead
+        if resp.status_code in (301, 302, 303, 307, 308):
+            raise SessionExpiredError(
+                "Session expired. Run: lighthouse auth refresh"
+            )
 
         if resp.status_code == 403:
             raise PermissionError(

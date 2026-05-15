@@ -140,7 +140,10 @@ def _download_and_persist_topic(
     Returns (content, sanitized_name, filepath) on success.
     Raises on failure so callers can decide error handling.
     """
-    tid = str(topic["topic_id"])
+    tid = topic.get("topic_id")
+    if tid is None:
+        raise ValueError(f"Topic missing 'TopicId': {topic.get('title', 'unknown')}")
+    tid = str(tid)
     topic_type = topic.get("type", "").lower()
     if topic_type == "html":
         content, sanitized_name = client.get_topic_html(org_id, int(tid))
@@ -273,7 +276,7 @@ def _for_course_or_all(
         _output_json(results)
         return rc
     else:
-        # Parallel fetch, then sequential display (preserves readable order)
+        # Parallel fetch -- courses complete and print in non-deterministic order
         with ThreadPoolExecutor(max_workers=5) as pool:
             future_to_id: dict[Any, int] = {}
             for c in courses:
