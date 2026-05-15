@@ -30,3 +30,8 @@ HANDOFF.md
 
 # Desloppify local state
 .desloppify/
+# Agent/tool local state (not part of the project)
+.agents/
+.omc/
+skills-lock.json
+scorecard.png
