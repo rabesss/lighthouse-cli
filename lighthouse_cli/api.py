@@ -10,15 +10,12 @@ import json
 import os
 import time
 from typing import Any
+from contextlib import suppress
 
 import requests
 
-from .config import (
-    API_LE,
-    BASE_URL,
-    load_cookies,
-    save_cookies,
-)
+from .config import API_LE, BASE_URL, load_cookies, save_cookies
+from .utils import _sanitize_filename
 
 # CDP port for browser-harness
 DEFAULT_CDP_PORT = 34165
@@ -87,11 +84,8 @@ class LighthouseClient:
                 response. Caller handles error status codes.
             _timeout: Request timeout in seconds (default 30).
         """
-        cookies = self.cookies
-        if not cookies:
-            raise SessionExpiredError(
-                "No cookies found. Run: lighthouse auth refresh"
-            )
+        if not (cookies := self.cookies):
+            raise SessionExpiredError("No cookies found. Run: lighthouse auth refresh")
 
         for attempt in range(self._MAX_RETRIES + 1):
             resp = self._session.request(
@@ -105,8 +99,8 @@ class LighthouseClient:
 
             # D2L redirects to login page when session is dead
             if resp.status_code in (301, 302, 303, 307, 308):
-                location = resp.headers.get("Location", "")
-                if "login" in location.lower() or "auth" in location.lower():
+                location = resp.headers.get("Location", "").lower()
+                if "login" in location or "auth" in location:
                     raise SessionExpiredError(
                         "Session expired. Run: lighthouse auth refresh"
                     )
@@ -118,9 +112,7 @@ class LighthouseClient:
 
             # Rate-limit: retry with backoff
             if resp.status_code == 429 and attempt < self._MAX_RETRIES:
-                retry_after = float(resp.headers.get("Retry-After", self._RETRY_BACKOFF))
-                wait = retry_after * (2 ** attempt)
-                time.sleep(wait)
+                time.sleep(float(resp.headers.get("Retry-After", self._RETRY_BACKOFF)) * (2 ** attempt))
                 continue
 
             if not _skip_raise:
@@ -134,13 +126,7 @@ class LighthouseClient:
 
     def get(self, path: str, **kwargs: Any) -> requests.Response:
         """GET request with full URL construction from path."""
-        if path.startswith("http"):
-            url = path
-        elif path.startswith("/d2l/"):
-            url = f"{BASE_URL}{path}"
-        else:
-            url = f"{API_LE}{path}"
-        return self._request("GET", url, **kwargs)
+        return self._request("GET", path if path.startswith("http") else f"{BASE_URL}{path}" if path.startswith("/d2l/") else f"{API_LE}{path}", **kwargs)
 
     def get_json(self, path: str, **kwargs: Any) -> Any:
         """GET request returning parsed JSON."""
@@ -195,10 +181,7 @@ class LighthouseClient:
 
     def get_courses(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mycourses – returns the Courses list (cached)."""
-        def _fetch():
-            data = self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/mycourses")
-            return data.get("Courses", [])
-        return self._cached("courses", _fetch)
+        return self._cached("courses", lambda: self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/mycourses").get("Courses", []))
 
     def get_content_toc(self, org_unit_id: int) -> dict[str, Any]:
         """GET content table-of-contents for a course."""
@@ -235,13 +218,7 @@ class LighthouseClient:
 
     def get_course_enrollments(self) -> list[dict[str, Any]]:
         """GET enrollments filtered to Course Offering type only (cached)."""
-        def _fetch():
-            all_enrollments = self.get_enrollments()
-            return [
-                e for e in all_enrollments
-                if e.get("OrgUnit", {}).get("Type", {}).get("Code") == "Course Offering"
-            ]
-        return self._cached("course_enrollments", _fetch)
+        return self._cached("course_enrollments", lambda: [e for e in self.get_enrollments() if e.get("OrgUnit", {}).get("Type", {}).get("Code") == "Course Offering"])
 
     def get_quiz_detail(self, org_unit_id: int, quiz_id: int) -> dict[str, Any]:
         """GET full details for a specific quiz."""
@@ -251,32 +228,23 @@ class LighthouseClient:
         """GET calendar events for a course (handles pagination)."""
         return self._paginate_list(f"/{org_unit_id}/calendar/events/", "Objects")
 
-    def download_topic_file(
-        self, org_unit_id: int, topic_id: int
-    ) -> tuple[bytes, str]:
+    def download_topic_file(self, org_unit_id: int, topic_id: int) -> tuple[bytes, str]:
         """Download a content topic file. Returns (bytes, filename)."""
-        path = f"/{org_unit_id}/content/topics/{topic_id}/file"
-        content, headers = self.get_raw(path)
-        filename = _extract_filename(headers) or f"topic_{topic_id}"
-        return content, filename
+        content, headers = self.get_raw(f"/{org_unit_id}/content/topics/{topic_id}/file")
+        return content, _extract_filename(headers) or f"topic_{topic_id}"
 
     def get_topic_html(self, org_unit_id: int, topic_id: int) -> tuple[bytes, str]:
         """Download an HTML content topic. Returns (html_bytes, sanitized_filename)."""
-        path = f"/{org_unit_id}/content/topics/{topic_id}"
-        data = self.get_json(path)
+        data = self.get_json(f"/{org_unit_id}/content/topics/{topic_id}")
         # HTML topics have a Body.Text field with the HTML content
         body = data.get("Body", {})
         # Handle nested structure: {"Text": "..."} or directly a string
-        if isinstance(body, dict):
-            html_content = body.get("Text", "")
-        else:
-            html_content = str(body) if body else ""
+        html_content = (body.get("Text", "") if isinstance(body, dict)
+                        else (str(body) if body else ""))
         # If empty, try "Html" field
-        if not html_content:
-            html_content = data.get("Html", "") or data.get("html", "") or ""
+        html_content = html_content or data.get("Html", "") or data.get("html", "") or ""
         # Filename derived from topic title, sanitized
-        title = data.get("Title", "") or f"topic_{topic_id}"
-        sanitized = _sanitize_filename(title)
+        sanitized = _sanitize_filename(data.get("Title", "") or f"topic_{topic_id}")
         if not sanitized.endswith(".html"):
             sanitized = sanitized + ".html"
         return html_content.encode("utf-8") if isinstance(html_content, str) else html_content, sanitized
@@ -306,10 +274,8 @@ class LighthouseClient:
         self, org_unit_id: int, folder_id: int, file_id: int
     ) -> tuple[bytes, str]:
         """Download a dropbox attachment file. Returns (bytes, filename)."""
-        path = f"/{org_unit_id}/dropbox/folders/{folder_id}/attachments/{file_id}"
-        content, headers = self.get_raw(path)
-        filename = _extract_filename(headers) or f"attachment_{file_id}"
-        return content, filename
+        content, headers = self.get_raw(f"/{org_unit_id}/dropbox/folders/{folder_id}/attachments/{file_id}")
+        return content, _extract_filename(headers) or f"attachment_{file_id}"
 
     def submit_file(
         self,
@@ -334,50 +300,36 @@ class LighthouseClient:
         import mimetypes
 
         # Determine content type
-        mime_type = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
         # Build RichText description (required even if empty)
         text = description or f"Submitted via lighthouse-cli: {filename}"
-        rich_text = {"Text": text, "Html": f"<p>{text}</p>"}
 
         # Build multipart/mixed body per D2L spec:
         # - Part 1: JSON with Content-Type application/json
         # - Part 2: File data with Content-Disposition form-data; name=""; filename="..."
         # The boundary must be unique. Using a fixed but reasonable boundary.
         boundary = "----lighthouseFormBoundary7x9f"
-        body = (
+        body_bytes = (
+            f"--{boundary}\r\nContent-Type: application/json\r\n\r\n"
+            f"{json.dumps({'Text': text, 'Html': '<p>' + text + '</p>'})}\r\n"
             f"--{boundary}\r\n"
-            f"Content-Type: application/json\r\n\r\n"
-            f"{json.dumps(rich_text)}\r\n"
-            f"--{boundary}\r\n"
-            f"Content-Type: {mime_type}\r\n"
+            f"Content-Type: {content_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'}\r\n"
             f'Content-Disposition: form-data; name=""; filename="{filename}"\r\n\r\n'
+        ).encode()
+        footer = f"\r\n--{boundary}--\r\n".encode()
+        resp = self._request(
+            "POST",
+            f"{API_LE}/{org_unit_id}/dropbox/folders/{folder_id}/submissions/mysubmissions/",
+            data=io.BytesIO(body_bytes + file_bytes + footer).getvalue(),
+            headers={
+                "Content-Type": f"multipart/mixed; boundary={boundary}",
+                "Content-Length": str(len(body_bytes) + len(file_bytes) + len(footer)),
+            },
+            _skip_raise=True,
+            _timeout=60,
         )
-        body_bytes = body.encode("utf-8")
-        footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
-        body_stream = io.BytesIO(body_bytes + file_bytes + footer)
-
-        url = f"{API_LE}/{org_unit_id}/dropbox/folders/{folder_id}/submissions/mysubmissions/"
-        try:
-            resp = self._request(
-                "POST",
-                url,
-                data=body_stream.getvalue(),
-                headers={
-                    "Content-Type": f"multipart/mixed; boundary={boundary}",
-                    "Content-Length": str(len(body_bytes) + len(file_bytes) + len(footer)),
-                },
-                _skip_raise=True,
-                _timeout=60,
-            )
-        except (SessionExpiredError, NetworkError):
-            raise
-
         # D2L redirects to login page when session is dead
         if resp.status_code in (301, 302, 303, 307, 308):
-            raise SessionExpiredError(
-                "Session expired. Run: lighthouse auth refresh"
-            )
+            raise SessionExpiredError("Session expired. Run: lighthouse auth refresh")
 
         if resp.status_code == 403:
             raise PermissionError(
@@ -407,18 +359,13 @@ class LighthouseClient:
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-from .utils import _sanitize_filename
-
 
 def _extract_filename(headers: dict[str, str]) -> str:
     """Parse Content-Disposition header to get the filename."""
     cd = headers.get("Content-Disposition", headers.get("content-disposition", ""))
     if "filename=" in cd:
-        parts = cd.split("filename=")
-        if len(parts) > 1:
-            name = parts[1].strip().strip('"').strip("'")
-            if name:
-                return name
+        if name := cd.split("filename=", 1)[1].strip().strip('"').strip("'"):
+            return name
     return ""
 
 
@@ -428,23 +375,19 @@ def resolve_course_id(client: LighthouseClient, identifier: str) -> int:
     Tries numeric parse first, then falls back to substring match on course names.
     """
     # Try as numeric org-unit-id
-    try:
+    with suppress(ValueError):
         return int(identifier)
-    except ValueError:
-        pass
 
     # Search by name substring (case-insensitive)
-    courses = client.get_courses()
     matches = [
-        c for c in courses if identifier.lower() in c.get("Name", "").lower()
+        c for c in client.get_courses() if identifier.lower() in c.get("Name", "").lower()
     ]
     if len(matches) == 1:
         return int(matches[0]["OrgUnitId"])
     if len(matches) > 1:
-        names = [f"  {c['OrgUnitId']} – {c['Name']}" for c in matches]
         raise CourseNotFoundError(
-            f"Ambiguous match '{identifier}'. Multiple courses found:\n"
-            + "\n".join(names)
+            "Ambiguous match '" + identifier + "'. Multiple courses found:\n"
+            + "\n".join(f"  {c['OrgUnitId']} – {c['Name']}" for c in matches)
             + "\n\nUse the numeric OrgUnitId for an exact match."
         )
     raise CourseNotFoundError(
@@ -468,12 +411,9 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
     port = cdp_port or int(os.getenv("LIGHTHOUSE_CDP_PORT", str(DEFAULT_CDP_PORT)))
 
     # Strategy 1: try browser-harness CLI if available
-    try:
+    with suppress(FileNotFoundError):
         return _refresh_via_browser_harness(port)
-    except FileNotFoundError:
-        pass
 
-    # Strategy 2: direct CDP via websockets
     try:
         return _refresh_via_cdp_websocket(port)
     except Exception as exc:
@@ -496,10 +436,9 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
     if result.returncode != 0:
         raise RuntimeError(f"browser-harness failed: {result.stderr.strip()}")
 
-    all_cookies = json.loads(result.stdout)
     d2l_cookies = {
         c["name"]: c["value"]
-        for c in all_cookies
+        for c in json.loads(result.stdout)
         if c["name"].startswith("d2l") and "lighthouse.manipal.edu" in c.get("domain", "")
     }
     if not d2l_cookies:
@@ -521,9 +460,7 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
     try:
         import asyncio
 
-        return asyncio.get_event_loop().run_until_complete(
-            _cdp_get_cookies_ws(ws_url)
-        )
+        return asyncio.get_event_loop().run_until_complete(_cdp_get_cookies_ws(ws_url))
     except ImportError:
         pass
 
@@ -538,9 +475,7 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
     import websockets
 
     async with websockets.connect(ws_url, max_size=2**20) as ws:
-        await ws.send(
-            _json.dumps({"id": 1, "method": "Network.getAllCookies"})
-        )
+        await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
         resp = _json.loads(await ws.recv())
         all_cookies = resp.get("result", {}).get("cookies", [])
         d2l = {
@@ -580,8 +515,7 @@ setTimeout(() => {{ console.error("timeout"); process.exit(1); }}, 10000);
     if result.returncode != 0:
         raise RuntimeError(f"Node CDP extraction failed: {result.stderr.strip()}")
 
-    d2l_cookies = json.loads(result.stdout.strip())
-    if not d2l_cookies:
+    if not (d2l_cookies := json.loads(result.stdout.strip())):
         raise RuntimeError("No d2l cookies found. Is lighthouse.manipal.edu logged in?")
     save_cookies(d2l_cookies)
     return d2l_cookies

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from lighthouse_cli.commands import _sanitize_filename
+from lighthouse_cli.utils import _sanitize_filename
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ class TestCourseNameCollision:
         """When two courses share the same Name, second gets -OrgUnitId suffix."""
         # The collision resolution helper will be _resolve_course_folder_name(course_name, org_unit_id)
         # This test documents expected behavior - the function should be implemented in commands.py
-        from lighthouse_cli.commands import _sanitize_filename
+        from lighthouse_cli.utils import _sanitize_filename
 
         base = _sanitize_filename("Physics")
         assert base == "Physics"
@@ -122,7 +122,7 @@ class TestCourseNameCollision:
         """Collision suffix is -{OrgUnitId} format."""
         # If we have two "Physics" courses (IDs 100 and 200),
         # folders should be "Physics" and "Physics-200" (or similar)
-        from lighthouse_cli.commands import _sanitize_filename
+        from lighthouse_cli.utils import _sanitize_filename
 
         name = _sanitize_filename("Physics")
         # After collision handling with ID 67890
@@ -140,7 +140,7 @@ class TestPathResolution:
 
     def test_tilde_expanded(self, tmp_path: Path):
         """~ in output-dir is expanded to home directory."""
-        from lighthouse_cli.commands import _sanitize_filename
+        from lighthouse_cli.utils import _sanitize_filename
 
         home = Path.home()
         result = str(home)
@@ -155,7 +155,7 @@ class TestPathResolution:
 
     def test_path_expanduser_called(self):
         """Path with ~ calls Path.expanduser() for resolution."""
-        from lighthouse_cli.commands import _sanitize_filename
+        from lighthouse_cli.utils import _sanitize_filename
 
         # Simulate what happens with -o ~/Downloads/test
         path_str = "~/test-lighthouse"
@@ -173,7 +173,7 @@ class TestModulePathSanitization:
 
     def test_module_title_sanitized(self):
         """Module titles used in file paths are sanitized like course names."""
-        from lighthouse_cli.commands import _sanitize_filename
+        from lighthouse_cli.utils import _sanitize_filename
 
         mod_title = "Unit 1: Introduction <File>"
         sanitized = _sanitize_filename(mod_title)
@@ -183,7 +183,7 @@ class TestModulePathSanitization:
 
     def test_nested_module_paths(self):
         """Nested modules produce nested sanitized paths."""
-        from lighthouse_cli.commands import _sanitize_filename
+        from lighthouse_cli.utils import _sanitize_filename
 
         parent = _sanitize_filename("Module A")
         child = _sanitize_filename("Sub: Module B")

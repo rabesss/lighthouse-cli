@@ -9,20 +9,19 @@ Implements the full Microsoft SSO login flow with 2FA using Playwright:
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
+from contextlib import suppress
 import sys
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
 
-# Alias for tests that patch it
-SyncPlaywright = sync_playwright
-
-# Config directory and cookie file paths
 from .config import CONFIG_DIR, ensure_config_dir, save_cookies
 from .api import LighthouseClient
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -62,40 +61,29 @@ class HeadlessAuthenticator:
     MS_LOGIN_URL = "https://login.microsoftonline.com"
     MS_SELECTORS = {
         "username": [
-            'input[name="loginfmt"]',
-            'input[type="email"]',
-            'input[id="i0116"]',
-            'input[aria-label="Email, phone, or Skype"]',
+            'input[name="loginfmt"]', 'input[type="email"]',
+            'input[id="i0116"]', 'input[aria-label="Email, phone, or Skype"]',
             'input[autocomplete="username"]',
         ],
         "password": [
-            'input[name="Password"]',
-            'input[type="password"]',
-            'input[id="i0118"]',
-            'input[aria-label="Password"]',
+            'input[name="Password"]', 'input[type="password"]',
+            'input[id="i0118"]', 'input[aria-label="Password"]',
         ],
         "submit_btn": [
-            'input[type="submit"]',
-            'button[type="submit"]',
-            'input[value="Sign in"]',
-            'button[id="idSIButton9"]',
+            'input[type="submit"]', 'button[type="submit"]',
+            'input[value="Sign in"]', 'button[id="idSIButton9"]',
         ],
         "2fa_input": [
-            'input[name="otpc"]',
-            'input[id="idTxtBx_SAOTCC_OTC"]',
-            'input[id="idTxtBx_SAOTCC_ORESend"]',
-            'input[aria-label="Enter your code"]',
+            'input[name="otpc"]', 'input[id="idTxtBx_SAOTCC_OTC"]',
+            'input[id="idTxtBx_SAOTCC_ORESend"]', 'input[aria-label="Enter your code"]',
             'input[autocomplete="one-time-code"]',
         ],
         "2fa_submit_btn": [
-            'input[type="submit"]',
-            'button[type="submit"]',
-            'input[value="Verify"]',
-            'button[id="idSubmit_SAOTCC_Continue"]',
+            'input[type="submit"]', 'button[type="submit"]',
+            'input[value="Verify"]', 'button[id="idSubmit_SAOTCC_Continue"]',
         ],
         "stay_signed_in": [
-            'input[id="idChkBx_RememberMe"]',
-            'input[name="RememberMe"]',
+            'input[id="idChkBx_RememberMe"]', 'input[name="RememberMe"]',
             'input[type="checkbox"]',
         ],
     }
@@ -115,10 +103,8 @@ class HeadlessAuthenticator:
             self.browser = pw.chromium.launch(
                 headless=True,
                 args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox", "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
                 ],
             )
             self.context = self.browser.new_context(
@@ -154,9 +140,8 @@ class HeadlessAuthenticator:
                 continue
 
         # Extract selector name for error message
-        selector_name = selectors[0] if selectors else "element"
         raise AuthenticationError(
-            f"Could not find expected element on SSO page: {selector_name}"
+            f"Could not find expected element on SSO page: {selectors[0] if selectors else 'element'}"
         )
 
     def navigate_sso(
@@ -179,26 +164,19 @@ class HeadlessAuthenticator:
         self.page.goto(self.LOGIN_URL, wait_until="networkidle")
 
         # Step 2: Wait for redirect to Microsoft SSO
-        try:
+        with suppress(Exception):
             self.page.wait_for_url(
                 lambda url: "login.microsoftonline.com" in url,
                 timeout=30000,
             )
-        except Exception:
-            # Already on Microsoft from D2L redirect
-            pass
 
         # Step 3: Fill username on Microsoft form
         try:
-            user_input = self._find_element(self.MS_SELECTORS["username"])
-            user_input.fill(username)
+            self._find_element(self.MS_SELECTORS["username"]).fill(username)
             # Click next/continue
-            next_btn = self._find_element(self.MS_SELECTORS["submit_btn"] + [
-                'input[value="Next"]',
-                'button[value="Next"]',
-                'input[id="idBtn_Back"]',
-            ])
-            next_btn.click()
+            self._find_element(self.MS_SELECTORS["submit_btn"] + [
+                'input[value="Next"]', 'button[value="Next"]', 'input[id="idBtn_Back"]',
+            ]).click()
             # Wait for password field to appear
             self.page.wait_for_timeout(1000)
         except AuthenticationError:
@@ -207,13 +185,10 @@ class HeadlessAuthenticator:
 
         # Step 4: Fill password
         try:
-            pass_input = self._find_element(self.MS_SELECTORS["password"], timeout=15000)
-            pass_input.fill(password)
-            submit_btn = self._find_element(self.MS_SELECTORS["submit_btn"] + [
-                'input[value="Sign in"]',
-                'button[value="Sign in"]',
-            ])
-            submit_btn.click()
+            self._find_element(self.MS_SELECTORS["password"], timeout=15000).fill(password)
+            self._find_element(self.MS_SELECTORS["submit_btn"] + [
+                'input[value="Sign in"]', 'button[value="Sign in"]',
+            ]).click()
         except AuthenticationError:
             raise AuthenticationError("Login failed: invalid credentials")
 
@@ -222,16 +197,15 @@ class HeadlessAuthenticator:
 
         # Step 6: Handle "Stay Signed In?" prompt if it appears
         try:
-            stay_signed_in = self._find_element(
+            self._find_element(
                 self.MS_SELECTORS["stay_signed_in"] + [
                     'input[id="idChkBx_RememberMe"]',
                 ],
                 timeout=3000,
             )
-            if stay_signed_in:
-                # Don't check - just click Yes to continue
-                self.page.click('input[value="Yes"]')
-                self.page.wait_for_timeout(1000)
+            # Don't check - just click Yes to continue
+            self.page.click('input[value="Yes"]')
+            self.page.wait_for_timeout(1000)
         except AuthenticationError:
             pass  # No stay signed in prompt
 
@@ -243,9 +217,7 @@ class HeadlessAuthenticator:
             )
         except Exception:
             current_url = self.page.url
-            if "lighthouse.manipal.edu" in current_url:
-                pass  # Already on D2L
-            else:
+            if "lighthouse.manipal.edu" not in current_url:
                 raise AuthenticationError(
                     f"SSO redirect did not return to D2L. Final URL: {current_url}"
                 )
@@ -268,17 +240,14 @@ class HeadlessAuthenticator:
                 import getpass
                 totp_code = getpass.getpass("Enter 2FA code: ")
 
-            if not totp_code or totp_code.strip() == "":
+            if not totp_code or not totp_code.strip():
                 raise AuthenticationError("2FA code cannot be empty")
-
             otp_input.fill(totp_code.strip())
 
             # Submit 2FA
-            submit_btn = self._find_element(self.MS_SELECTORS["2fa_submit_btn"] + [
-                'input[value="Verify"]',
-                'button[value="Verify"]',
-            ])
-            submit_btn.click()
+            self._find_element(self.MS_SELECTORS["2fa_submit_btn"] + [
+                'input[value="Verify"]', 'button[value="Verify"]',
+            ]).click()
             self.page.wait_for_timeout(2000)
 
         except AuthenticationError as exc:
@@ -295,23 +264,8 @@ class HeadlessAuthenticator:
         if self.context is None:
             raise AuthenticationError("Browser context not available")
 
-        all_cookies = self.context.cookies()
-        d2l_cookies = {}
-        for c in all_cookies:
-            name = c.get("name", "")
-            value = c.get("value", "")
-            domain = c.get("domain", "")
-
-            if name.startswith("d2l") and ("lighthouse" in domain or domain.startswith(".")):
-                d2l_cookies[name] = value
-
-        required = (
-            "d2lSecureSessionVal",
-            "d2lSessionVal",
-            "d2lSameSiteCanaryA",
-            "d2lSameSiteCanaryB",
-        )
-        missing = [c for c in required if c not in d2l_cookies]
+        d2l_cookies = {c["name"]: c["value"] for c in self.context.cookies() if c.get("name", "").startswith("d2l") and ("lighthouse" in c.get("domain", "") or c.get("domain", "").startswith("."))}
+        missing = [c for c in ("d2lSecureSessionVal", "d2lSessionVal", "d2lSameSiteCanaryA", "d2lSameSiteCanaryB") if c not in d2l_cookies]
         if missing:
             raise AuthenticationError(
                 f"Missing required cookies after SSO: {missing}. "
@@ -334,27 +288,20 @@ class HeadlessAuthenticator:
         try:
             self.launch_browser()
             self.navigate_sso(username, password, totp_code)
-            cookies = self.extract_cookies()
-            return cookies
+            return self.extract_cookies()
         finally:
             self.close()
 
     def close(self) -> None:
         """Terminate the headless browser process (always called in finally)."""
         if self.browser is not None:
-            try:
+            with suppress(Exception):
                 self.browser.close()
-            except Exception:
-                pass
-            self.browser = None
-            self.context = None
-            self.page = None
+            self.browser = self.context = self.page = None
 
         if hasattr(self, "_playwright"):
-            try:
+            with suppress(Exception):
                 self._playwright.stop()
-            except Exception:
-                pass
             del self._playwright
 
 
@@ -382,8 +329,7 @@ class CredentialStore:
         import keyring
 
         # Try to get existing key
-        key_str = keyring.get_password(self.SERVICE_NAME, self.KEY_NAME)
-        if key_str:
+        if key_str := keyring.get_password(self.SERVICE_NAME, self.KEY_NAME):
             return key_str.encode("utf-8")
 
         # Generate new key
@@ -396,8 +342,7 @@ class CredentialStore:
         """Get a Fernet instance for encryption/decryption."""
         from cryptography.fernet import Fernet
 
-        key = self._get_encryption_key()
-        return Fernet(key)
+        return Fernet(self._get_encryption_key())
 
     def save(self, username: str, password: str) -> None:
         """Encrypt and save credentials to disk.
@@ -409,22 +354,19 @@ class CredentialStore:
         Raises:
             CredentialStoreError: If credentials are empty or storage fails
         """
-        if not username or username.strip() == "":
+        if not username or not username.strip():
             raise CredentialStoreError("Username cannot be empty")
-        if not password or password.strip() == "":
+        if not password or not password.strip():
             raise CredentialStoreError("Password cannot be empty")
 
-        fernet = self._get_fernet()
-        credentials = json.dumps({"username": username, "password": password})
-        encrypted = fernet.encrypt(credentials.encode("utf-8"))
-
+        # Ensure config directory exists
         # Ensure config directory exists
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir.chmod(0o700)
 
         # Atomic write: write to temp file, then rename
         tmp_file = self.credentials_file.with_suffix(".tmp")
-        tmp_file.write_bytes(encrypted)
+        tmp_file.write_bytes(self._get_fernet().encrypt(json.dumps({"username": username, "password": password}).encode("utf-8")))
         tmp_file.chmod(0o600)
         tmp_file.replace(self.credentials_file)
         self.credentials_file.chmod(0o600)
@@ -443,19 +385,12 @@ class CredentialStore:
             return None
 
         try:
-            encrypted = self.credentials_file.read_bytes()
-            fernet = self._get_fernet()
-            decrypted = fernet.decrypt(encrypted)
-            data = json.loads(decrypted.decode("utf-8"))
+            data = json.loads(self._get_fernet().decrypt(self.credentials_file.read_bytes()).decode("utf-8"))
             return data.get("username", ""), data.get("password", "")
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise CredentialStoreError(
-                f"Credentials file is corrupted: {exc}"
-            ) from exc
+            raise CredentialStoreError(f"Credentials file is corrupted: {exc}") from exc
         except Exception as exc:
-            raise CredentialStoreError(
-                f"Failed to load credentials: {exc}"
-            ) from exc
+            raise CredentialStoreError(f"Failed to load credentials: {exc}") from exc
 
     def exists(self) -> bool:
         """Check if stored credentials exist."""
@@ -478,6 +413,13 @@ def _is_interactive() -> bool:
 # ---------------------------------------------------------------------------
 # Main command function
 # ---------------------------------------------------------------------------
+
+def _auth_error(msg: str, json_output: bool, code: int = 1) -> int:
+    if json_output:
+        print(json.dumps({"success": False, "error": msg}))
+    else:
+        print(f"Error: {msg}", file=sys.stderr)
+    return code
 
 def cmd_auth_login(
     username: str | None = None,
@@ -521,28 +463,17 @@ def cmd_auth_login(
         # Try stored credentials if no credentials found
         if not username or not password:
             store = CredentialStore()
-            try:
+            stored = None
+            with suppress(CredentialStoreError):
                 stored = store.load()
-            except CredentialStoreError:
-                stored = None
             if stored:
-                if not username:
-                    username = stored[0]
-                if not password:
-                    password = stored[1]
+                username = username or stored[0]
+                password = password or stored[1]
 
         # Interactive prompt if still needed
         if not username or not password:
             if not _is_interactive():
-                if json_output:
-                    print(json.dumps({"success": False, "error": "Credentials required. Provide --user/--pass, LIGHTHOUSE_USERNAME/PASSWORD env vars, or run interactively."}))
-                    return 1
-                print(
-                    "Error: Credentials required. Provide --user/--pass flags, "
-                    "LIGHTHOUSE_USERNAME/PASSWORD env vars, or run interactively.",
-                    file=sys.stderr,
-                )
-                return 1
+                return _auth_error("Credentials required. Provide --user/--pass, LIGHTHOUSE_USERNAME/PASSWORD env vars, or run interactively.", json_output)
 
             if not username:
                 print("Username (email): ", end="", flush=True)
@@ -551,46 +482,25 @@ def cmd_auth_login(
                 password = getpass.getpass("Password: ").strip()  # type: ignore
 
         # Validate credentials
-        if not username or username.strip() == "":
-            if json_output:
-                print(json.dumps({"success": False, "error": "Username cannot be empty"}))
-            else:
-                print("Error: Username cannot be empty", file=sys.stderr)
-            return 1
+        if not username:
+            return _auth_error("Username cannot be empty", json_output)
 
-        if not password or password.strip() == "":
-            if json_output:
-                print(json.dumps({"success": False, "error": "Password cannot be empty"}))
-            else:
-                print("Error: Password cannot be empty", file=sys.stderr)
-            return 1
+        if not password:
+            return _auth_error("Password cannot be empty", json_output)
 
         # --- TOTP resolution ---
         if totp_stdin:
             totp_code = sys.stdin.readline().strip()
-        elif totp_code is None:
-            # Will be prompted interactively by HeadlessAuthenticator
-            pass
-
         # --- TOTP validation ---
         if totp_code is not None and totp_code.strip() == "":
-            if json_output:
-                print(json.dumps({"success": False, "error": "2FA code cannot be empty"}))
-            else:
-                print("Error: 2FA code cannot be empty", file=sys.stderr)
-            return 2
+            return _auth_error("2FA code cannot be empty", json_output, 2)
 
         # --- Launch headless browser and authenticate ---
         authenticator = HeadlessAuthenticator()
         try:
             cookies = authenticator.authenticate(username, password, totp_code)
         except AuthenticationError as exc:
-            error_msg = str(exc)
-            if json_output:
-                print(json.dumps({"success": False, "error": error_msg}))
-            else:
-                print(f"Error: {error_msg}", file=sys.stderr)
-            return 1
+            return _auth_error(str(exc), json_output)
         finally:
             # Always clean up browser
             authenticator.close()
@@ -599,20 +509,8 @@ def cmd_auth_login(
         save_cookies(cookies)
 
         # --- Verify session ---
-        client = LighthouseClient()
-        if not client.check_auth():
-            if json_output:
-                print(json.dumps({
-                    "success": False,
-                    "error": "Cookies extracted but session verification failed. Run: lighthouse auth refresh"
-                }))
-            else:
-                print(
-                    "Error: Cookies extracted but session verification failed. "
-                    "Run: lighthouse auth refresh",
-                    file=sys.stderr,
-                )
-            return 1
+        if not LighthouseClient().check_auth():
+            return _auth_error("Cookies extracted but session verification failed. Run: lighthouse auth refresh", json_output)
 
         # --- Save credentials if requested ---
         if save_credentials:
@@ -621,10 +519,7 @@ def cmd_auth_login(
 
         # --- Success output ---
         if json_output:
-            print(json.dumps({
-                "success": True,
-                "cookies": list(cookies.keys()),
-            }))
+            print(json.dumps({"success": True, "cookies": list(cookies.keys())}))
         else:
             print(f"Login successful. Session valid. Cookies: {', '.join(cookies.keys())}")
 
@@ -643,8 +538,4 @@ def cmd_auth_login(
     except Exception as exc:
         if "authenticator" in dir():
             authenticator.close()
-        if json_output:
-            print(json.dumps({"success": False, "error": str(exc)}))
-        else:
-            print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return _auth_error(str(exc), json_output)
