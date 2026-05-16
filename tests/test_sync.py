@@ -640,7 +640,7 @@ class TestSyncAllCourses:
                 return (b"content b", "b.pdf")
             return (b"content a", "a.pdf")
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=lambda: [
@@ -728,7 +728,7 @@ class TestSyncMultiCourseWithAssignments:
                 return b"hw1 content", "hw1.pdf"
             return b"lab1 content", "lab1.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=lambda: [

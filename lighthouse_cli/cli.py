@@ -16,7 +16,6 @@ from .commands import (
     cmd_auth_refresh,
     cmd_auth_status,
     cmd_calendar,
-    cmd_config_courses,
     cmd_content,
     cmd_courses,
     cmd_download,
@@ -29,7 +28,7 @@ from .commands import (
     cmd_submit,
 )
 from .auth import cmd_auth_login
-
+from .course_config import cmd_config_courses
 
 # ---------------------------------------------------------------------------
 # Root group

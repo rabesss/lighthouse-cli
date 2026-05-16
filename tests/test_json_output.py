@@ -54,7 +54,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}, "222": {"name": "Course B", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -124,7 +124,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -191,7 +191,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -249,7 +249,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -317,7 +317,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -370,7 +370,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -422,7 +422,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}, "222": {"name": "Course B", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -483,7 +483,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -539,7 +539,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}, "222": {"name": "Course B", "semester": "Sem II"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -603,7 +603,7 @@ class TestMultiCourseJsonOutput:
         cfg_path = tmp_path / "course-config.json"
         cfg_path.write_text(json.dumps({"tracked_courses": {"111": {"name": "Course A", "semester": "Sem I"}, "222": {"name": "Course B", "semester": "Sem II"}}}))
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -685,7 +685,7 @@ class TestMultiCourseJsonOutput:
         def download_file(cid, tid):
             return f"content{tid}".encode(), f"file{tid}.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[

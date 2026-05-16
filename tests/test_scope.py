@@ -97,7 +97,7 @@ class TestLatestSemesterResolution:
                 {"OrgUnitId": 302, "Name": "Newest Course 2", "Code": "NEWEST"},
             ]
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=get_courses), \
@@ -148,7 +148,7 @@ class TestLatestSemesterResolution:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -210,7 +210,7 @@ class TestSemesterFilter:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -263,7 +263,7 @@ class TestSemesterFilter:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -453,7 +453,7 @@ class TestAlsoFlag:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -510,7 +510,7 @@ class TestAlsoFlag:
                 raise CourseNotFoundError(f"Course 99999 not found")
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -661,7 +661,7 @@ class TestSyncMultiCourseScope:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -713,7 +713,7 @@ class TestSyncMultiCourseScope:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch("lighthouse_cli.commands.COURSE_CONFIG_FILE", cfg_path), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
              patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[

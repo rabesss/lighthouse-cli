@@ -338,7 +338,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-010: File does not exist produces clear error before API call."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -373,7 +373,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-001 + VAL-SUBMIT-007 + VAL-SUBMIT-008: Successful submit with --yes --json."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -409,7 +409,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-001: Successful submit without --json shows human-readable confirmation."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -438,7 +438,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-002: Course ID as name substring (case-insensitive)."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -468,7 +468,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-003: Course ID as numeric OrgUnitId."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -498,7 +498,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-005: Folder ID as name substring (case-insensitive)."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -527,7 +527,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-012: Folder not found (HTTP 404) produces clear error."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -559,7 +559,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-013: HTTP 403 permission denied produces clear error."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -589,7 +589,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-011: Session expired produces clear error with re-auth hint."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -620,7 +620,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-014: HTTP 500 server error produces clear error."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -655,7 +655,7 @@ class TestSubmitCommand:
         """
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -684,7 +684,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-006: Non-TTY without --yes refuses with message to use --yes."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -712,7 +712,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-020: --yes + --json = only JSON on stdout, nothing else."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -751,7 +751,7 @@ class TestSubmitCommand:
             {"Id": 790, "Name": "Assignment 1 - Systems"},
         ]
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -776,7 +776,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-002 (zero match): Course not found produces clear error."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -803,7 +803,7 @@ class TestSubmitCommand:
         """VAL-SUBMIT-005 (zero match): Folder name not found lists available folders."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -833,7 +833,7 @@ class TestSubmitCommand:
         """VAL-CROSS-009: JSON output is valid and parseable."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -863,7 +863,7 @@ class TestSubmitCommand:
         """VAL-CROSS-009 (variant): Error case also produces structured output."""
         from lighthouse_cli.cli import cli
 
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 
@@ -890,7 +890,7 @@ class TestSubmitFolderResolution:
 
     def test_folder_numeric_id_accepted(self) -> None:
         """VAL-SUBMIT-004: Numeric folder ID is used directly."""
-        from lighthouse_cli.commands import _resolve_folder_id
+        from lighthouse_cli.submit import _resolve_folder_id
 
         mock_client = MagicMock()
         mock_client.get_dropbox_folders.return_value = [
@@ -903,7 +903,7 @@ class TestSubmitFolderResolution:
 
     def test_folder_name_substring_case_insensitive(self) -> None:
         """VAL-SUBMIT-005: Folder name matching is case-insensitive."""
-        from lighthouse_cli.commands import _resolve_folder_id
+        from lighthouse_cli.submit import _resolve_folder_id
 
         mock_client = MagicMock()
         mock_client.get_dropbox_folders.return_value = [
@@ -916,7 +916,7 @@ class TestSubmitFolderResolution:
 
     def test_folder_ambiguous_match_raises_value_error(self) -> None:
         """VAL-SUBMIT-005: Multiple matches raises ValueError listing all matches."""
-        from lighthouse_cli.commands import _resolve_folder_id
+        from lighthouse_cli.submit import _resolve_folder_id
 
         mock_client = MagicMock()
         mock_client.get_dropbox_folders.return_value = [
@@ -930,7 +930,7 @@ class TestSubmitFolderResolution:
 
     def test_folder_zero_match_raises_file_not_found(self) -> None:
         """VAL-SUBMIT-005 (zero match): No match raises FileNotFoundError with available folders."""
-        from lighthouse_cli.commands import _resolve_folder_id
+        from lighthouse_cli.submit import _resolve_folder_id
 
         mock_client = MagicMock()
         mock_client.get_dropbox_folders.return_value = [
@@ -965,7 +965,7 @@ class TestSubmitConfirmation:
 
         # Verify that when --yes is NOT set and we're in non-TTY, the command
         # refuses to proceed (which proves the confirmation gate is in place)
-        with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
 

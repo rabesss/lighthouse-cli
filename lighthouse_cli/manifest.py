@@ -32,10 +32,6 @@ class ManifestCorruptError(ManifestError):
     """Raised when manifest exists but is not valid JSON."""
 
 
-class ManifestValidationError(ManifestError):
-    """Raised when manifest entry is missing required keys or has wrong types."""
-
-
 # ---------------------------------------------------------------------------
 # Schema constants
 # ---------------------------------------------------------------------------
@@ -73,7 +69,7 @@ class Manifest:
     # -- loading -----------------------------------------------------------
 
     @staticmethod
-    def load(path: Path) -> "Manifest":
+    def load(path: Path) -> Manifest:
         """Load a manifest from disk.
 
         Raises:
@@ -106,21 +102,22 @@ class Manifest:
         if not isinstance(entry, dict):
             return [f"Entry for {topic_id} is not a dict"]
 
-        missing = REQUIRED_ENTRY_KEYS - set(entry.keys())
-        if missing:
+        if missing := REQUIRED_ENTRY_KEYS - set(entry.keys()):
             errors.append(f"Entry for {topic_id} missing keys: {missing}")
 
         # Type checks
-        if "sha256" in entry and not isinstance(entry["sha256"], str):
-            errors.append(f"Entry for {topic_id}: sha256 must be a string")
-        if "filename" in entry and not isinstance(entry["filename"], str):
-            errors.append(f"Entry for {topic_id}: filename must be a string")
-        if "size" in entry and not isinstance(entry["size"], (int, float)):
-            errors.append(f"Entry for {topic_id}: size must be a number")
-        if "downloaded_at" in entry and not isinstance(entry["downloaded_at"], str):
-            errors.append(f"Entry for {topic_id}: downloaded_at must be a string")
-        if "last_modified" in entry and not isinstance(entry["last_modified"], str):
-            errors.append(f"Entry for {topic_id}: last_modified must be a string")
+        type_map = {
+            "sha256": str,
+            "filename": str,
+            "size": (int, float),
+            "downloaded_at": str,
+            "last_modified": str,
+        }
+        for key, expected_type in type_map.items():
+            if key in entry and not isinstance(entry[key], expected_type):
+                errors.append(
+                    f"Entry for {topic_id}: {key} must be a {expected_type}"
+                )
 
         return errors
 
@@ -130,12 +127,9 @@ class Manifest:
         Returns:
             List of error messages (empty if all valid).
         """
-        errors: list[str] = []
         if not isinstance(self.entries, dict):
             return ["Manifest entries is not a dict"]
-        for topic_id, entry in self.entries.items():
-            errors.extend(self.validate_entry(topic_id, entry))
-        return errors
+        return [e for tid, entry in self.entries.items() for e in self.validate_entry(tid, entry)]
 
     # -- saving (atomic) ---------------------------------------------------
 
@@ -156,13 +150,6 @@ class Manifest:
             if tmp.exists():
                 tmp.unlink()
             raise
-        finally:
-            # Ensure temp file is gone even on success (shouldn't happen but defensive)
-            if tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
 
         self.path = path
 
@@ -181,10 +168,8 @@ class Manifest:
         Computes SHA-256 from the exact file bytes.
         """
         entry = {
-            "sha256": compute_sha256(content),
-            "filename": filename,
-            "size": len(content),
-            "downloaded_at": utc_now(),
+            "sha256": compute_sha256(content), "filename": filename,
+            "size": len(content), "downloaded_at": utc_now(),
             "last_modified": last_modified,
         }
         self.entries[str(topic_id)] = entry
