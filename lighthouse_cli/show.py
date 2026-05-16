@@ -29,7 +29,8 @@ def _for_course_or_all(
     concatenated-objects bug). In human mode, prints each result inline.
 
     When iterating all courses, uses ThreadPoolExecutor(max_workers=5) for
-    parallel API calls (~5x speedup). ``requests.Session`` is thread-safe.
+    parallel API calls (~5x speedup). Each worker gets its own HTTP client so
+    session and cache state stay thread-local.
 
     Args:
         course_id: Course identifier (name/ID) or None for all courses.
@@ -60,7 +61,13 @@ def _for_course_or_all(
             results: list[dict] = []
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {
-                    pool.submit(single_fn, client, int(c["OrgUnitId"]), True, title=c.get("Name", "")): c
+                    pool.submit(
+                        single_fn,
+                        LighthouseClient(),
+                        int(c["OrgUnitId"]),
+                        True,
+                        title=c.get("Name", ""),
+                    ): c
                     for c in courses
                 }
                 for future in as_completed(futures):
@@ -79,7 +86,13 @@ def _for_course_or_all(
             future_to_id: dict[Any, int] = {}
             for c in courses:
                 oid = int(c["OrgUnitId"])
-                f = pool.submit(single_fn, client, oid, False, title=c.get("Name", ""))
+                f = pool.submit(
+                    single_fn,
+                    LighthouseClient(),
+                    oid,
+                    False,
+                    title=c.get("Name", ""),
+                )
                 future_to_id[f] = oid
             for f in as_completed(future_to_id):
                 oid = future_to_id[f]

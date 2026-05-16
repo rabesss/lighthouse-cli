@@ -126,7 +126,13 @@ class LighthouseClient:
 
     def get(self, path: str, **kwargs: Any) -> requests.Response:
         """GET request with full URL construction from path."""
-        return self._request("GET", path if path.startswith("http") else f"{BASE_URL}{path}" if path.startswith("/d2l/") else f"{API_LE}{path}", **kwargs)
+        if path.startswith("http"):
+            url = path
+        elif path.startswith("/d2l/"):
+            url = f"{BASE_URL}{path}"
+        else:
+            url = f"{API_LE}{path}"
+        return self._request("GET", url, **kwargs)
 
     def get_json(self, path: str, **kwargs: Any) -> Any:
         """GET request returning parsed JSON."""
@@ -296,33 +302,36 @@ class LighthouseClient:
 
         Returns parsed JSON response on success (HTTP 200) with submission details.
         """
-        import io
+        import html
         import mimetypes
+        import uuid
 
-        # Determine content type
         # Build RichText description (required even if empty)
         text = description or f"Submitted via lighthouse-cli: {filename}"
+        rich_text = {"Text": text, "Html": f"<p>{html.escape(text)}</p>"}
+        mime_type = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        header_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
 
         # Build multipart/mixed body per D2L spec:
         # - Part 1: JSON with Content-Type application/json
         # - Part 2: File data with Content-Disposition form-data; name=""; filename="..."
-        # The boundary must be unique. Using a fixed but reasonable boundary.
-        boundary = "----lighthouseFormBoundary7x9f"
+        boundary = f"----lighthouseFormBoundary{uuid.uuid4().hex}"
         body_bytes = (
             f"--{boundary}\r\nContent-Type: application/json\r\n\r\n"
-            f"{json.dumps({'Text': text, 'Html': '<p>' + text + '</p>'})}\r\n"
+            f"{json.dumps(rich_text)}\r\n"
             f"--{boundary}\r\n"
-            f"Content-Type: {content_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'}\r\n"
-            f'Content-Disposition: form-data; name=""; filename="{filename}"\r\n\r\n'
+            f"Content-Type: {mime_type}\r\n"
+            f'Content-Disposition: form-data; name=""; filename="{header_filename}"\r\n\r\n'
         ).encode()
         footer = f"\r\n--{boundary}--\r\n".encode()
+        payload = body_bytes + file_bytes + footer
         resp = self._request(
             "POST",
             f"{API_LE}/{org_unit_id}/dropbox/folders/{folder_id}/submissions/mysubmissions/",
-            data=io.BytesIO(body_bytes + file_bytes + footer).getvalue(),
+            data=payload,
             headers={
                 "Content-Type": f"multipart/mixed; boundary={boundary}",
-                "Content-Length": str(len(body_bytes) + len(file_bytes) + len(footer)),
+                "Content-Length": str(len(payload)),
             },
             _skip_raise=True,
             _timeout=60,

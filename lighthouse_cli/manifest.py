@@ -106,7 +106,18 @@ class Manifest:
             errors.append(f"Entry for {topic_id} missing keys: {missing}")
 
         # Type checks
-        errors += [f"Entry for {topic_id}: {k} must be a {t}" for k, t in {"sha256": str, "filename": str, "size": (int, float), "downloaded_at": str, "last_modified": str}.items() if k in entry and not isinstance(entry[k], t)]
+        type_map = {
+            "sha256": str,
+            "filename": str,
+            "size": (int, float),
+            "downloaded_at": str,
+            "last_modified": str,
+        }
+        for key, expected_type in type_map.items():
+            if key in entry and not isinstance(entry[key], expected_type):
+                errors.append(
+                    f"Entry for {topic_id}: {key} must be a {expected_type}"
+                )
 
         return errors
 

@@ -28,6 +28,7 @@ def load() -> dict[str, dict[str, str]]:
 
 def save(config: dict[str, dict[str, str]]) -> None:
     """Save course config to disk atomically."""
+    COURSE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = COURSE_CONFIG_FILE.with_suffix(".json.tmp")
     try:
         tmp.write_text(
