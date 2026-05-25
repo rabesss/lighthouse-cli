@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from typing import Any
 from contextlib import suppress
 
 import requests
 
-from .config import API_LE, BASE_URL, load_cookies, save_cookies
+from .config import API_LE, BASE_URL, COOKIE_NAMES, load_cookies, save_cookies
 from .utils import _sanitize_filename
 
 # CDP port for browser-harness
@@ -38,6 +39,23 @@ class CourseNotFoundError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Expanded session-expired message
+# ---------------------------------------------------------------------------
+
+def _session_expired_msg(detail: str = "") -> str:
+    """Build a structured session-expired message with all recovery options."""
+    parts = [f"Session expired{' (' + detail + ')' if detail else ''}."]
+    parts.append("Options:")
+    parts.append("  1. If you have a browser open: lighthouse auth login")
+    parts.append(
+        "  2. For headless/CI: set LIGHTHOUSE_USERNAME, LIGHTHOUSE_PASSWORD env vars"
+        " and run: lighthouse auth login --headless"
+    )
+    parts.append("  3. For 2FA in CI: also set LIGHTHOUSE_TOTP to the current code")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # HTTP client
 # ---------------------------------------------------------------------------
 
@@ -53,6 +71,7 @@ class LighthouseClient:
         self._cookies: dict[str, str] = {}
         self._loaded = False
         self._cache: dict[str, Any] = {}
+        self._auto_refreshed = False
 
     # -- cookie management --------------------------------------------------
 
@@ -74,26 +93,65 @@ class LighthouseClient:
     _RETRY_BACKOFF = 2  # base seconds for exponential backoff
 
     def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, **kwargs: Any) -> requests.Response:
-        """Make an authenticated request with rate-limit retry.
+        """Make an authenticated request with rate-limit retry and auto-refresh.
 
         Retries on HTTP 429 (Too Many Requests) with exponential backoff,
         respecting the Retry-After header when present.
+
+        On SessionExpiredError, attempts one auto-refresh via CDP if a browser
+        with valid cookies is running, then retries the request once.
 
         Args:
             _skip_raise: If True, skip raise_for_status() and return the raw
                 response. Caller handles error status codes.
             _timeout: Request timeout in seconds (default 30).
         """
-        if not (cookies := self.cookies):
-            raise SessionExpiredError("No cookies found. Run: lighthouse auth refresh")
+        cookies = self.cookies
+        if not cookies:
+            raise SessionExpiredError(_session_expired_msg("no cookies found"))
 
+        try:
+            return self._do_request(method, url, cookies, _skip_raise, _timeout, **kwargs)
+        except SessionExpiredError:
+            # Auto-refresh: attempt CDP cookie extraction once
+            if self._auto_refreshed:
+                raise SessionExpiredError(_session_expired_msg("auto-refresh already attempted"))
+
+            print("Session expired. Refreshing from browser...", file=sys.stderr)
+            try:
+                new_cookies = refresh_auth_from_browser()
+            except Exception as exc:
+                raise SessionExpiredError(
+                    _session_expired_msg(f"auto-refresh failed: {exc}")
+                ) from exc
+
+            # Validate extracted cookies contain all required names
+            missing = [n for n in COOKIE_NAMES if n not in new_cookies]
+            if missing:
+                raise SessionExpiredError(
+                    _session_expired_msg(f"CDP cookies missing: {missing}")
+                )
+
+            # Update instance cookies and persist
+            save_cookies(new_cookies)
+            self._cookies = new_cookies
+            self._auto_refreshed = True
+
+            return self._do_request(method, url, new_cookies, _skip_raise, _timeout, **kwargs)
+
+    def _do_request(
+        self, method: str, url: str, cookies: dict[str, str],
+        # skip_raise forwarded from _request._skip_raise
+        skip_raise: bool, timeout: int, **kwargs: Any,
+    ) -> requests.Response:
+        """Execute the HTTP request with retry loop (no auto-refresh logic)."""
         for attempt in range(self._MAX_RETRIES + 1):
             resp = self._session.request(
                 method,
                 url,
                 cookies=cookies,
                 allow_redirects=False,
-                timeout=_timeout,
+                timeout=timeout,
                 **kwargs,
             )
 
@@ -102,12 +160,12 @@ class LighthouseClient:
                 location = resp.headers.get("Location", "").lower()
                 if "login" in location or "auth" in location:
                     raise SessionExpiredError(
-                        "Session expired. Run: lighthouse auth refresh"
+                        _session_expired_msg(f"HTTP {resp.status_code} redirect to login")
                     )
 
             if resp.status_code == 401:
                 raise SessionExpiredError(
-                    "Session expired. Run: lighthouse auth refresh"
+                    _session_expired_msg("HTTP 401 Unauthorized")
                 )
 
             # Rate-limit: retry with backoff
@@ -115,7 +173,7 @@ class LighthouseClient:
                 time.sleep(float(resp.headers.get("Retry-After", self._RETRY_BACKOFF)) * (2 ** attempt))
                 continue
 
-            if not _skip_raise:
+            if not skip_raise:
                 resp.raise_for_status()
             return resp
 
@@ -338,7 +396,7 @@ class LighthouseClient:
         )
         # D2L redirects to login page when session is dead
         if resp.status_code in (301, 302, 303, 307, 308):
-            raise SessionExpiredError("Session expired. Run: lighthouse auth refresh")
+            raise SessionExpiredError(_session_expired_msg(f"HTTP {resp.status_code} redirect to login"))
 
         if resp.status_code == 403:
             raise PermissionError(
@@ -415,7 +473,7 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
     to connect to the user's browser, find the lighthouse.manipal.edu tab,
     and extract all d2l* cookies.
 
-    Returns the saved cookie dict.
+    Returns the cookie dict (does NOT save to disk — caller must do that).
     """
     port = cdp_port or int(os.getenv("LIGHTHOUSE_CDP_PORT", str(DEFAULT_CDP_PORT)))
 
@@ -423,13 +481,8 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
     with suppress(FileNotFoundError):
         return _refresh_via_browser_harness(port)
 
-    try:
-        return _refresh_via_cdp_websocket(port)
-    except Exception as exc:
-        raise NetworkError(
-            f"Failed to extract cookies from browser: {exc}. "
-            f"Make sure Chrome/Chromium is running with --remote-debugging-port={port}"
-        )
+    # Strategy 2: direct CDP WebSocket via Python websockets library
+    return _refresh_via_cdp_websocket(port)
 
 
 def _refresh_via_browser_harness(port: int) -> dict[str, str]:
@@ -453,28 +506,26 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
     if not d2l_cookies:
         raise RuntimeError("No d2l cookies found in browser. Is lighthouse.manipal.edu logged in?")
 
-    save_cookies(d2l_cookies)
     return d2l_cookies
 
 
 def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
-    """Direct CDP cookie extraction using websocket-client (or raw http)."""
+    """Direct CDP cookie extraction using Python websockets library."""
     import urllib.request
 
     # Get browser websocket URL
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version") as resp:
         ws_url = json.loads(resp.read())["webSocketDebuggerUrl"]
 
-    # Try using the websockets library
     try:
         import asyncio
-
-        return asyncio.get_event_loop().run_until_complete(_cdp_get_cookies_ws(ws_url))
+        return asyncio.run(_cdp_get_cookies_ws(ws_url))
     except ImportError:
-        pass
-
-    # Fall back to a small Node.js snippet if node is available
-    return _cdp_get_cookies_node(port, ws_url)
+        raise NetworkError(
+            "Cannot extract cookies: neither browser-harness nor websockets library available. "
+            f"Install with: pip install websockets\n"
+            f"Or ensure Chrome is running with --remote-debugging-port={port}"
+        )
 
 
 async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
@@ -494,37 +545,4 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
         }
         if not d2l:
             raise RuntimeError("No d2l cookies found. Is lighthouse.manipal.edu logged in?")
-        save_cookies(d2l)
         return d2l
-
-
-def _cdp_get_cookies_node(port: int, ws_url: str) -> dict[str, str]:
-    """Fallback: use a tiny node script to extract CDP cookies."""
-    import subprocess
-
-    script = f"""
-const ws = new WebSocket({ws_url!r});
-ws.onopen = () => ws.send(JSON.stringify({{id:1, method:"Network.getAllCookies"}}));
-ws.onmessage = (ev) => {{
-    const cookies = JSON.parse(ev.data).result.cookies
-        .filter(c => c.name.startsWith("d2l") && c.domain.includes("lighthouse"))
-        .reduce((o, c) => {{ o[c.name] = c.value; return o; }}, {{}});
-    console.log(JSON.stringify(cookies));
-    ws.close();
-    process.exit(0);
-}};
-setTimeout(() => {{ console.error("timeout"); process.exit(1); }}, 10000);
-"""
-    result = subprocess.run(
-        ["node", "-e", script],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Node CDP extraction failed: {result.stderr.strip()}")
-
-    if not (d2l_cookies := json.loads(result.stdout.strip())):
-        raise RuntimeError("No d2l cookies found. Is lighthouse.manipal.edu logged in?")
-    save_cookies(d2l_cookies)
-    return d2l_cookies

@@ -360,7 +360,7 @@ class TestSessionExpiry:
         from lighthouse_cli.api import SessionExpiredError
 
         def raise_expired(cid):
-            raise SessionExpiredError("Session expired. Run: lighthouse auth refresh")
+            raise SessionExpiredError("Session expired. Run: lighthouse auth login")
 
         with patch.object(LighthouseClient, "get_dropbox_folders", side_effect=raise_expired), \
              patch.object(LighthouseClient, "get_courses", return_value=[
@@ -371,4 +371,4 @@ class TestSessionExpiry:
 
             assert result.exit_code == 1
             assert "Session expired" in result.output
-            assert "lighthouse auth refresh" in result.output
+            assert "auth login" in result.output

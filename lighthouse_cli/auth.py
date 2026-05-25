@@ -12,14 +12,15 @@ from __future__ import annotations
 import getpass
 import json
 import os
-from contextlib import suppress
+import shutil
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
 
-from .config import CONFIG_DIR, ensure_config_dir, save_cookies
+from .config import BROWSER_STATE_DIR, CONFIG_DIR, ensure_config_dir, save_cookies
 from .api import LighthouseClient
 
 
@@ -52,6 +53,10 @@ class HeadlessAuthenticator:
     7. Extract all 4 d2l cookies
     8. Save cookies to disk
     9. Verify session with check_auth()
+
+    Supports persistent browser context to reuse Microsoft SSO sessions
+    across invocations, skipping both credentials and 2FA when the SSO
+    session is still valid.
     """
 
     BASE_URL = "https://lighthouse.manipal.edu"
@@ -88,35 +93,76 @@ class HeadlessAuthenticator:
         ],
     }
 
-    def __init__(self) -> None:
+    def __init__(self, clean: bool = False) -> None:
         self.browser = None
         self.context = None
         self.page = None
         self._totp_timeout = 120  # seconds
+        self._clean = clean
+        self._closed = False
+
+    def __enter__(self) -> HeadlessAuthenticator:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def launch_browser(self) -> None:
-        """Launch headless Chromium via Playwright."""
+        """Launch headless Chromium via Playwright with persistent context.
+
+        Uses a persistent browser profile at ``BROWSER_STATE_DIR`` to preserve
+        Microsoft SSO session state across invocations.  If the profile is
+        corrupted, it is deleted and a fresh launch is attempted.
+        """
+        if self._clean and BROWSER_STATE_DIR.exists():
+            shutil.rmtree(BROWSER_STATE_DIR, ignore_errors=True)
+
         pw = sync_playwright().start()
         self._playwright = pw  # keep reference to prevent GC
 
+        launch_args = [
+            "--no-sandbox", "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
+        ]
+
         try:
-            self.browser = pw.chromium.launch(
+            # Persistent context preserves cookies/localStorage across runs
+            self.context = pw.chromium.launch_persistent_context(
+                user_data_dir=str(BROWSER_STATE_DIR),
                 headless=True,
-                args=[
-                    "--no-sandbox", "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
-                ],
-            )
-            self.context = self.browser.new_context(
+                args=launch_args,
                 accept_downloads=False,
                 ignore_https_errors=True,
             )
-            self.page = self.context.new_page()
+            if self.context.pages:
+                self.page = self.context.pages[0]
+            else:
+                self.page = self.context.new_page()
 
             # Set default timeout for waiting operations
             self.page.set_default_timeout(30000)  # 30s default
 
         except Exception as exc:
+            # If persistent context fails (corrupted profile), retry with fresh state
+            if BROWSER_STATE_DIR.exists():
+                shutil.rmtree(BROWSER_STATE_DIR, ignore_errors=True)
+                try:
+                    self.context = pw.chromium.launch_persistent_context(
+                        user_data_dir=str(BROWSER_STATE_DIR),
+                        headless=True,
+                        args=launch_args,
+                        accept_downloads=False,
+                        ignore_https_errors=True,
+                    )
+                    if self.context.pages:
+                        self.page = self.context.pages[0]
+                    else:
+                        self.page = self.context.new_page()
+                    self.page.set_default_timeout(30000)
+                    return
+                except Exception:
+                    pass
+
             pw.stop()
             raise AuthenticationError(
                 f"Failed to launch browser: {exc}\n"
@@ -162,6 +208,12 @@ class HeadlessAuthenticator:
 
         # Step 1: Navigate to D2L login page
         self.page.goto(self.LOGIN_URL, wait_until="networkidle")
+
+        # Check if we're already redirected back to D2L (persistent SSO session)
+        current_url = self.page.url
+        if "lighthouse.manipal.edu" in current_url and "/d2l/" in current_url and "login" not in current_url.lower():
+            # Already logged in via persistent session — skip SSO
+            return
 
         # Step 2: Wait for redirect to Microsoft SSO
         with suppress(Exception):
@@ -294,9 +346,13 @@ class HeadlessAuthenticator:
 
     def close(self) -> None:
         """Terminate the headless browser process (always called in finally)."""
-        if self.browser is not None:
+        if self._closed:
+            return
+        self._closed = True
+
+        if self.context is not None:
             with suppress(Exception):
-                self.browser.close()
+                self.context.close()
             self.browser = self.context = self.page = None
 
         if hasattr(self, "_playwright"):
@@ -360,7 +416,6 @@ class CredentialStore:
             raise CredentialStoreError("Password cannot be empty")
 
         # Ensure config directory exists
-        # Ensure config directory exists
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_dir.chmod(0o700)
 
@@ -421,6 +476,7 @@ def _auth_error(msg: str, json_output: bool, code: int = 1) -> int:
         print(f"Error: {msg}", file=sys.stderr)
     return code
 
+
 def cmd_auth_login(
     username: str | None = None,
     password: str | None = None,
@@ -429,8 +485,17 @@ def cmd_auth_login(
     save_credentials: bool = False,
     json_output: bool = False,
     config_dir: str | None = None,
+    headless: bool = False,
+    cdp_only: bool = False,
+    cdp_port: int | None = None,
+    clean: bool = False,
 ) -> int:
     """Main auth login command.
+
+    Strategy:
+    1. Unless ``--headless``, attempt CDP cookie extraction first (fast).
+    2. If CDP succeeds, verify and return.
+    3. Fall through to headless Playwright SSO flow.
 
     Args:
         username: Username from --user flag (or None)
@@ -440,9 +505,12 @@ def cmd_auth_login(
         save_credentials: If True, save credentials encrypted
         json_output: If True, output JSON
         config_dir: Override config directory
+        headless: If True, skip CDP and go straight to headless
+        cdp_only: If True, only attempt CDP (fail if no browser)
+        clean: If True, wipe browser state before launch
 
     Returns:
-        Exit code (0=success, 1=auth failure, 2=CLI usage error)
+        Exit code (0=success, 1=auth failure, 2=CLI usage error, 130=interrupted)
     """
     # Apply config directory override
     if config_dir:
@@ -451,7 +519,41 @@ def cmd_auth_login(
     # Ensure config directory exists
     ensure_config_dir()
 
+    authenticator: HeadlessAuthenticator | None = None
+
     try:
+        # --- Strategy 1: CDP cookie extraction (fast path) ---
+        if not headless:
+            try:
+                from .api import refresh_auth_from_browser
+                cookies = refresh_auth_from_browser(cdp_port=cdp_port)
+                # Verify the extracted cookies
+                client = LighthouseClient()
+                client._cookies = cookies
+                client._loaded = True
+                if client.check_auth():
+                    save_cookies(cookies)
+                    if json_output:
+                        print(json.dumps({"success": True, "cookies": list(cookies.keys()), "method": "cdp"}))
+                    else:
+                        print(f"Auth refreshed from browser. Cookies: {', '.join(cookies.keys())}")
+                    return 0
+                # CDP cookies didn't pass verification — fall through
+            except Exception:
+                if cdp_only:
+                    return _auth_error(
+                        "No browser session found. Open a browser and log in to lighthouse.manipal.edu first.",
+                        json_output,
+                    )
+                # CDP failed, fall through to headless
+
+        if cdp_only:
+            return _auth_error(
+                "No browser session found. Open a browser and log in to lighthouse.manipal.edu first.",
+                json_output,
+            )
+
+        # --- Strategy 2: Headless Playwright SSO flow ---
         # --- Credential resolution ---
         # Priority: flags > env vars > stored credentials > interactive prompt
 
@@ -496,21 +598,15 @@ def cmd_auth_login(
             return _auth_error("2FA code cannot be empty", json_output, 2)
 
         # --- Launch headless browser and authenticate ---
-        authenticator = HeadlessAuthenticator()
-        try:
-            cookies = authenticator.authenticate(username, password, totp_code)
-        except AuthenticationError as exc:
-            return _auth_error(str(exc), json_output)
-        finally:
-            # Always clean up browser
-            authenticator.close()
+        authenticator = HeadlessAuthenticator(clean=clean)
+        cookies = authenticator.authenticate(username, password, totp_code)
 
         # --- Save cookies ---
         save_cookies(cookies)
 
         # --- Verify session ---
         if not LighthouseClient().check_auth():
-            return _auth_error("Cookies extracted but session verification failed. Run: lighthouse auth refresh", json_output)
+            return _auth_error("Cookies extracted but session verification failed. Try: lighthouse auth login", json_output)
 
         # --- Save credentials if requested ---
         if save_credentials:
@@ -527,7 +623,7 @@ def cmd_auth_login(
 
     except KeyboardInterrupt:
         # Ctrl+C: clean browser, exit with 130
-        if "authenticator" in dir():
+        if authenticator is not None:
             authenticator.close()
         if json_output:
             print(json.dumps({"success": False, "error": "Interrupted by user"}))
@@ -536,6 +632,6 @@ def cmd_auth_login(
         return 130
 
     except Exception as exc:
-        if "authenticator" in dir():
+        if authenticator is not None:
             authenticator.close()
         return _auth_error(str(exc), json_output)

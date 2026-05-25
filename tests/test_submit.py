@@ -186,7 +186,7 @@ class TestSubmitFile:
                 file_bytes=b"test content",
                 filename="test.pdf",
             )
-        assert "lighthouse auth refresh" in str(exc_info.value)
+        assert "auth login" in str(exc_info.value)
 
     def test_submit_file_403_raises_permission_error(self) -> None:
         """VAL-SUBMIT-013: HTTP 403 raises PermissionError with clear message."""
@@ -300,7 +300,7 @@ class TestSubmitFile:
 
         with pytest.raises(SessionExpiredError) as exc_info:
             client.submit_file(org_unit_id=44347, folder_id=789, file_bytes=b"x", filename="x.pdf")
-        assert "lighthouse auth refresh" in str(exc_info.value)
+        assert "auth login" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +598,7 @@ class TestSubmitCommand:
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
             mock_client.cookies = {"d2lSecureSessionVal": "abc", "d2lSessionVal": "def"}
             mock_client.submit_file.side_effect = SessionExpiredError(
-                "Session expired. Run: lighthouse auth refresh"
+                "Session expired. Run: lighthouse auth login"
             )
 
             result = cli_runner.invoke(
@@ -608,7 +608,7 @@ class TestSubmitCommand:
 
             assert result.exit_code == 1
             assert "Session expired" in result.output
-            assert "lighthouse auth refresh" in result.output
+            assert "auth login" in result.output
 
     def test_submit_server_error_500(
         self,
@@ -872,7 +872,7 @@ class TestSubmitCommand:
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
             mock_client.cookies = {"d2lSecureSessionVal": "abc", "d2lSessionVal": "def"}
             mock_client.submit_file.side_effect = SessionExpiredError(
-                "Session expired. Run: lighthouse auth refresh"
+                "Session expired. Run: lighthouse auth login"
             )
 
             result = cli_runner.invoke(
@@ -1013,7 +1013,7 @@ class TestSubmissionIntegration:
         """VAL-SUBMIT-015: Learner POST capability needs live test with real cookies.
 
         Live test procedure:
-        1. Ensure valid D2L session via `lighthouse auth refresh`
+        1. Ensure valid D2L session via `lighthouse auth login`
         2. Find a dropbox folder: `lighthouse assignments <course_id>`
         3. Run: lighthouse submit <course_id> <folder_id> --file test.pdf --yes
         4. Expected: HTTP 200 with JSON containing submissionId

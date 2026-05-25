@@ -13,7 +13,6 @@ import click
 from . import __version__
 from .commands import (
     cmd_announcements,
-    cmd_auth_refresh,
     cmd_auth_status,
     cmd_calendar,
     cmd_content,
@@ -40,7 +39,7 @@ def cli() -> None:
     """lighthouse-cli – CLI for D2L Brightspace LMS at lighthouse.manipal.edu.
 
     Interact with courses, content, grades, and more via D2L REST APIs.
-    Run 'lighthouse auth refresh' first to set up your session.
+    Run 'lighthouse auth login' first to set up your session.
     """
 
 
@@ -70,8 +69,15 @@ def auth_status(json_output: bool) -> None:
 )
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
 def auth_refresh(cdp_port: int | None, json_output: bool) -> None:
-    """Extract fresh cookies from the browser via CDP."""
-    raise SystemExit(cmd_auth_refresh(cdp_port, json_output))
+    """Extract fresh cookies from the browser via CDP.
+
+    Equivalent to ``auth login --cdp-only``.
+    """
+    raise SystemExit(cmd_auth_login(
+        json_output=json_output,
+        cdp_only=True,
+        cdp_port=cdp_port,
+    ))
 
 
 @auth.command("login")
@@ -79,9 +85,15 @@ def auth_refresh(cdp_port: int | None, json_output: bool) -> None:
 @click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
 @click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option("--save-credentials", "save_credentials", is_flag=True, default=False, help="Store credentials encrypted for future use.")
+@click.option("--headless", "headless", is_flag=True, default=False, help="Skip CDP and go straight to headless browser login.")
+@click.option("--cdp-only", "cdp_only", is_flag=True, default=False, help="Only attempt CDP cookie extraction; fail if no browser.")
+@click.option("--clean", "clean", is_flag=True, default=False, help="Wipe browser state and start fresh.")
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_login(username: str | None, password: str | None, totp: str | None, save_credentials: bool, json_output: bool) -> None:
+def auth_login(username: str | None, password: str | None, totp: str | None, save_credentials: bool, headless: bool, cdp_only: bool, clean: bool, json_output: bool) -> None:
     """Log in to D2L via headless browser (Microsoft SSO + 2FA).
+
+    By default, tries CDP cookie extraction first (if a browser is open),
+    then falls back to headless Playwright login.
 
     Credentials can be provided via:
       --user/--pass flags
@@ -103,7 +115,12 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
         totp_stdin=(totp == "-"),
         save_credentials=save_credentials,
         json_output=json_output,
+        headless=headless,
+        cdp_only=cdp_only,
+        clean=clean,
     ))
+
+
 
 
 # ---------------------------------------------------------------------------

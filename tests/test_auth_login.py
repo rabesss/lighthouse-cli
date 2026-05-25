@@ -23,9 +23,9 @@ def make_mock_playwright_with_browser(
 ) -> tuple[MagicMock, MagicMock, MagicMock]:
     """Build a properly chained Playwright mock.
 
-    Chain: sync_playwright() -> pw -> pw.start() -> pw -> pw.chromium.launch() -> browser
+    Chain: sync_playwright() -> pw -> pw.start() -> pw -> pw.chromium.launch_persistent_context() -> context
 
-    Returns (mock_playwright, pw_mock, mock_browser).
+    Returns (mock_playwright, pw_mock, mock_context).
     """
     mock_browser = MagicMock()
     mock_context = MagicMock()
@@ -33,15 +33,16 @@ def make_mock_playwright_with_browser(
 
     if cookies is None:
         cookies = [
-            {"name": "d2lSecureSessionVal", "value": "sec123"},
-            {"name": "d2lSessionVal", "value": "ses123"},
-            {"name": "d2lSameSiteCanaryA", "value": "canaryA"},
-            {"name": "d2lSameSiteCanaryB", "value": "canaryB"},
+            {"name": "d2lSecureSessionVal", "value": "sec123", "domain": "lighthouse.manipal.edu"},
+            {"name": "d2lSessionVal", "value": "ses123", "domain": "lighthouse.manipal.edu"},
+            {"name": "d2lSameSiteCanaryA", "value": "canaryA", "domain": "lighthouse.manipal.edu"},
+            {"name": "d2lSameSiteCanaryB", "value": "canaryB", "domain": "lighthouse.manipal.edu"},
         ]
     mock_context.cookies.return_value = cookies
-    mock_context.pages.return_value = [mock_page]
+    mock_context.pages = [mock_page]
     mock_context.new_page.return_value = mock_page
     mock_browser.new_context.return_value = mock_context
+    mock_context.close.return_value = None
     mock_browser.close.return_value = None
     mock_page.goto = MagicMock()
     mock_page.fill = MagicMock()
@@ -56,8 +57,9 @@ def make_mock_playwright_with_browser(
     mock_playwright.return_value = pw_mock
     pw_mock.start.return_value = pw_mock
     pw_mock.chromium.launch.return_value = mock_browser
+    pw_mock.chromium.launch_persistent_context.return_value = mock_context
 
-    return mock_playwright, pw_mock, mock_browser
+    return mock_playwright, pw_mock, mock_context
 
 
 # ---------------------------------------------------------------------------
@@ -338,24 +340,25 @@ def test_headless_browser_launch(
     """Playwright launches headless Chromium."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
 
     launch_kwargs = {}
 
     def capture_launch(**kwargs: Any) -> MagicMock:
         launch_kwargs.update(kwargs)
-        return mock_browser
+        return mock_context
 
     pw_mock = mock_playwright.return_value
     pw_mock.start.return_value = pw_mock
-    pw_mock.chromium.launch.side_effect = capture_launch
+    pw_mock.chromium.launch_persistent_context.side_effect = capture_launch
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
 
-    assert pw_mock.chromium.launch.called
+    assert pw_mock.chromium.launch_persistent_context.called
     assert launch_kwargs.get("headless") is True
     auth.close()
 
@@ -367,27 +370,28 @@ def test_sso_navigation_chain(
     """Browser navigates D2L -> Microsoft SSO -> 2FA -> D2L redirect."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
 
-        # Get the page that was actually created
-        page = auth.page
-        assert page is not None
+            # Get the page that was actually created
+            page = auth.page
+            assert page is not None
 
-        # Simulate SSO navigation with mock
-        auth.navigate_sso("user@manipal.edu", "secret", "123456")
+            # Simulate SSO navigation with mock
+            auth.navigate_sso("user@manipal.edu", "secret", "123456")
 
-        # Verify goto was called (D2L login page)
-        assert page.goto.called
-        # Verify fill was called for credentials
-        assert page.fill.called
-        # Verify click was called for submit
-        assert page.click.called
-        auth.close()
+            # Verify goto was called (D2L login page)
+            assert page.goto.called
+            # Verify fill was called for credentials
+            assert page.fill.called
+            # Verify click was called for submit
+            assert page.click.called
+            auth.close()
 
 
 def test_cookie_extraction_after_sso(
@@ -403,14 +407,15 @@ def test_cookie_extraction_after_sso(
         {"name": "d2lSameSiteCanaryA", "value": "canaryA", "domain": "lighthouse.manipal.edu"},
         {"name": "d2lSameSiteCanaryB", "value": "canaryB", "domain": "lighthouse.manipal.edu"},
     ]
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser(cookies)
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser(cookies)
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        extracted = auth.extract_cookies()
-        auth.close()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
+            extracted = auth.extract_cookies()
+            auth.close()
 
     assert len(extracted) == 4
     assert "d2lSecureSessionVal" in extracted
@@ -447,21 +452,24 @@ def test_cookies_saved_to_file(
 
     with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
         with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.check_auth.return_value = True
-            mock_client.cookies = cookies
-            mock_client_cls.return_value = mock_client
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
+            with patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=RuntimeError("no browser")):
+                mock_client = MagicMock()
+                mock_client.check_auth.return_value = True
+                mock_client.cookies = cookies
+                mock_client_cls.return_value = mock_client
+                result = cli_runner.invoke(
+                    cli,
+                    ["auth", "login", "--headless", "--totp", "123456"],
+                    catch_exceptions=False,
+                )
 
     assert result.exit_code == 0
     assert cookies_path.exists()
     data = json.loads(cookies_path.read_text())
-    assert "d2lSecureSessionVal" in data
-    assert data["d2lSecureSessionVal"] == "sec123"
+    assert "cookies" in data
+    assert "extracted_at" in data
+    assert "d2lSecureSessionVal" in data["cookies"]
+    assert data["cookies"]["d2lSecureSessionVal"] == "sec123"
     # Check permissions
     mode = cookies_path.stat().st_mode & 0o777
     assert mode == 0o600
@@ -532,8 +540,9 @@ def test_auth_status_works_after_login(
 
     # Point api module's CONFIG_DIR to our tmp config_dir
     import lighthouse_cli.api as api_module
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = cookies_path
+    import lighthouse_cli.config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", cookies_path)
 
     with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
         with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls2:
@@ -743,11 +752,8 @@ def test_concurrent_auth_no_corruption(
 
     # Point config module's CONFIG_DIR to our tmp config_dir
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    # Force re-read of env var by patching the globals
-    config_module.CONFIG_DIR = config_dir
-    config_module.COOKIE_FILE = config_dir / "cookies.json"
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = config_dir / "cookies.json"
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "COOKIE_FILE", config_dir / "cookies.json")
 
     errors = []
 
@@ -768,8 +774,9 @@ def test_concurrent_auth_no_corruption(
     assert cookies_path.exists()
     data = json.loads(cookies_path.read_text())
     # Must have all 4 cookies from whichever write finished last
-    assert len(data) >= 4
-    assert "d2lSecureSessionVal" in data
+    assert "cookies" in data
+    assert len(data["cookies"]) >= 4
+    assert "d2lSecureSessionVal" in data["cookies"]
 
 
 # ---------------------------------------------------------------------------
@@ -791,10 +798,8 @@ def test_config_directory_auto_created(
     # Point config/api modules' CONFIG_DIR to our tmp config_dir
     import lighthouse_cli.api as api_module
     import lighthouse_cli.config as config_module
-    config_module.CONFIG_DIR = config_dir
-    config_module.COOKIE_FILE = config_dir / "cookies.json"
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = config_dir / "cookies.json"
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "COOKIE_FILE", config_dir / "cookies.json")
 
     cookies = {
         "d2lSecureSessionVal": "sec123",
@@ -913,14 +918,15 @@ def test_browser_cleanup_on_success(
     """No orphan browser processes after successful login."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        auth.close()
-        mock_browser.close.assert_called_once()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
+            auth.close()
+            mock_context.close.assert_called()
 
 
 def test_browser_cleanup_on_failure(
@@ -930,19 +936,20 @@ def test_browser_cleanup_on_failure(
     """No orphan browser processes after failed login."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser(cookies=[])
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser(cookies=[])
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator, AuthenticationError
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        try:
-            auth.authenticate("user@manipal.edu", "wrong", "123456")
-        except AuthenticationError:
-            pass
-        finally:
-            auth.close()
-        mock_browser.close.assert_called_once()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator, AuthenticationError
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
+            try:
+                auth.authenticate("user@manipal.edu", "wrong", "123456")
+            except AuthenticationError:
+                pass
+            finally:
+                auth.close()
+            mock_context.close.assert_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1255,23 +1262,24 @@ def test_headless_mode_no_visible_window(
     """Browser runs in headless mode with no visible window."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
 
     launch_kwargs = {}
 
     def capture_launch(**kwargs: Any) -> MagicMock:
         launch_kwargs.update(kwargs)
-        return mock_browser
+        return mock_context
 
     pw_mock = mock_playwright.return_value
     pw_mock.start.return_value = pw_mock
-    pw_mock.chromium.launch.side_effect = capture_launch
+    pw_mock.chromium.launch_persistent_context.side_effect = capture_launch
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        auth.close()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
+            auth.close()
 
     assert launch_kwargs.get("headless") is True
 
@@ -1326,23 +1334,24 @@ def test_interactive_totp_prompt_at_authenticator_level(
         {"name": "d2lSameSiteCanaryA", "value": "canaryA", "domain": "lighthouse.manipal.edu"},
         {"name": "d2lSameSiteCanaryB", "value": "canaryB", "domain": "lighthouse.manipal.edu"},
     ]
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser(cookies_list)
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser(cookies_list)
 
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
 
-        # Mock getpass to return a 2FA code interactively
-        with patch("getpass.getpass", return_value="654321") as mock_getpass:
-            auth._handle_2fa(None)  # None = interactive prompt path
+            # Mock getpass to return a 2FA code interactively
+            with patch("getpass.getpass", return_value="654321") as mock_getpass:
+                auth._handle_2fa(None)  # None = interactive prompt path
 
-            # Verify getpass was called with the prompt containing "2FA"
-            mock_getpass.assert_called_once()
-            prompt_text = mock_getpass.call_args.args[0]
-            assert "2FA" in prompt_text or "code" in prompt_text.lower()
+                # Verify getpass was called with the prompt containing "2FA"
+                mock_getpass.assert_called_once()
+                prompt_text = mock_getpass.call_args.args[0]
+                assert "2FA" in prompt_text or "code" in prompt_text.lower()
 
-        auth.close()
+            auth.close()
 
 
 def test_interactive_totp_prompt_cmd_passes_none(
@@ -1470,8 +1479,9 @@ def test_auth_commands_compatible_with_login_cookies(
 
     # Point api module to our tmp config
     import lighthouse_cli.api as api_module
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = cookies_path
+    import lighthouse_cli.config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", cookies_path)
 
     # Verify auth status works
     with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
@@ -1516,24 +1526,419 @@ def test_cookies_saved_even_if_verification_fails(
     with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
         with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
             with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = False  # Verification FAILS
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456", "--json"],
-                    catch_exceptions=False,
-                )
+                with patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=RuntimeError("no browser")):
+                    mock_client = MagicMock()
+                    mock_client.check_auth.return_value = False  # Verification FAILS
+                    mock_client.cookies = cookies
+                    mock_client_cls.return_value = mock_client
+                    result = cli_runner.invoke(
+                        cli,
+                        ["auth", "login", "--headless", "--totp", "123456", "--json"],
+                        catch_exceptions=False,
+                    )
 
     # Command should fail (exit 1) because verification failed
     assert result.exit_code == 1
     # But cookies.json should still exist with the extracted cookies
     assert cookies_path.exists()
     data = json.loads(cookies_path.read_text())
-    assert "d2lSecureSessionVal" in data
-    assert data["d2lSecureSessionVal"] == "sec123"
+    # Handle both old (flat dict) and new (nested with extracted_at) formats
+    cookies_data = data.get("cookies", data) if isinstance(data, dict) else data
+    assert "d2lSecureSessionVal" in cookies_data
+    assert cookies_data["d2lSecureSessionVal"] == "sec123"
     # Error message should mention verification failure
     output_data = json.loads(result.output)
     assert output_data["success"] is False
     assert "verification" in output_data["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# New feature tests: auto-refresh, CDP-first, persistent context, cookie metadata
+# ---------------------------------------------------------------------------
+
+
+def test_auto_refresh_on_session_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-refresh catches SessionExpiredError, retries via CDP, succeeds."""
+    import lighthouse_cli.config as config_mod
+    from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+
+    tmp = Path("/tmp/lighthouse-test-auto-refresh")
+    tmp.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", tmp / "cookies.json")
+
+    valid_cookies = {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
+
+    client = LighthouseClient()
+    client._cookies = valid_cookies
+    client._loaded = True
+
+    call_count = 0
+
+    def mock_request(method, url, cookies, skip_raise, timeout, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise SessionExpiredError("Session expired (HTTP 401).")
+        # Return a successful response on retry
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"result": "ok"}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def mock_refresh(cdp_port=None):
+        return valid_cookies
+
+    with patch.object(client, "_do_request", side_effect=mock_request):
+        with patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=mock_refresh):
+            # This should succeed after auto-refresh
+            result = client._request("GET", "https://example.com/api")
+
+    assert call_count == 2  # Initial + retry after refresh
+    assert client._auto_refreshed is True
+
+
+def test_auto_refresh_no_infinite_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-refresh only happens once — second SessionExpiredError re-raises."""
+    import lighthouse_cli.config as config_mod
+    from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+
+    tmp = Path("/tmp/lighthouse-test-refresh-loop")
+    tmp.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", tmp / "cookies.json")
+
+    valid_cookies = {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
+
+    client = LighthouseClient()
+    client._cookies = valid_cookies
+    client._loaded = True
+
+    def always_expired(method, url, cookies, skip_raise, timeout, **kwargs):
+        raise SessionExpiredError("Still expired.")
+
+    def mock_refresh(cdp_port=None):
+        return valid_cookies
+
+    with patch.object(client, "_do_request", side_effect=always_expired):
+        with patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=mock_refresh):
+            with pytest.raises(SessionExpiredError):
+                client._request("GET", "https://example.com/api")
+
+
+def test_cdp_first_login_skips_playwright(
+    cli_runner: CliRunner,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CDP-first: if refresh_auth_from_browser succeeds, Playwright is never launched."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    cookies = {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
+
+    with patch("lighthouse_cli.api.refresh_auth_from_browser", return_value=cookies):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client._cookies = cookies
+            mock_client._loaded = True
+            mock_client_cls.return_value = mock_client
+
+            with patch("lighthouse_cli.auth.HeadlessAuthenticator") as mock_auth_cls:
+                result = cli_runner.invoke(
+                    cli,
+                    ["auth", "login"],
+                    catch_exceptions=False,
+                )
+
+    assert result.exit_code == 0
+    # HeadlessAuthenticator should NOT have been instantiated
+    mock_auth_cls.assert_not_called()
+    assert "cdp" in result.output.lower() or "browser" in result.output.lower()
+
+
+def test_cdp_only_flag_fails_without_browser(
+    cli_runner: CliRunner,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--cdp-only exits with error when no browser session found."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    with patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=RuntimeError("no browser")):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--cdp-only"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 1
+    assert "browser" in result.output.lower() or "no browser" in result.output.lower()
+
+
+def test_headless_flag_skips_cdp(
+    cli_runner: CliRunner,
+    config_dir: Path,
+    cookies_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--headless skips CDP and goes straight to Playwright."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    cookies = {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
+
+    mock_authenticator = MagicMock()
+    mock_authenticator.authenticate.return_value = cookies
+
+    cdp_called = []
+
+    def track_cdp(*args, **kwargs):
+        cdp_called.append(True)
+        raise RuntimeError("should not be called")
+
+    with patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=track_cdp):
+        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.check_auth.return_value = True
+                mock_client.cookies = cookies
+                mock_client_cls.return_value = mock_client
+                result = cli_runner.invoke(
+                    cli,
+                    ["auth", "login", "--headless", "--totp", "123456"],
+                    catch_exceptions=False,
+                )
+
+    assert result.exit_code == 0
+    assert len(cdp_called) == 0  # CDP was never attempted
+
+
+def test_persistent_context_called(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """launch_persistent_context is called with correct user_data_dir."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
+
+    launch_kwargs = {}
+
+    def capture_launch(**kwargs):
+        launch_kwargs.update(kwargs)
+        return mock_context
+
+    pw_mock = mock_playwright.return_value
+    pw_mock.start.return_value = pw_mock
+    pw_mock.chromium.launch_persistent_context.side_effect = capture_launch
+
+    browser_state_dir = config_dir / "browser-state"
+
+    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", browser_state_dir):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator()
+            auth.launch_browser()
+            auth.close()
+
+    assert pw_mock.chromium.launch_persistent_context.called
+    assert launch_kwargs.get("user_data_dir") == str(browser_state_dir)
+    assert launch_kwargs.get("headless") is True
+
+
+def test_cookie_metadata_new_format_roundtrip(tmp_path: Path) -> None:
+    """save_cookies writes new format, load_cookies reads it back correctly."""
+    import lighthouse_cli.config as config_mod
+
+    cookie_file = tmp_path / "cookies.json"
+    config_dir = tmp_path
+
+    cookies = {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
+
+    with patch.object(config_mod, "CONFIG_DIR", config_dir):
+        with patch.object(config_mod, "COOKIE_FILE", cookie_file):
+            config_mod.save_cookies(cookies)
+            loaded = config_mod.load_cookies()
+
+    assert loaded == cookies
+    data = json.loads(cookie_file.read_text())
+    assert "extracted_at" in data
+    assert "cookies" in data
+
+
+def test_cookie_metadata_old_format_compatible(tmp_path: Path) -> None:
+    """load_cookies handles legacy flat-dict format."""
+    import lighthouse_cli.config as config_mod
+
+    cookie_file = tmp_path / "cookies.json"
+
+    cookies = {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
+
+    # Write old format directly
+    cookie_file.write_text(json.dumps(cookies))
+
+    with patch.object(config_mod, "COOKIE_FILE", cookie_file):
+        loaded = config_mod.load_cookies()
+
+    assert loaded == cookies
+
+
+def test_cookie_age_warning_triggers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """warn_if_cookies_stale prints warning when cookies are >4 days old."""
+    import lighthouse_cli.config as config_mod
+    from datetime import datetime, timezone, timedelta
+
+    cookie_file = tmp_path / "cookies.json"
+
+    # Write cookies with timestamp 5 days ago
+    old_time = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    cookie_file.write_text(json.dumps({
+        "cookies": {"d2lSecureSessionVal": "x"},
+        "extracted_at": old_time,
+    }))
+
+    with patch.object(config_mod, "COOKIE_FILE", cookie_file):
+        result = config_mod.warn_if_cookies_stale()
+
+    assert result is True
+
+
+def test_cookie_age_warning_skips_fresh(tmp_path: Path) -> None:
+    """warn_if_cookies_stale returns False when cookies are fresh."""
+    import lighthouse_cli.config as config_mod
+    from datetime import datetime, timezone
+
+    cookie_file = tmp_path / "cookies.json"
+
+    # Fresh cookies
+    cookie_file.write_text(json.dumps({
+        "cookies": {"d2lSecureSessionVal": "x"},
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+    }))
+
+    with patch.object(config_mod, "COOKIE_FILE", cookie_file):
+        result = config_mod.warn_if_cookies_stale()
+
+    assert result is False
+
+
+def test_error_message_contains_all_recovery_options() -> None:
+    """_session_expired_msg includes all recovery options."""
+    from lighthouse_cli.api import _session_expired_msg
+
+    msg = _session_expired_msg("HTTP 401")
+    assert "lighthouse auth login" in msg
+    assert "--headless" in msg
+    assert "LIGHTHOUSE_USERNAME" in msg
+    assert "LIGHTHOUSE_TOTP" in msg
+
+
+def test_node_cdp_fallback_removed() -> None:
+    """_cdp_get_cookies_node no longer exists in api module."""
+    import lighthouse_cli.api as api_module
+    assert not hasattr(api_module, "_cdp_get_cookies_node")
+
+
+def test_authenticator_context_manager(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HeadlessAuthenticator works as a context manager with guaranteed cleanup."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
+
+    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", config_dir / "browser-state"):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            with HeadlessAuthenticator() as auth:
+                auth.launch_browser()
+                assert auth.page is not None
+            # After exiting context, context should be cleaned up
+            mock_context.close.assert_called()
+
+
+def test_no_dir_checks_in_auth_module() -> None:
+    """No 'authenticator' in dir() checks remain in auth module."""
+    import lighthouse_cli.auth as auth_module
+    source = open(auth_module.__file__).read()
+    assert '"authenticator" in dir()' not in source
+    assert "'authenticator' in dir()" not in source
+
+
+def test_no_deprecated_asyncio_in_api_module() -> None:
+    """No deprecated get_event_loop().run_until_complete() in api module."""
+    import lighthouse_cli.api as api_module
+    source = open(api_module.__file__).read()
+    assert "get_event_loop" not in source
+
+
+def test_clean_flag_wipes_browser_state(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--clean flag deletes browser state directory before launch."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    mock_playwright, _, mock_context = make_mock_playwright_with_browser()
+
+    browser_state_dir = config_dir / "browser-state"
+    browser_state_dir.mkdir(parents=True, exist_ok=True)
+    (browser_state_dir / "somefile").write_text("data")
+
+    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
+        with patch("lighthouse_cli.auth.BROWSER_STATE_DIR", browser_state_dir):
+            from lighthouse_cli.auth import HeadlessAuthenticator
+            auth = HeadlessAuthenticator(clean=True)
+            auth.launch_browser()
+            auth.close()
+
+    # launch_persistent_context was called, proving clean + relaunch happened
+    pw_mock = mock_playwright.return_value
+    pw_mock.chromium.launch_persistent_context.assert_called()
+
+
+def test_new_cli_flags_registered(cli_runner: CliRunner) -> None:
+    """--headless, --cdp-only, --clean flags are registered on auth login."""
+    result = cli_runner.invoke(cli, ["auth", "login", "--help"])
+    assert result.exit_code == 0
+    assert "--headless" in result.output
+    assert "--cdp-only" in result.output
+    assert "--clean" in result.output

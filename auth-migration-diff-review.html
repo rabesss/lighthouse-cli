@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auth Migration — Diff Review</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root {
+  --font-body: 'Instrument Serif', 'Georgia', serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --bg: #fff5f5;
+  --surface: #ffffff;
+  --surface2: #fef0ee;
+  --surface-elevated: #fff8f7;
+  --border: rgba(0, 0, 0, 0.07);
+  --border-bright: rgba(0, 0, 0, 0.14);
+  --text: #1c1917;
+  --text-dim: #78716c;
+  --accent: #be123c;
+  --accent-dim: rgba(190, 18, 60, 0.06);
+  --green: #16a34a;
+  --green-dim: rgba(22, 163, 74, 0.08);
+  --red: #dc2626;
+  --red-dim: rgba(220, 38, 38, 0.08);
+  --orange: #d97706;
+  --orange-dim: rgba(217, 119, 6, 0.08);
+  --blue: #2563eb;
+  --blue-dim: rgba(37, 99, 235, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a0a0a;
+    --surface: #231414;
+    --surface2: #2e1b1b;
+    --surface-elevated: #351f1f;
+    --border: rgba(255, 255, 255, 0.06);
+    --border-bright: rgba(255, 255, 255, 0.12);
+    --text: #fde2e2;
+    --text-dim: #c9a3a3;
+    --accent: #fb7185;
+    --accent-dim: rgba(251, 113, 133, 0.12);
+    --green: #4ade80;
+    --green-dim: rgba(74, 222, 128, 0.1);
+    --red: #f87171;
+    --red-dim: rgba(248, 113, 113, 0.1);
+    --orange: #fbbf24;
+    --orange-dim: rgba(251, 191, 36, 0.1);
+    --blue: #60a5fa;
+    --blue-dim: rgba(96, 165, 250, 0.1);
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse at 30% 0%, var(--accent-dim) 0%, transparent 50%),
+    radial-gradient(ellipse at 70% 100%, var(--green-dim) 0%, transparent 40%);
+  color: var(--text);
+  font-family: var(--font-sans);
+  padding: 40px;
+  min-height: 100vh;
+  overflow-wrap: break-word;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate {
+  animation: fadeUp 0.35s ease-out both;
+  animation-delay: calc(var(--i, 0) * 0.04s);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+.container { max-width: 1060px; margin: 0 auto; }
+h1 {
+  font-family: var(--font-body);
+  font-size: 32px;
+  font-weight: 400;
+  letter-spacing: -0.3px;
+  margin-bottom: 6px;
+}
+h2 {
+  font-family: var(--font-body);
+  font-size: 22px;
+  font-weight: 400;
+  margin-top: 40px;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-bright);
+}
+h3 {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.subtitle {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin-bottom: 32px;
+}
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.kpi-card {
+  background: var(--surface-elevated, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+.kpi-card__value {
+  font-family: var(--font-body);
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-card__value--green { color: var(--green); }
+.kpi-card__value--red { color: var(--red); }
+.kpi-card__value--orange { color: var(--orange); }
+.kpi-card__value--accent { color: var(--accent); }
+.kpi-card__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+.hero-card {
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
+  border: 1px solid color-mix(in srgb, var(--border) 50%, var(--accent) 50%);
+  border-radius: 12px;
+  padding: 28px 32px;
+  margin-bottom: 28px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+}
+.hero-card p {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.hero-card .label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hero-card .label::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.section-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin-bottom: 16px;
+}
+.review-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+  border-left: 3px solid var(--border-bright);
+}
+.review-card--good { border-left-color: var(--green); }
+.review-card--bad { border-left-color: var(--red); }
+.review-card--ugly { border-left-color: var(--orange); }
+.review-card--question { border-left-color: var(--blue); }
+.review-card .tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-bottom: 8px;
+}
+.review-card--good .tag { background: var(--green-dim); color: var(--green); }
+.review-card--bad .tag { background: var(--red-dim); color: var(--red); }
+.review-card--ugly .tag { background: var(--orange-dim); color: var(--orange); }
+.review-card--question .tag { background: var(--blue-dim); color: var(--blue); }
+.review-card p { font-size: 13px; line-height: 1.6; }
+.review-card code, .section-card code, .hero-card code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.comparison > * { min-width: 0; overflow-wrap: break-word; }
+@media (max-width: 768px) { .comparison { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.panel__header {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.panel--before .panel__header { background: var(--red-dim); color: var(--red); }
+.panel--after .panel__header { background: var(--green-dim); color: var(--green); }
+.panel__body {
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.panel__body ul { padding-left: 2em; }
+.panel__body li { margin-bottom: 4px; }
+.decision-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+}
+.decision-card--high { border-left: 3px solid var(--green); }
+.decision-card--medium { border-left: 3px solid var(--blue); }
+.decision-card--low { border-left: 3px solid var(--orange); }
+.confidence-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.confidence-badge--high { background: var(--green-dim); color: var(--green); }
+.confidence-badge--medium { background: var(--blue-dim); color: var(--blue); }
+.confidence-badge--low { background: var(--orange-dim); color: var(--orange); }
+.file-tree {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  white-space: pre;
+  overflow-x: auto;
+}
+.file-tree .added { color: var(--green); font-weight: 600; }
+.file-tree .modified { color: var(--orange); font-weight: 600; }
+.file-tree .deleted { color: var(--red); font-weight: 600; }
+.file-tree .dim { color: var(--text-dim); font-size: 11px; }
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status--green { background: var(--green-dim); color: var(--green); }
+.status--red { background: var(--red-dim); color: var(--red); }
+.status--orange { background: var(--orange-dim); color: var(--orange); }
+.mermaid-wrap {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 24px;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 350px;
+  margin-bottom: 16px;
+}
+.zoom-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  z-index: 10;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+}
+.zoom-controls button {
+  width: 28px; height: 28px;
+  border: none; background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.zoom-controls button:hover { background: var(--border); color: var(--text); }
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.table-scroll { overflow-x: auto; }
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.data-table thead { position: sticky; top: 0; z-index: 2; }
+.data-table th {
+  background: var(--surface2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 2px solid var(--border-bright);
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.data-table tbody tr:last-child td { border-bottom: none; }
+.data-table tbody tr:nth-child(even) { background: var(--accent-dim); }
+.data-table tbody tr { transition: background 0.15s ease; }
+.data-table tbody tr:hover { background: var(--border); }
+.data-table code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.data-table small { display: block; color: var(--text-dim); font-size: 11px; margin-top: 3px; }
+.details-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+@media (max-width: 768px) { .details-grid { grid-template-columns: 1fr; } }
+.grid > *, .flex > * { min-width: 0; }
+nav.section-nav {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 180px;
+  height: 100vh;
+  padding: 20px 12px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  z-index: 100;
+  overflow-y: auto;
+}
+nav.section-nav a {
+  display: block;
+  padding: 4px 0;
+  color: var(--text-dim);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+nav.section-nav a:hover { color: var(--accent); }
+@media (max-width: 1100px) { nav.section-nav { display: none; } }
+.container { padding-right: 200px; }
+@media (max-width: 1100px) { .container { padding-right: 0; } }
+
+</style>
+</head>
+<body>
+<nav class="section-nav">
+  <a href="#summary">Executive Summary</a>
+  <a href="#kpi">KPI Dashboard</a>
+  <a href="#architecture">Module Architecture</a>
+  <a href="#features">Feature Comparisons</a>
+  <a href="#review">Code Review</a>
+  <a href="#files">File Map</a>
+  <a href="#decisions">Decision Log</a>
+  <a href="#reentry">Re-entry Context</a>
+</nav>
+
+<div class="container">
+
+<!-- ===== 1. EXECUTIVE SUMMARY ===== -->
+<h1 class="animate" style="--i:0" id="summary">Auth Migration &mdash; Diff Review</h1>
+<p class="subtitle animate" style="--i:1">7-change auth improvement plan &middot; branch main at abe4eb8 &middot; 8 files changed</p>
+
+<div class="hero-card animate" style="--i:2">
+  <div class="label">Executive Summary</div>
+  <p>
+    The old auth flow was fragile: users had to manually run <code>auth refresh</code> to revive expired sessions, headless Playwright was the only browser path (slow, resource-heavy), and cookie state was thrown away after every login. A failed API call meant silent data loss.
+  </p>
+  <p style="margin-top:12px">
+    This migration unifies authentication into a single <code>auth login</code> command that tries CDP (Chrome DevTools Protocol) first for instant cookie extraction, then falls back to a persistent headless browser context. Expired sessions now auto-recover inside <code>_request()</code> without user intervention. The Node.js CDP fallback &mdash; a source of XSS and thread-safety bugs &mdash; has been deleted entirely.
+  </p>
+  <p style="margin-top:12px">
+    <strong>Core insight:</strong> Treat auth as a transparent background concern, not a user-facing ceremony. Sessions heal themselves; cookies carry metadata for staleness detection; and one command handles all login paths.
+  </p>
+</div>
+
+<!-- ===== 2. KPI DASHBOARD ===== -->
+<h2 class="animate" style="--i:3" id="kpi">KPI Dashboard</h2>
+<div class="kpi-row animate" style="--i:4">
+  <div class="kpi-card">
+    <div class="kpi-card__value kpi-card__value--accent">8</div>
+    <div class="kpi-card__label">Files Changed</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card__value kpi-card__value--green">+812</div>
+    <div class="kpi-card__label">Lines Added</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card__value kpi-card__value--red">-242</div>
+    <div class="kpi-card__label">Lines Removed</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card__value kpi-card__value--green">268</div>
+    <div class="kpi-card__label">Tests Passing</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card__value kpi-card__value--green">0</div>
+    <div class="kpi-card__label">P0/P1/P2 Remaining</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-card__value kpi-card__value--green">7/7</div>
+    <div class="kpi-card__label">Findings Fixed</div>
+  </div>
+  <div class="kpi-card">
+    <div class="status status--green">CHANGELOG</div>
+    <div class="kpi-card__label">Updated</div>
+  </div>
+</div>
+
+<!-- ===== 3. MODULE ARCHITECTURE ===== -->
+<h2 class="animate" style="--i:5" id="architecture">Module Architecture</h2>
+<div class="mermaid-wrap animate" style="--i:6">
+  <div class="zoom-controls">
+    <button onclick="mermaidZoom(this, 1.2)" title="Zoom in">+</button>
+    <button onclick="mermaidZoom(this, 0.8)" title="Zoom out">&minus;</button>
+    <button onclick="mermaidZoom(this, 'reset')" title="Reset">&circlearrowleft;</button>
+  </div>
+  <div class="mermaid">
+graph TD
+    CLI[cli.py<br/><small>CLI entry &amp; arg parsing</small>]
+    AUTH[auth.py<br/><small>Login / CDP / Headless</small>]
+    API[api.py<br/><small>HTTP client + auto-refresh</small>]
+    CMD[commands.py<br/><small>Command dispatch</small>]
+    CFG[config.py<br/><small>Config + cookie metadata</small>]
+    SHOW[show.py]
+    SUB[submit.py]
+    MAN[manifest.py]
+    ASN[assignments.py]
+    CC[course_config.py]
+    DSP[display.py]
+
+    CLI -->|dispatch| CMD
+    CLI -->|auth login| AUTH
+    CMD -->|API calls| API
+    CMD -->|config| CFG
+    API -->|session expired| AUTH
+    AUTH -->|save/load cookies| CFG
+    CMD --> SHOW
+    CMD --> SUB
+    CMD --> MAN
+    CMD --> ASN
+    CMD --> CC
+    CMD --> DSP
+
+    style AUTH fill:#fee2e2,stroke:#be123c,stroke-width:2px,color:#1c1917
+    style API fill:#fee2e2,stroke:#be123c,stroke-width:2px,color:#1c1917
+    style CFG fill:#fee2e2,stroke:#be123c,stroke-width:2px,color:#1c1917
+    style CLI fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1c1917
+  </div>
+</div>
+<p style="font-size:12px; color:var(--text-dim); margin-bottom:16px">
+  <span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fee2e2;border:1px solid #be123c;vertical-align:middle;margin-right:4px"></span> Changed in this migration &nbsp;
+  <span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fef3c7;border:1px solid #d97706;vertical-align:middle;margin-right:4px"></span> Interface changes
+</p>
+
+<!-- ===== 4. FEATURE COMPARISONS ===== -->
+<h2 class="animate" style="--i:7" id="features">Feature Comparisons</h2>
+
+<!-- Change 1 -->
+<h3>Change 1 (P0): Auto-Refresh on Session Expiry</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li>API calls fail silently on session expiry</li>
+        <li>User must manually run <code>auth refresh</code></li>
+        <li>No retry logic in <code>_request()</code></li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>_do_request()</code> extracts retryable HTTP logic</li>
+        <li><code>_request()</code> catches <code>SessionExpiredError</code></li>
+        <li>Auto-attempts CDP cookie refresh once</li>
+        <li>Retries the original request after refresh</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Change 2 -->
+<h3>Change 2 (P0): CDP-First Login</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li>Headless Playwright was the only path</li>
+        <li>Slow &mdash; launches full browser, navigates pages</li>
+        <li><code>cmd_auth_login()</code> had no CDP awareness</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>cmd_auth_login()</code> tries CDP first</li>
+        <li>Falls back to headless only if CDP fails</li>
+        <li><code>--headless</code> flag to skip CDP entirely</li>
+        <li><code>--cdp-only</code> to prevent headless fallback</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Change 3 -->
+<h3>Change 3 (P1): Persistent Browser Context</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>launch()</code> creates ephemeral browser</li>
+        <li>No state preserved between runs</li>
+        <li>Every login starts from scratch</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>launch_persistent_context()</code> with <code>BROWSER_STATE_DIR</code></li>
+        <li>LocalStorage, session data preserved</li>
+        <li>Faster subsequent logins</li>
+        <li><code>--clean</code> flag to wipe state if needed</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Change 4 -->
+<h3>Change 4 (P1): Cookie Metadata</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li>Cookies saved as raw dict to file</li>
+        <li>No timestamp &mdash; can't detect staleness</li>
+        <li>No backward-compat concerns (no format)</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>save_cookies()</code> wraps with <code>{"cookies": {...}, "extracted_at": "..."}</code></li>
+        <li><code>load_cookies()</code> reads both old and new formats</li>
+        <li><code>get_cookie_age_days()</code> for staleness check</li>
+        <li><code>warn_if_cookies_stale()</code> in <code>auth status</code></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Change 5 -->
+<h3>Change 5 (P2): Better Error Messages</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li>Generic "session expired" errors</li>
+        <li>No guidance on recovery steps</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>_session_expired_msg()</code> with structured recovery options</li>
+        <li>Suggests CDP refresh, headless login, or manual login</li>
+        <li>Includes the HTTP status code that triggered expiry</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Change 6 -->
+<h3>Change 6 (P2): Node.js CDP Fallback Removed</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>_cdp_get_cookies_node()</code> as fallback</li>
+        <li>XSS vulnerability in cookie handling</li>
+        <li>Thread-safety bugs in subprocess management</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>_cdp_get_cookies_node()</code> deleted entirely</li>
+        <li>All CDP via Python HTTP to <code>localhost:PORT</code></li>
+        <li>Single code path, no subprocess spawning</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Change 7 -->
+<h3>Change 7 (P3): Code Quality</h3>
+<div class="comparison">
+  <div class="panel panel--before">
+    <div class="panel__header">Before</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>asyncio.get_event_loop().run_until_complete()</code> (deprecated)</li>
+        <li>No context manager on <code>HeadlessAuthenticator</code></li>
+        <li><code>cmd_auth_refresh</code> dead code in <code>commands.py</code></li>
+        <li><code>warn_if_cookies_stale()</code> defined but never called</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel panel--after">
+    <div class="panel__header">After</div>
+    <div class="panel__body">
+      <ul>
+        <li><code>asyncio.run()</code> replaces deprecated API</li>
+        <li><code>HeadlessAuthenticator</code> is a context manager</li>
+        <li><code>cmd_auth_refresh</code> removed from <code>commands.py</code></li>
+        <li><code>warn_if_cookies_stale()</code> wired into <code>auth status</code></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 5. FLOW DIAGRAM ===== -->
+<h2 class="animate" style="--i:8">Auth Flow Diagram</h2>
+<div class="mermaid-wrap animate" style="--i:9">
+  <div class="zoom-controls">
+    <button onclick="mermaidZoom(this, 1.2)" title="Zoom in">+</button>
+    <button onclick="mermaidZoom(this, 0.8)" title="Zoom out">&minus;</button>
+    <button onclick="mermaidZoom(this, 'reset')" title="Reset">&circlearrowleft;</button>
+  </div>
+  <div class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant CLI as cli.py
+    participant AUTH as auth.py
+    participant API as api.py
+    participant CFG as config.py
+
+    U->>CLI: auth login [--cdp-only|--headless|--clean]
+    CLI->>AUTH: cmd_auth_login(flags)
+    alt CDP available
+        AUTH->>AUTH: _cdp_get_cookies(port)
+        AUTH-->>CFG: save_cookies(metadata)
+    else headless fallback
+        AUTH->>AUTH: HeadlessAuthenticator (persistent context)
+        AUTH-->>CFG: save_cookies(metadata)
+    end
+    AUTH-->>CLI: success
+
+    Note over API: Later, API call with saved cookies
+    U->>API: _request(endpoint)
+    API->>API: _do_request()
+    alt session valid
+        API-->>U: response
+    else session expired
+        API->>API: catch SessionExpiredError
+        API->>AUTH: _cdp_get_cookies(refresh)
+        AUTH-->>CFG: save_cookies(metadata)
+        API->>API: retry _do_request()
+        API-->>U: response (recovered)
+    end
+  </div>
+</div>
+
+<!-- ===== 6. CODE REVIEW ===== -->
+<h2 class="animate" style="--i:10" id="review">Code Review</h2>
+
+<div class="review-card review-card--good animate" style="--i:11">
+  <div class="tag">Good</div>
+  <p><strong>Auto-recovery in <code>_request()</code>.</strong> Catching <code>SessionExpiredError</code> and retrying once after CDP refresh eliminates the most common user pain point. The single-retry cap prevents infinite loops.</p>
+</div>
+
+<div class="review-card review-card--good animate" style="--i:12">
+  <div class="tag">Good</div>
+  <p><strong>CDP-first strategy.</strong> Trying the fast path (HTTP to <code>localhost:PORT</code>) before spinning up Playwright is the right ordering. Most users have a browser open; CDP takes milliseconds vs. seconds for headless.</p>
+</div>
+
+<div class="review-card review-card--good animate" style="--i:13">
+  <div class="tag">Good</div>
+  <p><strong>Backward-compatible cookie format.</strong> <code>load_cookies()</code> handles both old (raw dict) and new (<code>{"cookies":..., "extracted_at":...}</code>) formats. No migration script needed.</p>
+</div>
+
+<div class="review-card review-card--good animate" style="--i:14">
+  <div class="tag">Good</div>
+  <p><strong>Dead code removal.</strong> <code>cmd_auth_refresh</code> and <code>_cdp_get_cookies_node()</code> deleted, not deprecated-in-place. Clean cut.</p>
+</div>
+
+<div class="review-card review-card--ugly animate" style="--i:15">
+  <div class="tag">Ugly</div>
+  <p><strong><code>warn_if_cookies_stale()</code> was dead code.</strong> Defined in <code>config.py</code> but never called anywhere until this migration wired it into <code>cmd_auth_status</code>. The function existed for weeks without being invoked &mdash; a reminder that adding a helper without wiring it is half-done work.</p>
+</div>
+
+<div class="review-card review-card--ugly animate" style="--i:16">
+  <div class="tag">Ugly</div>
+  <p><strong><code>--cdp-port</code> not on <code>auth login</code>.</strong> Users must set <code>LIGHTHOUSE_CDP_PORT</code> env var or use <code>auth refresh --cdp-port</code> for non-default ports. This is an intentional design choice (not a bug) to keep <code>auth login</code> simple, but may surprise power users.</p>
+</div>
+
+<div class="review-card review-card--question animate" style="--i:17">
+  <div class="tag">Question</div>
+  <p><strong>What if CDP port is stale?</strong> The auto-refresh in <code>_request()</code> uses the configured CDP port. If the browser was restarted on a different debug port, the refresh will fail silently and the user sees the session-expired error. Should there be a port-discovery mechanism?</p>
+</div>
+
+<!-- ===== 7. FILE MAP ===== -->
+<h2 class="animate" style="--i:18" id="files">File Map</h2>
+<pre class="file-tree animate" style="--i:19">lighthouse-cli/
+├── lighthouse_cli/
+│   ├── <span class="modified">api.py</span>          <span class="dim">+77/-58  auto-refresh, _do_request, Node.js fallback removed</span>
+│   ├── <span class="modified">auth.py</span>         <span class="dim">+122/-27 context manager, persistent browser, CDP-first</span>
+│   ├── <span class="modified">cli.py</span>          <span class="dim">+21/-5   new CLI flags, removed cmd_auth_refresh import</span>
+│   ├── <span class="modified">commands.py</span>     <span class="dim">+8/-19   dead code removed, warn_if_cookies_stale wired</span>
+│   ├── <span class="modified">config.py</span>       <span class="dim">+60/-4   BROWSER_STATE_DIR, cookie metadata, staleness check</span>
+│   ├── show.py            <span class="dim">unchanged</span>
+│   ├── submit.py          <span class="dim">unchanged</span>
+│   ├── manifest.py        <span class="dim">unchanged</span>
+│   ├── assignments.py     <span class="dim">unchanged</span>
+│   ├── course_config.py   <span class="dim">unchanged</span>
+│   └── display.py         <span class="dim">unchanged</span>
+├── tests/
+│   ├── <span class="modified">test_auth_login.py</span>  <span class="dim">+516/-113  comprehensive new tests</span>
+│   ├── <span class="modified">test_submit.py</span>      <span class="dim">+6/-6      import updates</span>
+│   ├── <span class="modified">test_assignments.py</span> <span class="dim">+2/-2      import updates</span>
+│   └── ... 16 other test files  <span class="dim">unchanged</span>
+├── pyproject.toml        <span class="dim">unchanged</span>
+└── README.md             <span class="dim">unchanged</span></pre>
+
+<!-- ===== 8. TEST COVERAGE ===== -->
+<h2 class="animate" style="--i:20">Test Coverage</h2>
+<div class="table-wrap animate" style="--i:21">
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Test File</th>
+          <th>Change</th>
+          <th>What's Covered</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="--i:22">
+          <td><code>test_auth_login.py</code></td>
+          <td><span class="status status--green">+516 lines</span></td>
+          <td>CDP-first login, headless fallback, persistent context, <code>--headless</code>/<code>--cdp-only</code>/<code>--clean</code> flags, cookie metadata, auto-refresh in <code>_request()</code></td>
+        </tr>
+        <tr style="--i:23">
+          <td><code>test_submit.py</code></td>
+          <td><span class="status status--orange">+6/-6</span></td>
+          <td>Import paths updated for removed <code>cmd_auth_refresh</code></td>
+        </tr>
+        <tr style="--i:24">
+          <td><code>test_assignments.py</code></td>
+          <td><span class="status status--orange">+2/-2</span></td>
+          <td>Import paths updated for removed <code>cmd_auth_refresh</code></td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td>268 tests total</td>
+          <td></td>
+          <td>All passing</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+</div>
+
+<!-- ===== 9. DECISION LOG ===== -->
+<h2 class="animate" style="--i:25" id="decisions">Decision Log</h2>
+
+<div class="decision-card decision-card--high animate" style="--i:26">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <strong style="font-size:14px">Auto-refresh inside <code>_request()</code></strong>
+    <span class="confidence-badge confidence-badge--high">High Confidence</span>
+  </div>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:8px">
+    <strong>Decision:</strong> Catch <code>SessionExpiredError</code> at the HTTP layer and attempt a single CDP cookie refresh + retry before failing.
+  </p>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:4px">
+    <strong>Rationale:</strong> Session expiry is the #1 support request. Users don't understand why commands fail. Making recovery automatic eliminates an entire class of user confusion. Single retry prevents infinite loops.
+  </p>
+  <p style="font-size:12px;color:var(--text-dim);margin-top:8px">
+    <strong>Alternatives:</strong> (1) Separate <code>auth refresh</code> command &mdash; rejected because users forget to run it. (2) Background refresh timer &mdash; rejected as over-engineering for a CLI tool.
+  </p>
+</div>
+
+<div class="decision-card decision-card--high animate" style="--i:27">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <strong style="font-size:14px">CDP-first, headless-fallback ordering</strong>
+    <span class="confidence-badge confidence-badge--high">High Confidence</span>
+  </div>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:8px">
+    <strong>Decision:</strong> Always try Chrome DevTools Protocol before launching a headless browser.
+  </p>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:4px">
+    <strong>Rationale:</strong> CDP is instant (HTTP request to existing browser). Headless Playwright takes seconds and eats RAM. Most users have a browser open during CLI usage.
+  </p>
+  <p style="font-size:12px;color:var(--text-dim);margin-top:8px">
+    <strong>Alternatives:</strong> Headless-only was the previous default. CDP-only would fail for users without an open browser.
+  </p>
+</div>
+
+<div class="decision-card decision-card--high animate" style="--i:28">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <strong style="font-size:14px"><code>warn_if_cookies_stale()</code> only on valid sessions</strong>
+    <span class="confidence-badge confidence-badge--high">High Confidence</span>
+  </div>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:8px">
+    <strong>Decision:</strong> Warn about cookie age only inside the <code>if valid:</code> block of <code>cmd_auth_status</code>.
+  </p>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:4px">
+    <strong>Rationale:</strong> Warning on an already-expired session is noise &mdash; the user already knows they need to re-auth. Staleness warnings are only useful when the session is technically valid but aging toward expiry.
+  </p>
+</div>
+
+<div class="decision-card decision-card--high animate" style="--i:29">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <strong style="font-size:14px">No <code>--cdp-port</code> on <code>auth login</code></strong>
+    <span class="confidence-badge confidence-badge--high">High Confidence</span>
+  </div>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:8px">
+    <strong>Decision:</strong> Keep <code>--cdp-port</code> off <code>auth login</code>. Users use <code>auth refresh --cdp-port</code> or <code>LIGHTHOUSE_CDP_PORT</code> env var.
+  </p>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:4px">
+    <strong>Rationale:</strong> <code>auth login</code> is for the common case &mdash; auto-discover or headless. Port configuration is a power-user concern, better served by env var or <code>auth refresh</code> which is the targeted refresh command.
+  </p>
+</div>
+
+<div class="decision-card decision-card--high animate" style="--i:30">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <strong style="font-size:14px">Delete Node.js CDP fallback entirely</strong>
+    <span class="confidence-badge confidence-badge--high">High Confidence</span>
+  </div>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:8px">
+    <strong>Decision:</strong> Remove <code>_cdp_get_cookies_node()</code> rather than fix it.
+  </p>
+  <p style="font-size:13px;line-height:1.6;margin-bottom:4px">
+    <strong>Rationale:</strong> The Node.js path had XSS and thread-safety bugs. Python HTTP to <code>localhost:PORT</code> covers all real use cases. Maintaining two CDP paths is unnecessary complexity.
+  </p>
+</div>
+
+<!-- ===== 10. RE-ENTRY CONTEXT ===== -->
+<h2 class="animate" style="--i:31" id="reentry">Re-entry Context</h2>
+
+<div class="section-card animate" style="--i:32">
+  <h3>Key Invariants</h3>
+  <ul style="padding-left:2em;font-size:13px;line-height:1.8">
+    <li><code>load_cookies()</code> must handle both old (raw dict) and new (<code>{"cookies":..., "extracted_at":...}</code>) formats. Tests cover both paths.</li>
+    <li><code>HeadlessAuthenticator</code> must be used as a context manager. If someone calls methods without <code>with</code>, the browser won't close.</li>
+    <li>Auto-refresh in <code>_request()</code> retries exactly once. Changing this requires updating the retry-cap logic.</li>
+    <li><code>BROWSER_STATE_DIR</code> must exist before <code>launch_persistent_context()</code>. <code>--clean</code> wipes it.</li>
+  </ul>
+</div>
+
+<div class="section-card animate" style="--i:33">
+  <h3>Non-obvious Coupling</h3>
+  <ul style="padding-left:2em;font-size:13px;line-height:1.8">
+    <li><code>api.py</code> imports from <code>auth.py</code> for auto-refresh. Changing the CDP function signature in <code>auth.py</code> breaks the retry in <code>api.py</code>.</li>
+    <li><code>config.py</code> cookie format is coupled to <code>auth.py</code> save and load. Adding fields to the metadata wrapper requires updating both.</li>
+    <li><code>warn_if_cookies_stale()</code> reads <code>extracted_at</code> from cookie metadata. If the cookie file is in old format (no timestamp), the function returns <code>None</code> silently.</li>
+  </ul>
+</div>
+
+<div class="section-card animate" style="--i:34">
+  <h3>Gotchas</h3>
+  <ul style="padding-left:2em;font-size:13px;line-height:1.8">
+    <li><code>--clean</code> flag wipes <code>BROWSER_STATE_DIR</code> which is also used for headless. Running <code>auth login --clean</code> followed by <code>auth login</code> will be slower (no cached state).</li>
+    <li>CDP port discovery happens at login time. If the browser restarts on a different port, existing cookies are still valid until expiry &mdash; but auto-refresh will fail to reach CDP.</li>
+    <li><code>asyncio.run()</code> creates a new event loop each call. If <code>HeadlessAuthenticator</code> methods are called from an existing event loop (e.g., in a future async CLI), this will crash. The context manager pattern mitigates this by scoping the loop.</li>
+  </ul>
+</div>
+
+<div class="section-card animate" style="--i:35">
+  <h3>Don't Forget</h3>
+  <ul style="padding-left:2em;font-size:13px;line-height:1.8">
+    <li>Update <code>README.md</code> if <code>auth login</code> flags are documented &mdash; currently the README references the old <code>auth refresh</code> command.</li>
+    <li>The 7-change plan has no more pending items. All P0-P3 are complete.</li>
+  </ul>
+</div>
+
+</div> <!-- end .container -->
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  themeVariables: {
+    primaryColor: '#fee2e2',
+    primaryTextColor: '#1c1917',
+    primaryBorderColor: '#be123c',
+    lineColor: '#78716c',
+    secondaryColor: '#fef0ee',
+    tertiaryColor: '#fff5f5',
+    fontSize: '14px'
+  }
+});
+
+function mermaidZoom(btn, factor) {
+  const wrap = btn.closest('.mermaid-wrap');
+  const svg = wrap.querySelector('svg');
+  if (!svg) return;
+  if (factor === 'reset') {
+    svg.style.transform = '';
+    svg.style.transformOrigin = '';
+    wrap.dataset.scale = '1';
+    return;
+  }
+  const current = parseFloat(wrap.dataset.scale || '1');
+  const next = Math.max(0.3, Math.min(3, current * factor));
+  wrap.dataset.scale = next.toString();
+  svg.style.transform = `scale(${next})`;
+  svg.style.transformOrigin = 'center center';
+}
+</script>
+</body>
+</html>
