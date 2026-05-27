@@ -14,6 +14,7 @@ from lighthouse_cli.ms_auth import (
     MicrosoftSSOClient,
     MicrosoftSSOError,
     _extract_config_json,
+    _extract_error_code_and_msg,
     _parse_user_proofs,
 )
 

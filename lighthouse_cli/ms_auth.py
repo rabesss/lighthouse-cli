@@ -20,7 +20,7 @@ import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -114,32 +114,59 @@ class MicrosoftSSOError(Exception):
 # Token extraction helpers
 # ---------------------------------------------------------------------------
 
+def _extract_balanced_json_object(text: str, start: int) -> str | None:
+    """Return a ``{...}`` JSON object substring starting at ``start`` (must be ``{``)."""
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None
+
+
 def _extract_config_json(html: str) -> dict[str, Any] | None:
     """Extract the ``$Config`` JavaScript object from Microsoft's login page.
 
-    The page includes a ``<script>`` tag containing something like::
-
-        $Config = {
-            "sFT": "...",
-            "sCtx": "...",
-            "urlPost": "...",
-            ...
-        };
-
-    Returns the parsed JSON dict, or ``None`` if extraction fails.
+    Uses brace-balanced parsing because ``$Config`` contains deeply nested JSON
+    (non-greedy regex stops at the first ``}`` and drops ``sFT`` / ``sCtx``).
     """
-    # Pattern: $Config = { ... };
-    # Use BeautifulSoup to find all script tags, then regex-extract the JSON
-    soup = BeautifulSoup(html, "html.parser")
-    for script in soup.find_all("script"):
-        if not script.string:
+    pos = 0
+    while True:
+        m = re.search(r"\$Config\s*=", html[pos:])
+        if not m:
+            break
+        match_end = pos + m.end()
+        brace = html.find("{", match_end)
+        if brace < 0:
+            pos = match_end
             continue
-        m = re.search(r'\$Config\s*=\s*(\{.*?\});', script.string, re.DOTALL)
-        if m:
+        blob = _extract_balanced_json_object(html, brace)
+        if blob:
             try:
-                return json.loads(m.group(1))
+                parsed = json.loads(blob)
+                if isinstance(parsed, dict):
+                    return parsed
             except json.JSONDecodeError:
-                continue
+                pass
+        pos = match_end
     return None
 
 
@@ -257,6 +284,17 @@ def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
         if proof.is_default:
             return proof
     return proofs[0]
+
+
+def _absolute_url(base_url: str, path: str) -> str:
+    """Resolve Microsoft login URLs (often tenant-relative paths)."""
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if path.startswith("/"):
+        return f"{origin}{path}"
+    return urljoin(f"{origin}/", path)
 
 
 def _mask_phone_hint(data: str) -> str:
@@ -492,7 +530,89 @@ class MicrosoftSSOClient:
 
         # Store the MS page URL for later (needed for form action resolution)
         config["_ms_url"] = resp.url
-        return config
+        return self._hydrate_ms_flow_config(config)
+
+    def _hydrate_ms_flow_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Fetch flowToken/ctx when the first Microsoft page omits them (common on SAML2)."""
+        if config.get("sFT") and config.get("sCtx"):
+            return config
+        url_post = config.get("urlPost")
+        if not url_post:
+            return config
+        ms_base = str(config.get("_ms_url", "https://login.microsoftonline.com"))
+        post_page_url = _absolute_url(ms_base, str(url_post))
+        resp = self._get(post_page_url)
+        if resp.status_code != 200:
+            return config
+        hydrated = _extract_config_json(resp.text)
+        if not hydrated:
+            return config
+        merged = dict(config)
+        for key, val in hydrated.items():
+            if key.startswith("_"):
+                continue
+            if key in ("sFT", "sCtx", "urlPost", "canary", "apiCanary", "sessionId", "pgid"):
+                merged[key] = val
+            elif key not in merged:
+                merged[key] = val
+        merged["_ms_url"] = resp.url
+        return merged
+
+    def _step_get_credential_type(
+        self, config: dict[str, Any], username: str
+    ) -> dict[str, Any]:
+        """Call GetCredentialType to refresh flowToken before password POST."""
+        gct_url = config.get("urlGetCredentialType")
+        if not gct_url or not config.get("sFT") or not config.get("sCtx"):
+            return config
+
+        gct_full = _absolute_url(str(config.get("_ms_url", "")), str(gct_url))
+        payload = {
+            "username": username,
+            "isOtherIdpSupported": True,
+            "checkPhones": False,
+            "isRemoteNGCSupported": bool(config.get("fIsRemoteNGCSupported", True)),
+            "isCookieBannerShown": False,
+            "isFidoSupported": bool(config.get("fIsFidoSupported", True)),
+            "originalRequest": str(config["sCtx"]),
+            "flowToken": str(config["sFT"]),
+            "country": "IN",
+            "forceotclogin": False,
+            "isExternalFederationDisallowed": False,
+            "isRemoteConnectSupported": True,
+            "federationFlags": 0,
+            "isSignup": False,
+            "isAccessPassSupported": bool(config.get("fIsAccessPassSupported", True)),
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "canary": str(config.get("apiCanary") or config.get("canary") or ""),
+            "client-request-id": str(config.get("correlationId") or ""),
+            "hpgact": str(config.get("hpgact", "0")),
+            "hpgid": str(config.get("hpgid", "0")),
+            "hpgrequestid": str(config.get("sessionId") or ""),
+            "Referer": str(config.get("_ms_url", "")),
+        }
+        resp = self._session.post(
+            gct_full,
+            json=payload,
+            headers=headers,
+            allow_redirects=False,
+            timeout=self._timeout,
+        )
+        if resp.status_code != 200:
+            return config
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            return config
+
+        updated = dict(config)
+        if data.get("FlowToken"):
+            updated["sFT"] = data["FlowToken"]
+        if data.get("apiCanary"):
+            updated["apiCanary"] = data["apiCanary"]
+        return updated
 
     def _step_post_credentials(
         self,
@@ -520,40 +640,54 @@ class MicrosoftSSOClient:
                 recovery="Microsoft may have changed their login flow.",
             )
 
-        # Build the form data with the required flow tokens
+        config = self._hydrate_ms_flow_config(config)
+        config = self._step_get_credential_type(config, username)
+        if not config.get("sFT") or not config.get("sCtx"):
+            raise MicrosoftSSOError(
+                "Microsoft login flow tokens (flowToken/ctx) are missing.",
+                step="POST credentials",
+                recovery="Microsoft may have changed their login page. Try again later.",
+            )
+
+        ms_base = str(config.get("_ms_url", "https://login.microsoftonline.com"))
+        login_url = _absolute_url(ms_base, str(url_post))
+
+        sft_name = str(config.get("sFTName") or "flowToken")
         data: dict[str, str] = {
             "login": username,
             "loginfmt": username,
             "passwd": password,
+            sft_name: str(config["sFT"]),
+            "ctx": str(config["sCtx"]),
+            "canary": str(config.get("canary") or ""),
         }
+        if config.get("sessionId"):
+            data["hpgrequestid"] = str(config["sessionId"])
 
-        # Include flow tokens from $Config
-        for key in ("sFT", "sFTName", "sCtx", "canary", "hpgrequestid", "i2", "i17", "i18", "i19"):
-            if key in config:
-                data[key] = str(config[key])
+        resp = self._post(
+            login_url,
+            data=data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": str(config.get("_ms_url", "")),
+            },
+        )
 
-        # Include any other tokens that look like flow parameters
-        for key, val in config.items():
-            if (
-                isinstance(val, (str, int, float, bool))
-                and key not in data
-                and not key.startswith("_")
-            ):
-                # Include API and flow related tokens
-                if key in (
-                    "apiCanary", "canary", "correlationId",
-                    "sessionId", "fid", "deviceId"
-                ):
-                    data[key] = str(val)
-
-        resp = self._post(url_post, data=data)
+        if "error.aspx" in resp.text:
+            m = re.search(r"error\.aspx\?err=(\d+)", resp.text)
+            code = m.group(1) if m else "unknown"
+            raise MicrosoftSSOError(
+                f"Microsoft login returned error {code}.",
+                step="POST credentials",
+                recovery="Verify your password in a browser, then try again.",
+            )
 
         # Handle redirect (transparent re-auth)
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location", "")
             if location:
                 resolved = location if location.startswith("http") else urljoin(
-                    url_post, location
+                    login_url, location
                 )
                 return self._get(resolved)
 
@@ -562,8 +696,13 @@ class MicrosoftSSOClient:
     def _is_error_page(self, resp: requests.Response) -> bool:
         """Check if the response is a Microsoft error page."""
         text = resp.text.lower()
+        cfg = _extract_config_json(resp.text) or {}
+        err_code = cfg.get("sErrorCode")
+        if err_code and str(err_code) not in ("50058",):
+            return True
         return (
             resp.status_code >= 400
+            or "error.aspx" in text
             or "servererror" in text
             or "serrtxt" in text
             or "password is incorrect" in text
@@ -590,11 +729,7 @@ class MicrosoftSSOClient:
         )
 
     def _resolve_mfa_url(self, resp: requests.Response, path: str) -> str:
-        if path.startswith("http"):
-            return path
-        if path.startswith("/"):
-            return urljoin(resp.url, path)
-        return urljoin("https://login.microsoftonline.com", path)
+        return _absolute_url(resp.url, path)
 
     def _print_mfa_phase_banner(
         self,
