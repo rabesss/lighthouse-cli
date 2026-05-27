@@ -8,10 +8,17 @@ import pytest
 import requests
 
 from lighthouse_cli.ms_auth import (
+    MFA_METHOD_APP,
+    MFA_METHOD_CHOOSE,
+    MFA_METHOD_SMS,
+    _prompt_user_proof_choice,
     MicrosoftSSOClient,
     MicrosoftSSOError,
+    UserProof,
     _extract_config_json,
     _extract_error_code_and_msg,
+    _parse_user_proofs,
+    _select_user_proof,
     BASE_URL,
     D2L_COOKIE_NAMES,
     MS_ERROR_CODES,
@@ -104,6 +111,54 @@ def make_mock_response(
 # ---------------------------------------------------------------------------
 # _extract_config_json tests
 # ---------------------------------------------------------------------------
+
+SAMPLE_CONVERGED_TFA_HTML = """<html><body>ConvergedTFA
+<script>
+$Config = {
+    "sFT": "mfa-flow",
+    "sCtx": "mfa-ctx",
+    "sFTName": "flowToken",
+    "urlPost": "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+    "urlBeginAuth": "https://login.microsoftonline.com/common/SAS/BeginAuth",
+    "urlEndAuth": "https://login.microsoftonline.com/common/SAS/EndAuth",
+    "canary": "canary-1",
+    "sPOST_Username": "user@manipal.edu",
+    "arrUserProofs": [
+        {"authMethodId": "PhoneAppOTP", "display": "Authenticator app", "data": "", "isDefault": true},
+        {"authMethodId": "OneWaySMS", "display": "Text +91 ***1234", "data": "+919876541234", "isDefault": false}
+    ]
+};
+</script>
+</body></html>"""
+
+
+class TestMfaMethodSelection:
+    def test_select_sms_when_registered(self) -> None:
+        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
+        selected = _select_user_proof(proofs, MFA_METHOD_SMS)
+        assert selected.auth_method_id == "OneWaySMS"
+
+    def test_select_app_when_requested(self) -> None:
+        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
+        selected = _select_user_proof(proofs, MFA_METHOD_APP)
+        assert selected.auth_method_id == "PhoneAppOTP"
+
+    def test_auto_uses_default(self) -> None:
+        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
+        selected = _select_user_proof(proofs, "auto")
+        assert selected.auth_method_id == "PhoneAppOTP"
+
+    def test_choose_prompts_for_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _: "2")
+        selected = _select_user_proof(proofs, MFA_METHOD_CHOOSE)
+        assert selected.auth_method_id == "OneWaySMS"
+
+    def test_choose_single_proof_skips_prompt(self) -> None:
+        single = [UserProof("OneWaySMS", "SMS", "+91", True)]
+        assert _prompt_user_proof_choice(single).auth_method_id == "OneWaySMS"
+
 
 class TestExtractConfigJson:
     def test_extracts_valid_config(self) -> None:

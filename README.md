@@ -124,12 +124,24 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ---
 
-### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--save-credentials] [--json]`
+### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|choose] [--save-credentials] [--json]`
 
-Headless browser authentication using Playwright. Launches headless
-Chromium, navigates to the SSO login page, and waits for the user to
-complete authentication (including 2FA). Extracts session cookies and
-stores them.
+Pure HTTP Microsoft SSO login (no browser). Two-phase on a TTY: email/password
+first, then verification code. Session cookies usually expire after ~5 days
+(same as the browser); re-run login when `lighthouse auth status` fails.
+
+**Credentials (pick one; do not commit secrets):**
+
+```bash
+# Option A: env vars in the current shell only
+export LIGHTHOUSE_USERNAME='you@learner.manipal.edu'
+export LIGHTHOUSE_PASSWORD='your-password'
+lighthouse auth login
+
+# Option B: file (chmod 600), see scripts/credentials.example.env
+set -a && source ~/.config/lighthouse-cli/credentials.env && set +a
+lighthouse auth login
+```
 
 **Flags:**
 
@@ -137,19 +149,19 @@ stores them.
 |------|---------|-------------|
 | `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
 | `--pass` | — | Password for Microsoft SSO (or `LIGHTHOUSE_PASSWORD` env var) |
-| `--totp` | — | 2FA code. Use `-` to read from stdin pipe |
-| `--save-credentials` | — | Store credentials encrypted for future use |
+| `--totp` | — | 2FA code. Omit for two-phase interactive prompt |
+| `--mfa-method` | `auto` | `auto`, `sms`, `app`, or `choose` (interactive list) |
+| `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days |
 | `--json` | — | Machine-readable output |
 
 **Authentication flow:**
 
-1. Launches headless Chromium via Playwright
-2. Navigates to the SSO login page
-3. Fills credentials (from flags, env vars, stored credentials, or interactive prompt)
-4. Submits 2FA code (from `--totp`, stdin pipe, or interactive prompt)
-5. Extracts D2L session cookies from the authenticated session
-6. Stores cookies to `~/.config/lighthouse-cli/cookies.json`
-7. Optionally saves credentials via `CredentialStore` (Fernet encryption with keyring fallback)
+1. GET D2L SAML login → Microsoft
+2. POST credentials (flags, env, stored credentials, or prompt)
+3. MFA via Microsoft SAS API (`--mfa-method`; text codes may be SMS or WhatsApp)
+4. POST SAML assertion → D2L session cookies
+5. Saves cookies to `~/.config/lighthouse-cli/cookies.json`
+6. Optional `--save-credentials` (Fernet + system keyring)
 
 **Human output:**
 ```

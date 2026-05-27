@@ -18,7 +18,14 @@ from typing import Any
 
 from .config import CONFIG_DIR, ensure_config_dir, save_cookies
 from .api import LighthouseClient
-from .ms_auth import MicrosoftSSOClient, MicrosoftSSOError
+from .ms_auth import (
+    MFA_METHOD_AUTO,
+    MFA_METHOD_CHOOSE,
+    MFA_METHOD_SMS,
+    MicrosoftSSOClient,
+    MicrosoftSSOError,
+    VALID_MFA_METHODS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +185,7 @@ def cmd_auth_login(
     save_credentials: bool = False,
     json_output: bool = False,
     config_dir: str | None = None,
+    mfa_method: str | None = None,
 ) -> int:
     """Authenticate via Microsoft SSO using pure HTTP (no browser).
 
@@ -191,11 +199,12 @@ def cmd_auth_login(
     Args:
         username: Username from --user flag
         password: Password from --pass flag
-        totp_code: 2FA code from --totp flag
+        totp_code: 2FA code from --totp flag (omit for two-phase interactive login)
         totp_stdin: If True, read TOTP from stdin
         save_credentials: If True, save credentials encrypted
         json_output: If True, output JSON
         config_dir: Override config directory
+        mfa_method: MFA delivery preference (auto, sms, app)
 
     Returns:
         Exit code (0=success, 1=auth failure, 2=CLI usage error, 130=interrupted)
@@ -248,10 +257,41 @@ def cmd_auth_login(
         if totp_code is not None and totp_code.strip() == "":
             return _auth_error("2FA code cannot be empty", json_output, 2)
 
+        resolved_mfa_method = (mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD") or MFA_METHOD_AUTO).lower()
+        if resolved_mfa_method not in VALID_MFA_METHODS:
+            return _auth_error(
+                f"Invalid MFA method {resolved_mfa_method!r}. "
+                f"Use: {', '.join(VALID_MFA_METHODS)}",
+                json_output,
+                2,
+            )
+
+        def _on_password_accepted() -> None:
+            if json_output or not _is_interactive():
+                return
+            print("Password accepted. Completing second factor...", flush=True)
+
+        if _is_interactive() and not json_output and totp_code is None:
+            print(
+                "Two-step sign-in: enter email and password first; "
+                "you will be asked for a verification code next.",
+                flush=True,
+            )
+            if resolved_mfa_method == MFA_METHOD_SMS:
+                print("MFA preference: text message (--mfa-method sms).", flush=True)
+            elif resolved_mfa_method == MFA_METHOD_CHOOSE:
+                print("You will be asked to pick a verification method.", flush=True)
+
         # --- Authenticate via HTTP ---
         sso_client = MicrosoftSSOClient()
         try:
-            cookies = sso_client.login(username, password, totp_code)
+            cookies = sso_client.login(
+                username,
+                password,
+                totp_code,
+                mfa_method=resolved_mfa_method,
+                on_credentials_submitted=_on_password_accepted,
+            )
         except MicrosoftSSOError as exc:
             return _auth_error(str(exc), json_output)
         finally:

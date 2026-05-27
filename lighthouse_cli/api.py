@@ -49,9 +49,11 @@ def _session_expired_msg(detail: str = "") -> str:
     parts.append("  1. If you have a browser open: lighthouse auth login")
     parts.append(
         "  2. For headless/CI: set LIGHTHOUSE_USERNAME, LIGHTHOUSE_PASSWORD env vars"
-        " and run: lighthouse auth login --headless"
+        " and run: lighthouse auth login"
     )
-    parts.append("  3. For 2FA in CI: also set LIGHTHOUSE_TOTP to the current code")
+    parts.append(
+        "  3. For 2FA in CI: run with --totp <code> or use two-phase interactive login"
+    )
     return "\n".join(parts)
 
 

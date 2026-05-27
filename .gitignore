@@ -36,3 +36,7 @@ HANDOFF.md
 skills-lock.json
 scorecard.png
 .omo/
+
+# Local credentials (never commit)
+.env.lighthouse
+credentials.lighthouse.env

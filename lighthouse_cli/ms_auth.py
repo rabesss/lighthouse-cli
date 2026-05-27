@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any, Callable
 from urllib.parse import urljoin
 
 import requests
@@ -34,6 +37,29 @@ D2L_COOKIE_NAMES = (
     "d2lSameSiteCanaryA",
     "d2lSameSiteCanaryB",
 )
+
+# CLI / env preference: auto | sms | app
+MFA_METHOD_AUTO = "auto"
+MFA_METHOD_SMS = "sms"
+MFA_METHOD_APP = "app"
+MFA_METHOD_CHOOSE = "choose"
+VALID_MFA_METHODS = (MFA_METHOD_AUTO, MFA_METHOD_SMS, MFA_METHOD_APP, MFA_METHOD_CHOOSE)
+
+# Microsoft SAS AuthMethodId values (see saml2aws AzureAD provider)
+MFA_AUTH_SMS = "OneWaySMS"
+MFA_AUTH_APP_OTP = "PhoneAppOTP"
+MFA_AUTH_APP_NOTIFY = "PhoneAppNotification"
+
+MFA_METHOD_AUTH_IDS: dict[str, tuple[str, ...]] = {
+    MFA_METHOD_SMS: (MFA_AUTH_SMS,),
+    MFA_METHOD_APP: (MFA_AUTH_APP_OTP, MFA_AUTH_APP_NOTIFY),
+}
+
+MFA_METHOD_INSTRUCTIONS: dict[str, str] = {
+    MFA_AUTH_SMS: "Check the SMS text message on your registered phone.",
+    MFA_AUTH_APP_OTP: "Open Microsoft Authenticator and enter the 6-digit code.",
+    MFA_AUTH_APP_NOTIFY: "Approve the sign-in request in Microsoft Authenticator.",
+}
 
 # Microsoft error codes and their meanings
 MS_ERROR_CODES: dict[int, str] = {
@@ -152,6 +178,96 @@ def _extract_error_code_and_msg(html: str) -> tuple[int | None, str | None]:
     return code, msg
 
 
+@dataclass(frozen=True)
+class UserProof:
+    """A registered MFA method on the user's Microsoft account."""
+
+    auth_method_id: str
+    display: str
+    data: str
+    is_default: bool
+
+
+def _parse_user_proofs(config: dict[str, Any]) -> list[UserProof]:
+    proofs: list[UserProof] = []
+    for raw in config.get("arrUserProofs") or []:
+        if not isinstance(raw, dict):
+            continue
+        auth_id = str(raw.get("authMethodId") or "")
+        if not auth_id:
+            continue
+        proofs.append(
+            UserProof(
+                auth_method_id=auth_id,
+                display=str(raw.get("display") or auth_id),
+                data=str(raw.get("data") or ""),
+                is_default=bool(raw.get("isDefault")),
+            )
+        )
+    return proofs
+
+
+def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
+    """Interactively pick one of several registered MFA methods."""
+    if len(proofs) == 1:
+        return proofs[0]
+    if not sys.stdin.isatty():
+        raise MicrosoftSSOError(
+            "Multiple MFA methods are available; pick one with --mfa-method sms|app.",
+            step="MFA",
+            recovery="Re-run with --mfa-method or use a single-method account.",
+        )
+    print("\nChoose a verification method:", flush=True)
+    for idx, proof in enumerate(proofs, start=1):
+        default = " (Microsoft default)" if proof.is_default else ""
+        print(f"  {idx}) {proof.display}{default}", flush=True)
+    while True:
+        choice = input(f"Enter 1–{len(proofs)} [1]: ").strip() or "1"
+        if choice.isdigit() and 1 <= int(choice) <= len(proofs):
+            return proofs[int(choice) - 1]
+        print("Invalid choice, try again.", flush=True)
+
+
+def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
+    """Pick an MFA method based on user preference and tenant defaults."""
+    if not proofs:
+        raise MicrosoftSSOError(
+            "No MFA methods are registered on this account.",
+            step="MFA",
+            recovery="Enroll SMS or Authenticator in your Microsoft account security settings.",
+        )
+
+    if preference == MFA_METHOD_CHOOSE:
+        return _prompt_user_proof_choice(proofs)
+
+    if preference != MFA_METHOD_AUTO:
+        for auth_id in MFA_METHOD_AUTH_IDS.get(preference, ()):
+            for proof in proofs:
+                if proof.auth_method_id == auth_id:
+                    return proof
+        available = ", ".join(p.display for p in proofs)
+        raise MicrosoftSSOError(
+            f"Requested MFA method '{preference}' is not available. Options: {available}",
+            step="MFA",
+            recovery="Use --mfa-method auto, choose, or register the method in Microsoft security settings.",
+        )
+
+    # auto: tenant default, else first registered method
+    for proof in proofs:
+        if proof.is_default:
+            return proof
+    return proofs[0]
+
+
+def _mask_phone_hint(data: str) -> str:
+    digits = re.sub(r"\D", "", data)
+    if len(digits) >= 4:
+        return f"***{digits[-4:]}"
+    if data:
+        return data
+    return "your phone"
+
+
 # ---------------------------------------------------------------------------
 # Main client
 # ---------------------------------------------------------------------------
@@ -229,13 +345,18 @@ class MicrosoftSSOClient:
         username: str,
         password: str,
         totp_code: str | None = None,
+        *,
+        mfa_method: str = MFA_METHOD_AUTO,
+        on_credentials_submitted: Callable[[], None] | None = None,
     ) -> dict[str, str]:
         """Execute the full login flow and return D2L session cookies.
 
         Args:
             username: Email address for Microsoft SSO (e.g. user@manipal.edu)
             password: Microsoft account password
-            totp_code: 6-digit 2FA code (or None for interactive prompt)
+            totp_code: 6-digit 2FA code (or None for interactive prompt after password)
+            mfa_method: ``auto``, ``sms`` (text message), or ``app`` (Authenticator)
+            on_credentials_submitted: Optional callback after password POST succeeds
 
         Returns:
             Dict mapping cookie names (d2lSecureSessionVal, etc.) to values.
@@ -244,6 +365,12 @@ class MicrosoftSSOClient:
             MicrosoftSSOError: On any authentication failure with details
                 about what went wrong and how to recover.
         """
+        if mfa_method not in VALID_MFA_METHODS:
+            raise MicrosoftSSOError(
+                f"Invalid mfa_method {mfa_method!r}. Use: {', '.join(VALID_MFA_METHODS)}",
+                step="MFA",
+            )
+
         # Step 1: Initiate D2L SAML login
         step1 = self._step_initiate_saml()
 
@@ -252,11 +379,18 @@ class MicrosoftSSOClient:
 
         # Step 3: POST credentials to Microsoft
         step3_resp = self._step_post_credentials(ms_config, username, password)
+        if on_credentials_submitted is not None:
+            on_credentials_submitted()
 
         # Step 4: Handle response — MFA or SAML or error
         if self._is_mfa_page(step3_resp):
-            # Step 4a: Handle MFA
-            step4_resp = self._step_handle_mfa(step3_resp, ms_config, totp_code)
+            # Step 4a: Handle MFA (two-phase: code collected after password accepted)
+            step4_resp = self._step_handle_mfa(
+                step3_resp,
+                ms_config,
+                totp_code,
+                mfa_method=mfa_method,
+            )
             saml_response = self._extract_saml_response(step4_resp.text)
         elif self._is_error_page(step3_resp):
             code, msg = _extract_error_code_and_msg(step3_resp.text)
@@ -439,33 +573,261 @@ class MicrosoftSSOClient:
     def _is_mfa_page(self, resp: requests.Response) -> bool:
         """Check if the response is a Microsoft MFA verification page."""
         text = resp.text
+        if "ConvergedTFA" in text:
+            return True
+        mfa_config = _extract_config_json(text)
+        if mfa_config and mfa_config.get("arrUserProofs"):
+            return True
         text_lower = text.lower()
         otc_in_text = "otc" in text_lower
         verification_in_text = "verification" in text_lower
         authenticator_in_text = "authenticator" in text_lower
         return (
-            "ConvergedTFA" in text
-            or (otc_in_text and (verification_in_text or authenticator_in_text))
+            (otc_in_text and (verification_in_text or authenticator_in_text))
             or 'name="otc"' in text
             or "id=\"idDiv_SAOTCC_Description\"" in text
             or "Enter code" in text
         )
+
+    def _resolve_mfa_url(self, resp: requests.Response, path: str) -> str:
+        if path.startswith("http"):
+            return path
+        if path.startswith("/"):
+            return urljoin(resp.url, path)
+        return urljoin("https://login.microsoftonline.com", path)
+
+    def _print_mfa_phase_banner(
+        self,
+        proofs: list[UserProof],
+        selected: UserProof,
+        *,
+        sms_triggered: bool,
+    ) -> None:
+        if not sys.stdin.isatty():
+            return
+        print("\n--- Second factor required ---", flush=True)
+        print("Registered verification methods on your account:", flush=True)
+        for proof in proofs:
+            marker = " (selected)" if proof.auth_method_id == selected.auth_method_id else ""
+            print(f"  • {proof.display}{marker}", flush=True)
+        hint = MFA_METHOD_INSTRUCTIONS.get(
+            selected.auth_method_id,
+            "Enter the verification code from the method shown above.",
+        )
+        if selected.auth_method_id == MFA_AUTH_SMS and sms_triggered:
+            phone = _mask_phone_hint(selected.data)
+            print(f"\nA code was requested for {phone}.", flush=True)
+            print(
+                "Delivery (SMS vs WhatsApp) is chosen by Microsoft; the CLI cannot force a channel.",
+                flush=True,
+            )
+        print(f"\n{hint}", flush=True)
+
+    def _prompt_mfa_code(self, selected: UserProof) -> str:
+        if sys.stdin.isatty():
+            label = "Enter verification code: "
+            if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
+                label = "Press Enter after approving in Authenticator: "
+            return input(label).strip()
+        return sys.stdin.readline().strip()
 
     def _step_handle_mfa(
         self,
         mfa_resp: requests.Response,
         original_config: dict[str, Any],
         totp_code: str | None,
+        *,
+        mfa_method: str = MFA_METHOD_AUTO,
     ) -> requests.Response:
-        """Step 4: Handle MFA by posting the TOTP code."""
+        """Step 4: Handle MFA — ConvergedTFA SAS API or legacy form fallback."""
+        mfa_config = _extract_config_json(mfa_resp.text) or {}
+        proofs = _parse_user_proofs(mfa_config)
+        if proofs:
+            return self._step_handle_mfa_converged(
+                mfa_resp,
+                mfa_config,
+                proofs,
+                totp_code,
+                mfa_method=mfa_method,
+            )
+        return self._step_handle_mfa_legacy_form(
+            mfa_resp,
+            original_config,
+            totp_code,
+            mfa_config=mfa_config,
+        )
+
+    def _step_handle_mfa_converged(
+        self,
+        mfa_resp: requests.Response,
+        mfa_config: dict[str, Any],
+        proofs: list[UserProof],
+        totp_code: str | None,
+        *,
+        mfa_method: str,
+    ) -> requests.Response:
+        """Handle ConvergedTFA via BeginAuth → EndAuth → ProcessAuth."""
+        selected = _select_user_proof(proofs, mfa_method)
+        begin_url = mfa_config.get("urlBeginAuth") or "/common/SAS/BeginAuth"
+        end_url = mfa_config.get("urlEndAuth") or "/common/SAS/EndAuth"
+        process_url = mfa_config.get("urlPost") or "/common/SAS/ProcessAuth"
+        sft_name = str(mfa_config.get("sFTName") or "flowToken")
+        flow_token = str(mfa_config.get("sFT") or "")
+        ctx = str(mfa_config.get("sCtx") or "")
+        login_name = str(mfa_config.get("sPOST_Username") or "")
+
+        begin_payload = {
+            "AuthMethodId": selected.auth_method_id,
+            "Method": "BeginAuth",
+            "ctx": ctx,
+            "flowToken": flow_token,
+        }
+        begin_resp = self._session.post(
+            self._resolve_mfa_url(mfa_resp, str(begin_url)),
+            json=begin_payload,
+            allow_redirects=False,
+            timeout=self._timeout,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            begin_data: dict[str, Any] = begin_resp.json()
+        except json.JSONDecodeError as exc:
+            raise MicrosoftSSOError(
+                "Microsoft MFA BeginAuth returned an invalid response.",
+                step="MFA",
+                recovery="Try again or use --mfa-method auto.",
+            ) from exc
+
+        if not begin_data.get("Success"):
+            message = begin_data.get("Message") or begin_data.get("ResultValue") or "unknown error"
+            raise MicrosoftSSOError(
+                f"MFA setup failed: {message}",
+                step="MFA BeginAuth",
+                recovery="Try a different --mfa-method or check your Microsoft security settings.",
+            )
+
+        sms_triggered = selected.auth_method_id == MFA_AUTH_SMS
+        self._print_mfa_phase_banner(proofs, selected, sms_triggered=sms_triggered)
+
+        if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
+            if totp_code is None and sys.stdin.isatty():
+                totp_code = self._prompt_mfa_code(selected)
+        elif totp_code is None:
+            totp_code = self._prompt_mfa_code(selected)
+
+        if selected.auth_method_id != MFA_AUTH_APP_NOTIFY:
+            if not totp_code or not totp_code.strip():
+                raise MicrosoftSSOError(
+                    "2FA code is required but was empty.",
+                    step="MFA",
+                    recovery="Provide a code via --totp or enter it when prompted.",
+                )
+            totp_code = totp_code.strip()
+
+        session_id = str(begin_data.get("SessionId") or "")
+        end_flow = str(begin_data.get("FlowToken") or flow_token)
+        end_ctx = str(begin_data.get("Ctx") or ctx)
+        polling = mfa_config.get("oPerAuthPollingInterval") or {}
+        poll_seconds = float(polling.get(selected.auth_method_id, 2))
+
+        end_data: dict[str, Any] = {}
+        for attempt in range(30):
+            end_payload: dict[str, Any] = {
+                "AuthMethodId": selected.auth_method_id,
+                "Method": "EndAuth",
+                "ctx": end_ctx,
+                "flowToken": end_flow,
+                "SessionId": session_id,
+            }
+            if selected.auth_method_id in (MFA_AUTH_SMS, MFA_AUTH_APP_OTP) and totp_code:
+                end_payload["AdditionalAuthData"] = totp_code
+
+            end_resp = self._session.post(
+                self._resolve_mfa_url(mfa_resp, str(end_url)),
+                json=end_payload,
+                allow_redirects=False,
+                timeout=self._timeout,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                end_data = end_resp.json()
+            except json.JSONDecodeError as exc:
+                raise MicrosoftSSOError(
+                    "Microsoft MFA EndAuth returned an invalid response.",
+                    step="MFA",
+                ) from exc
+
+            if end_data.get("Success"):
+                break
+            if not end_data.get("Retry"):
+                err_code = end_data.get("ErrCode")
+                result = end_data.get("ResultValue") or end_data.get("Message")
+                raise MicrosoftSSOError(
+                    f"2FA verification failed: {result or err_code or 'unknown'}",
+                    step="MFA",
+                    recovery="Request a new code and try again.",
+                )
+            if selected.auth_method_id == MFA_AUTH_APP_NOTIFY and attempt == 0:
+                entropy = end_data.get("Entropy")
+                if entropy and sys.stdin.isatty():
+                    print(
+                        f"Approve sign-in in Authenticator (number shown: {entropy}).",
+                        flush=True,
+                    )
+            time.sleep(poll_seconds)
+            end_flow = str(end_data.get("FlowToken") or end_flow)
+            end_ctx = str(end_data.get("Ctx") or end_ctx)
+        else:
+            raise MicrosoftSSOError(
+                "2FA verification timed out waiting for approval.",
+                step="MFA",
+                recovery="Try again and complete verification promptly.",
+            )
+
+        process_data: dict[str, str] = {
+            sft_name: str(end_data.get("FlowToken") or end_flow),
+            "request": str(end_data.get("Ctx") or end_ctx),
+        }
+        if login_name:
+            process_data["login"] = login_name
+        if selected.auth_method_id in (MFA_AUTH_SMS, MFA_AUTH_APP_OTP) and totp_code:
+            process_data["otc"] = totp_code
+            process_data["mfaAuthMethod"] = selected.auth_method_id
+            process_data["type"] = "18"
+            process_data["GeneralVerify"] = "false"
+        canary = mfa_config.get("canary")
+        if canary:
+            process_data["canary"] = str(canary)
+
+        resp = self._post(self._resolve_mfa_url(mfa_resp, str(process_url)), data=process_data)
+
+        if self._is_mfa_page(resp):
+            raise MicrosoftSSOError(
+                "2FA verification failed: invalid or expired code.",
+                step="MFA",
+                recovery="Request a new 2FA code and try again.",
+            )
+
+        return self._follow_post_mfa_response(resp, str(process_url))
+
+    def _step_handle_mfa_legacy_form(
+        self,
+        mfa_resp: requests.Response,
+        original_config: dict[str, Any],
+        totp_code: str | None,
+        *,
+        mfa_config: dict[str, Any],
+    ) -> requests.Response:
+        """Legacy MFA form POST (older Microsoft pages without arrUserProofs)."""
         import getpass as _getpass
-        import sys as _sys
 
         if totp_code is None:
-            if _sys.stdin.isatty():
-                totp_code = _getpass.getpass("Enter 2FA code: ")
+            if sys.stdin.isatty():
+                print("\n--- Second factor required ---", flush=True)
+                print("Enter the verification code shown on the Microsoft sign-in page.", flush=True)
+                totp_code = _getpass.getpass("Enter verification code: ")
             else:
-                totp_code = _sys.stdin.readline().strip()
+                totp_code = sys.stdin.readline().strip()
 
         if not totp_code or not totp_code.strip():
             raise MicrosoftSSOError(
@@ -474,7 +836,6 @@ class MicrosoftSSOClient:
                 recovery="Provide a 2FA code via --totp flag or pipe.",
             )
 
-        # Extract MFA configuration from the page
         soup = BeautifulSoup(mfa_resp.text, "html.parser")
         form = soup.find("form")
         if not form:
@@ -485,63 +846,46 @@ class MicrosoftSSOClient:
             )
 
         action = form.get("action")
-        if action:
-            mfa_url = urljoin(mfa_resp.url, str(action))
-        else:
-            mfa_url = mfa_resp.url
+        mfa_url = urljoin(mfa_resp.url, str(action)) if action else mfa_resp.url
         mfa_url = str(mfa_url)
 
-        # Extract flow tokens from the MFA page
         mfa_data: dict[str, str] = {"otc": totp_code.strip()}
-
-        # Include hidden form fields
         for hidden in form.find_all("input", attrs={"type": "hidden"}):
             name = hidden.get("name")
             value = hidden.get("value")
             if name:
                 mfa_data[str(name)] = str(value) if value else ""
 
-        # Also need flow tokens from $Config embedded on MFA page
-        mfa_config = _extract_config_json(mfa_resp.text) or {}
         for key in ("sFT", "sCtx", "canary", "apiCanary", "hpgrequestid"):
             if key in mfa_config and key not in mfa_data:
                 mfa_data[key] = str(mfa_config[key])
-
-        # Merge any URL params from the original config that might be needed
         for key in ("sFT", "sCtx"):
             if key in original_config and key not in mfa_data:
                 mfa_data[key] = str(original_config[key])
 
         resp = self._post(mfa_url, data=mfa_data)
-
-        # If we still see MFA page, the code was rejected
         if self._is_mfa_page(resp):
             raise MicrosoftSSOError(
                 "2FA verification failed: invalid or expired code.",
                 step="MFA",
                 recovery="Request a new 2FA code and try again.",
             )
+        return self._follow_post_mfa_response(resp, mfa_url)
 
-        # Handle possible stay-signed-in prompt
+    def _follow_post_mfa_response(self, resp: requests.Response, base_url: str) -> requests.Response:
+        """Follow redirects and optional KMSI after MFA ProcessAuth."""
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location", "")
             if location:
-                resp2 = self._get(
-                    location if location.startswith("http") else str(urljoin(mfa_url, location))
-                )
-                return resp2
+                resolved = location if location.startswith("http") else str(urljoin(base_url, location))
+                resp = self._get(resolved)
 
-        # Check if KMSI/Stay signed in page
         if resp.status_code == 200 and ("Kmsi" in resp.text or "Stay signed in" in resp.text):
-            # Handle "Stay signed in?" - click Yes
             soup2 = BeautifulSoup(resp.text, "html.parser")
             form2 = soup2.find("form")
             if form2:
                 kmsi_action = form2.get("action")
-                if kmsi_action:
-                    kmsi_url = urljoin(resp.url, str(kmsi_action))
-                else:
-                    kmsi_url = resp.url
+                kmsi_url = urljoin(resp.url, str(kmsi_action)) if kmsi_action else resp.url
                 kmsi_url = str(kmsi_url)
                 kmsi_data: dict[str, str] = {}
                 for hidden in form2.find_all("input", attrs={"type": "hidden"}):
@@ -549,7 +893,6 @@ class MicrosoftSSOClient:
                     value = hidden.get("value")
                     if name:
                         kmsi_data[str(name)] = str(value) if value else ""
-                # Add DontShowAgain and/or StaySignedIn if present
                 for inp in form2.find_all("input"):
                     inp_name = inp.get("name")
                     if inp_name and str(inp_name) in ("DontShowAgain", "StaySignedIn"):

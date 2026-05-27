@@ -63,8 +63,20 @@ def auth_status(json_output: bool) -> None:
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
 @click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
 @click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
+@click.option(
+    "--mfa-method",
+    type=click.Choice(["auto", "sms", "app", "choose"]),
+    default=None,
+    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+)
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_refresh(username: str | None, password: str | None, totp: str | None, json_output: bool) -> None:
+def auth_refresh(
+    username: str | None,
+    password: str | None,
+    totp: str | None,
+    mfa_method: str | None,
+    json_output: bool,
+) -> None:
     """Refresh session cookies via Microsoft SSO.
 
     Runs the full HTTP-based SSO login flow to obtain fresh session cookies.
@@ -76,16 +88,36 @@ def auth_refresh(username: str | None, password: str | None, totp: str | None, j
         totp_code=totp,
         totp_stdin=(totp == "-"),
         json_output=json_output,
+        mfa_method=mfa_method,
     ))
 
 
 @auth.command("login")
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
 @click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
-@click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
-@click.option("--save-credentials", "save_credentials", is_flag=True, default=False, help="Store credentials encrypted for future use.")
+@click.option("--totp", "totp", default=None, help="2FA code. Omit for two-phase interactive login.")
+@click.option(
+    "--mfa-method",
+    type=click.Choice(["auto", "sms", "app", "choose"]),
+    default=None,
+    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+)
+@click.option(
+    "--save-credentials",
+    "save_credentials",
+    is_flag=True,
+    default=False,
+    help="Save email/password encrypted for future logins (session cookies still expire ~5 days).",
+)
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_login(username: str | None, password: str | None, totp: str | None, save_credentials: bool, json_output: bool) -> None:
+def auth_login(
+    username: str | None,
+    password: str | None,
+    totp: str | None,
+    mfa_method: str | None,
+    save_credentials: bool,
+    json_output: bool,
+) -> None:
     """Log in to D2L via Microsoft SSO (pure HTTP, no browser required).
 
     Credentials can be provided via:
@@ -93,16 +125,27 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
       LIGHTHOUSE_USERNAME/PASSWORD env vars
       Interactive prompts (if TTY)
 
+    Two-phase interactive login (TTY): username/password first, then verification
+    code after Microsoft accepts your password.
+
+    MFA: --mfa-method auto (default), sms, app, or choose (pick from a list).
+    Text codes may arrive via SMS or WhatsApp depending on Microsoft; the CLI
+    cannot select the delivery channel.
+
+    Session cookies typically expire after ~5 days (MAHE tenant policy); re-run
+    login when auth status fails. --save-credentials stores email/password only.
+
     2FA codes can be provided via:
       --totp <code> flag
       --totp - (read from stdin)
-      Interactive prompt (if TTY)
+      Interactive prompt after password step (if TTY)
 
     On success, D2L session cookies are saved to
     ~/.config/lighthouse-cli/cookies.json.
 
-    Use --save-credentials to store credentials encrypted for future logins
-    (requires: pip install lighthouse-cli[credentials]).
+    Use --save-credentials to store email/password encrypted (requires:
+    pip install lighthouse-cli[credentials]). You still re-authenticate when
+    cookies expire.
     """
     raise SystemExit(cmd_auth_login(
         username=username,
@@ -111,6 +154,7 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
         totp_stdin=(totp == "-"),
         save_credentials=save_credentials,
         json_output=json_output,
+        mfa_method=mfa_method,
     ))
 
 
