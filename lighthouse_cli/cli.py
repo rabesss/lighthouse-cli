@@ -60,23 +60,22 @@ def auth_status(json_output: bool) -> None:
 
 
 @auth.command("refresh")
-@click.option(
-    "--cdp-port",
-    type=int,
-    default=None,
-    envvar="LIGHTHOUSE_CDP_PORT",
-    help="Chrome DevTools Protocol port (default: 34165).",
-)
+@click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
+@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
+@click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_refresh(cdp_port: int | None, json_output: bool) -> None:
-    """Extract fresh cookies from the browser via CDP.
+def auth_refresh(username: str | None, password: str | None, totp: str | None, json_output: bool) -> None:
+    """Refresh session cookies via Microsoft SSO.
 
-    Equivalent to ``auth login --cdp-only``.
+    Runs the full HTTP-based SSO login flow to obtain fresh session cookies.
+    Equivalent to ``auth login`` without the ``--save-credentials`` option.
     """
     raise SystemExit(cmd_auth_login(
+        username=username,
+        password=password,
+        totp_code=totp,
+        totp_stdin=(totp == "-"),
         json_output=json_output,
-        cdp_only=True,
-        cdp_port=cdp_port,
     ))
 
 
@@ -85,15 +84,9 @@ def auth_refresh(cdp_port: int | None, json_output: bool) -> None:
 @click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
 @click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option("--save-credentials", "save_credentials", is_flag=True, default=False, help="Store credentials encrypted for future use.")
-@click.option("--headless", "headless", is_flag=True, default=False, help="Skip CDP and go straight to headless browser login.")
-@click.option("--cdp-only", "cdp_only", is_flag=True, default=False, help="Only attempt CDP cookie extraction; fail if no browser.")
-@click.option("--clean", "clean", is_flag=True, default=False, help="Wipe browser state and start fresh.")
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_login(username: str | None, password: str | None, totp: str | None, save_credentials: bool, headless: bool, cdp_only: bool, clean: bool, json_output: bool) -> None:
-    """Log in to D2L via headless browser (Microsoft SSO + 2FA).
-
-    By default, tries CDP cookie extraction first (if a browser is open),
-    then falls back to headless Playwright login.
+def auth_login(username: str | None, password: str | None, totp: str | None, save_credentials: bool, json_output: bool) -> None:
+    """Log in to D2L via Microsoft SSO (pure HTTP, no browser required).
 
     Credentials can be provided via:
       --user/--pass flags
@@ -105,8 +98,11 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
       --totp - (read from stdin)
       Interactive prompt (if TTY)
 
-    On success, D2L session cookies are saved to ~/.config/lighthouse-cli/cookies.json.
-    Use --save-credentials to store credentials encrypted for future logins.
+    On success, D2L session cookies are saved to
+    ~/.config/lighthouse-cli/cookies.json.
+
+    Use --save-credentials to store credentials encrypted for future logins
+    (requires: pip install lighthouse-cli[credentials]).
     """
     raise SystemExit(cmd_auth_login(
         username=username,
@@ -115,9 +111,6 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
         totp_stdin=(totp == "-"),
         save_credentials=save_credentials,
         json_output=json_output,
-        headless=headless,
-        cdp_only=cdp_only,
-        clean=clean,
     ))
 
 

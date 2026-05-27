@@ -27,7 +27,6 @@ COOKIE_NAMES = (
 CONFIG_DIR = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
 COOKIE_FILE = CONFIG_DIR / "cookies.json"
 DEFAULT_DOWNLOAD_DIR = Path("~/Downloads/lighthouse").expanduser()
-BROWSER_STATE_DIR = CONFIG_DIR / "browser-state"
 
 # Cookie age warning threshold (days)
 _COOKIE_AGE_WARNING_DAYS = 4
@@ -77,7 +76,8 @@ def save_cookies(cookies: dict[str, str]) -> None:
     tmp_file = COOKIE_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp_file.chmod(0o600)
+        with suppress(OSError):
+            tmp_file.chmod(0o600)
         tmp_file.replace(COOKIE_FILE)
     except OSError:
         if tmp_file.exists():
