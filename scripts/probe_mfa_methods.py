@@ -33,9 +33,14 @@ def main() -> int:
     try:
         ms_url = client._step_initiate_saml()
         ms_config = client._step_get_ms_config(ms_url)
-        resp = client._step_post_credentials(ms_config, username, password)
-        if client._is_error_page(resp):
-            raise client._build_error(resp, *_extract_error_code_and_msg(resp.text), "POST credentials")
+        ms_config = client._step_prepare_username(ms_config, username)
+        resp = client._step_post_credentials(
+            ms_config, username, password, skip_username_prepare=True
+        )
+        if not client._is_mfa_page(resp) and client._is_error_page(resp):
+            raise client._build_error(
+                resp, *_extract_error_code_and_msg(resp.text), "POST credentials"
+            )
         if not client._is_mfa_page(resp):
             print("No MFA page returned (account may not require 2FA on this login).")
             return 0

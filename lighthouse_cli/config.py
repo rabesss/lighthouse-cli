@@ -26,6 +26,8 @@ COOKIE_NAMES = (
 # Paths
 CONFIG_DIR = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
 COOKIE_FILE = CONFIG_DIR / "cookies.json"
+MFA_PENDING_FILE = CONFIG_DIR / "mfa_pending.json"
+MFA_PENDING_VERSION = 1
 DEFAULT_DOWNLOAD_DIR = Path("~/Downloads/lighthouse").expanduser()
 
 # Cookie age warning threshold (days)
@@ -100,6 +102,48 @@ def get_cookie_age_days() -> float | None:
         return (datetime.now(timezone.utc) - extracted).total_seconds() / 86400
     except (json.JSONDecodeError, OSError, ValueError):
         return None
+
+
+def save_mfa_pending(payload: dict) -> None:
+    """Persist in-progress MFA state between ``auth login`` and ``auth verify``."""
+    ensure_config_dir()
+    data = {"version": MFA_PENDING_VERSION, **payload}
+    tmp = MFA_PENDING_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    with suppress(OSError):
+        tmp.chmod(0o600)
+    tmp.replace(MFA_PENDING_FILE)
+    with suppress(OSError):
+        MFA_PENDING_FILE.chmod(0o600)
+
+
+def load_mfa_pending() -> dict | None:
+    """Load pending MFA state, or None if missing/invalid."""
+    if not MFA_PENDING_FILE.exists():
+        return None
+    try:
+        data = json.loads(MFA_PENDING_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != MFA_PENDING_VERSION:
+        return None
+    return data
+
+
+def update_mfa_pending(updates: dict) -> None:
+    """Merge fields into the existing pending MFA file (no-op if missing)."""
+    data = load_mfa_pending()
+    if not data:
+        return
+    data.pop("version", None)
+    data.update(updates)
+    save_mfa_pending(data)
+
+
+def clear_mfa_pending() -> None:
+    """Remove pending MFA state file."""
+    with suppress(OSError):
+        MFA_PENDING_FILE.unlink()
 
 
 def warn_if_cookies_stale() -> bool:

@@ -13,13 +13,13 @@ who want quick access to their courses from the shell.
 
 ```bash
 cd lighthouse-cli
-pip install -e .
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[auth,credentials]'
+playwright install chromium   # once — username step on MAHE tenant
 
-# Authenticate (headless browser SSO with 2FA support)
-lighthouse auth login
-
-# Or extract session cookies from your browser via CDP
-lighthouse auth refresh --cdp-port 34165
+# Authenticate (HTTP SSO + SMS MFA)
+lighthouse auth login --mfa-method sms
+lighthouse auth verify 123456   # code from the SMS/WhatsApp you just received
 
 # Verify the session is alive
 lighthouse auth status
@@ -40,24 +40,22 @@ lighthouse assignments "signals"
 lighthouse submit -f my_homework.pdf "signals" "Homework 1" --yes
 ```
 
-> **Prerequisite for `auth refresh`:** Chrome/Chromium must be running with
-> `--remote-debugging-port=34165` and you must be logged in to
-> lighthouse.manipal.edu in that browser.
+> **Auth details:** See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md)
+> (hybrid HTTP + Playwright username bootstrap, two-step `login` / `verify` for SMS).
 >
-> **Prerequisite for `auth login`:** Playwright must be installed
-> (`playwright install chromium`). This method launches a headless browser
-> for SSO authentication — no pre-running browser needed.
+> On Arch Linux, use a **venv** — system `pip install` hits PEP 668.
 
 ## Architecture
 
 ```mermaid
 graph TD
     subgraph Auth
-        A1["lighthouse auth login<br/>(Playwright headless)"]
-        A2["lighthouse auth refresh<br/>(CDP from running browser)"]
+        A1["lighthouse auth login<br/>(HTTP SSO + optional Playwright)"]
+        A2["lighthouse auth verify<br/>(complete SMS MFA)"]
     end
-    A1 -->|SSO + 2FA| COOKIES["~/.config/lighthouse-cli/cookies.json"]
-    A2 -->|extract cookies| COOKIES
+    A1 -->|BeginAuth / pending| PENDING["mfa_pending.json"]
+    A2 -->|EndAuth + SAML| COOKIES["~/.config/lighthouse-cli/cookies.json"]
+    PENDING --> A2
 
     CLI["lighthouse CLI<br/>(Click)"] -->|lazy-loads| COOKIES
     CLI -->|REST requests| API["D2L Brightspace API<br/>LE v1.93 / LP v1.59"]
@@ -77,11 +75,10 @@ graph TD
   `d2lSameSiteCanaryB`. Extracted from the browser via Chrome DevTools
   Protocol (CDP) — either through `browser-harness` CLI, Python websockets,
   or a Node.js fallback.
-- **Auth (headless):** Playwright-based headless browser authentication.
-  Launches Chromium, navigates to SSO login page, waits for user to complete
-  authentication (including 2FA), then extracts session cookies. Supports
-  `CredentialStore` with Fernet encryption and keyring fallback for secure
-  credential storage.
+- **Auth (SSO):** HTTP Microsoft SSO (`ms_auth.py`) with optional Playwright
+  for the username step only. SMS MFA uses `auth login` then `auth verify`
+  so the OTP matches the same `BeginAuth` session. See
+  [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 - **API:** D2L REST API — LE v1.93, LP v1.59.
 - **Cookie storage:** `~/.config/lighthouse-cli/cookies.json` (permissions
   `0600`). Override with `LIGHTHOUSE_CONFIG_DIR` env var.
@@ -126,9 +123,10 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|choose] [--save-credentials] [--json]`
 
-Pure HTTP Microsoft SSO login (no browser). Two-phase on a TTY: email/password
-first, then verification code. Session cookies usually expire after ~5 days
-(same as the browser); re-run login when `lighthouse auth status` fails.
+Microsoft SSO login (HTTP + optional Playwright for the username step). For
+SMS/WhatsApp, agents should use **`auth verify`** after login sends a code — see
+[docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md). Session cookies
+usually expire after ~5 days; re-run login when `auth status` fails.
 
 **Credentials (pick one; do not commit secrets):**
 
@@ -157,11 +155,16 @@ lighthouse auth login
 **Authentication flow:**
 
 1. GET D2L SAML login → Microsoft
-2. POST credentials (flags, env, stored credentials, or prompt)
-3. MFA via Microsoft SAS API (`--mfa-method`; text codes may be SMS or WhatsApp)
-4. POST SAML assertion → D2L session cookies
+2. Username step (Playwright if `[auth]` installed) → password POST
+3. `BeginAuth` sends SMS; may exit and save `mfa_pending.json`
+4. `lighthouse auth verify <code>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
 5. Saves cookies to `~/.config/lighthouse-cli/cookies.json`
 6. Optional `--save-credentials` (Fernet + system keyring)
+
+### `lighthouse auth verify <CODE> [--json]`
+
+Complete MFA using the pending session from `auth login` (same `BeginAuth` —
+do not run `login` again before verifying). Required for non-TTY / agent workflows.
 
 **Human output:**
 ```

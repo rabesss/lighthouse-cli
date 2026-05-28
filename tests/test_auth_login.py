@@ -237,7 +237,9 @@ def test_totp_stdin_pipe(
 
     assert result.exit_code == 0
     mock_sso.login.assert_called_once()
-    assert mock_sso.login.call_args.args[2] == "123456"
+    # SMS reads stdin after BeginAuth, not at CLI parse time.
+    assert mock_sso.login.call_args.args[2] is None
+    assert mock_sso.login.call_args.kwargs.get("read_totp_after_challenge") is True
 
 
 # ---------------------------------------------------------------------------

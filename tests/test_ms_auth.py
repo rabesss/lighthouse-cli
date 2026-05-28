@@ -15,6 +15,7 @@ from lighthouse_cli.ms_auth import (
     MicrosoftSSOClient,
     MicrosoftSSOError,
     UserProof,
+    _absolute_url,
     _extract_config_json,
     _extract_error_code_and_msg,
     _parse_user_proofs,
@@ -158,6 +159,12 @@ class TestMfaMethodSelection:
     def test_choose_single_proof_skips_prompt(self) -> None:
         single = [UserProof("OneWaySMS", "SMS", "+91", True)]
         assert _prompt_user_proof_choice(single).auth_method_id == "OneWaySMS"
+
+
+class TestAbsoluteUrl:
+    def test_resolves_tenant_relative_kmsi_path(self) -> None:
+        base = "https://login.microsoftonline.com/29bebd42-f1ff-4c3d-9688-067e3460dc1f/login"
+        assert _absolute_url(base, "/kmsi") == "https://login.microsoftonline.com/kmsi"
 
 
 class TestExtractConfigJson:

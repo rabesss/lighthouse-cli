@@ -135,10 +135,13 @@ def auth_login(
     Session cookies typically expire after ~5 days (MAHE tenant policy); re-run
     login when auth status fails. --save-credentials stores email/password only.
 
-    2FA codes can be provided via:
-      --totp <code> flag
-      --totp - (read from stdin)
-      Interactive prompt after password step (if TTY)
+    2FA (SMS/WhatsApp): two-step (recommended for agents and scripts):
+
+      lighthouse auth login --mfa-method sms
+      lighthouse auth verify <code>
+
+    Do not run login twice — each login sends a new code. In a TTY, login alone
+  prompts for the code after it is sent.
 
     On success, D2L session cookies are saved to
     ~/.config/lighthouse-cli/cookies.json.
@@ -156,6 +159,20 @@ def auth_login(
         json_output=json_output,
         mfa_method=mfa_method,
     ))
+
+
+@auth.command("verify")
+@click.argument("code")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON.")
+def auth_verify(code: str, json_output: bool) -> None:
+    """Complete login with the verification code from the current ``auth login`` session.
+
+    Use after ``auth login`` prints "Verification code sent." Do not run a second
+    ``auth login`` — that sends a new code and invalidates the previous one.
+    """
+    from lighthouse_cli.auth import cmd_auth_verify
+
+    raise SystemExit(cmd_auth_verify(code, json_output=json_output))
 
 
 

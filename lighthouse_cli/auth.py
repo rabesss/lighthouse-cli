@@ -16,12 +16,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from .config import CONFIG_DIR, ensure_config_dir, save_cookies
+from .config import CONFIG_DIR, ensure_config_dir, load_mfa_pending, save_cookies
 from .api import LighthouseClient
 from .ms_auth import (
+    MFA_METHOD_APP,
     MFA_METHOD_AUTO,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_SMS,
+    MfaPendingError,
     MicrosoftSSOClient,
     MicrosoftSSOError,
     VALID_MFA_METHODS,
@@ -177,6 +179,51 @@ def _auth_error(msg: str, json_output: bool, code: int = 1) -> int:
     return code
 
 
+def cmd_auth_verify(
+    totp_code: str,
+    *,
+    json_output: bool = False,
+    config_dir: str | None = None,
+) -> int:
+    """Complete MFA using saved state from ``auth login`` (same BeginAuth session)."""
+    if config_dir:
+        os.environ["LIGHTHOUSE_CONFIG_DIR"] = str(config_dir)
+
+    ensure_config_dir()
+
+    if not totp_code or not totp_code.strip():
+        return _auth_error("2FA code cannot be empty", json_output, 2)
+
+    if not load_mfa_pending():
+        return _auth_error(
+            "No pending MFA session. Run: lighthouse auth login --mfa-method sms",
+            json_output,
+        )
+
+    sso_client = MicrosoftSSOClient()
+    try:
+        cookies = sso_client.complete_mfa_pending(totp_code.strip())
+    except MicrosoftSSOError as exc:
+        return _auth_error(str(exc), json_output)
+    finally:
+        sso_client.close()
+
+    save_cookies(cookies)
+
+    if not LighthouseClient().check_auth():
+        return _auth_error(
+            "Login completed but session verification failed.",
+            json_output,
+        )
+
+    if json_output:
+        print(json.dumps({"success": True, "cookies": list(cookies.keys())}))
+    else:
+        print(f"Login successful. Session valid. Cookies: {', '.join(cookies.keys())}")
+
+    return 0
+
+
 def cmd_auth_login(
     username: str | None = None,
     password: str | None = None,
@@ -251,13 +298,9 @@ def cmd_auth_login(
         if not password:
             return _auth_error("Password cannot be empty", json_output)
 
-        # --- TOTP resolution ---
-        if totp_stdin:
-            totp_code = sys.stdin.readline().strip()
-        if totp_code is not None and totp_code.strip() == "":
-            return _auth_error("2FA code cannot be empty", json_output, 2)
-
-        resolved_mfa_method = (mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD") or MFA_METHOD_AUTO).lower()
+        resolved_mfa_method = (
+            mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD") or MFA_METHOD_AUTO
+        ).lower()
         if resolved_mfa_method not in VALID_MFA_METHODS:
             return _auth_error(
                 f"Invalid MFA method {resolved_mfa_method!r}. "
@@ -265,6 +308,31 @@ def cmd_auth_login(
                 json_output,
                 2,
             )
+
+        # --- TOTP resolution ---
+        # For SMS/OTP, BeginAuth sends a fresh code; only read stdin after that challenge.
+        read_totp_after_challenge = totp_stdin
+        if totp_stdin:
+            totp_code = None
+        elif totp_code is not None and resolved_mfa_method in (
+            MFA_METHOD_SMS,
+            MFA_METHOD_APP,
+            MFA_METHOD_CHOOSE,
+        ):
+            # Literal --totp <code> cannot match the code BeginAuth is about to send.
+            totp_code = None
+        if totp_code is not None and totp_code.strip() == "":
+            return _auth_error("2FA code cannot be empty", json_output, 2)
+
+        # Resume same MFA session (no second BeginAuth / new code).
+        if totp_code and not totp_stdin and load_mfa_pending():
+            return cmd_auth_verify(totp_code, json_output=json_output, config_dir=config_dir)
+
+        defer_mfa_to_pending = (
+            not _is_interactive()
+            and totp_code is None
+            and not read_totp_after_challenge
+        )
 
         def _on_password_accepted() -> None:
             if json_output or not _is_interactive():
@@ -291,7 +359,20 @@ def cmd_auth_login(
                 totp_code,
                 mfa_method=resolved_mfa_method,
                 on_credentials_submitted=_on_password_accepted,
+                read_totp_after_challenge=read_totp_after_challenge,
+                defer_mfa_to_pending=defer_mfa_to_pending,
             )
+        except MfaPendingError as exc:
+            if json_output:
+                print(json.dumps({
+                    "success": False,
+                    "mfa_pending": True,
+                    "message": str(exc),
+                    "recovery": exc.recovery,
+                }))
+            else:
+                print(str(exc), flush=True)
+            return 0
         except MicrosoftSSOError as exc:
             return _auth_error(str(exc), json_output)
         finally:
