@@ -205,6 +205,12 @@ def cmd_auth_verify(
         cookies = sso_client.complete_mfa_pending(totp_code.strip())
     except MicrosoftSSOError as exc:
         return _auth_error(str(exc), json_output)
+    except (KeyError, TypeError, ValueError) as exc:
+        return _auth_error(
+            f"Pending MFA session is corrupted: {exc}. "
+            "Run: lighthouse auth login --mfa-method sms",
+            json_output,
+        )
     finally:
         sso_client.close()
 

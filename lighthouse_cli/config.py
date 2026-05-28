@@ -34,6 +34,16 @@ DEFAULT_DOWNLOAD_DIR = Path("~/Downloads/lighthouse").expanduser()
 _COOKIE_AGE_WARNING_DAYS = 4
 
 
+def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
+    """Return required D2L cookie names that are absent or empty."""
+    missing: list[str] = []
+    for name in COOKIE_NAMES:
+        value = cookies.get(name)
+        if value is None or not str(value).strip():
+            missing.append(name)
+    return missing
+
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
@@ -108,7 +118,7 @@ def save_mfa_pending(payload: dict) -> None:
     """Persist in-progress MFA state between ``auth login`` and ``auth verify``."""
     ensure_config_dir()
     data = {"version": MFA_PENDING_VERSION, **payload}
-    tmp = MFA_PENDING_FILE.with_suffix(".tmp")
+    tmp = MFA_PENDING_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     with suppress(OSError):
         tmp.chmod(0o600)

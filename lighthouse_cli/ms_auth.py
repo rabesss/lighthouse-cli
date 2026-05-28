@@ -438,6 +438,36 @@ class MicrosoftSSOClient:
         saved.encoding = "utf-8"
         return saved
 
+    @staticmethod
+    def _parse_mfa_pending(pending: dict[str, Any]) -> tuple[UserProof, dict[str, Any], dict[str, Any], str]:
+        """Validate pending MFA file shape; raise if corrupted."""
+        required = ("mfa_page_url", "mfa_config", "begin", "selected_proof")
+        missing = [k for k in required if k not in pending]
+        if missing:
+            raise MicrosoftSSOError(
+                f"Pending MFA session is incomplete ({', '.join(missing)}).",
+                step="MFA verify",
+                recovery="Run: lighthouse auth login --mfa-method sms",
+            )
+        try:
+            selected = UserProof(**pending["selected_proof"])
+            mfa_config = pending["mfa_config"]
+            begin_data = pending["begin"]
+            mfa_page_url = str(pending["mfa_page_url"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MicrosoftSSOError(
+                "Pending MFA session is corrupted.",
+                step="MFA verify",
+                recovery="Run: lighthouse auth login --mfa-method sms",
+            ) from exc
+        if not isinstance(mfa_config, dict) or not isinstance(begin_data, dict):
+            raise MicrosoftSSOError(
+                "Pending MFA session is corrupted.",
+                step="MFA verify",
+                recovery="Run: lighthouse auth login --mfa-method sms",
+            )
+        return selected, mfa_config, begin_data, mfa_page_url
+
     def complete_mfa_pending(self, totp_code: str) -> dict[str, str]:
         """Finish login from saved state after ``auth login`` (no new BeginAuth)."""
         from lighthouse_cli.config import clear_mfa_pending, load_mfa_pending
@@ -450,55 +480,59 @@ class MicrosoftSSOClient:
                 recovery="Start login first; when a code is sent, run: lighthouse auth verify <code>",
             )
 
-        _import_session_cookies(self._session, pending.get("cookies") or [])
-        selected = UserProof(**pending["selected_proof"])
-        mfa_config = pending["mfa_config"]
-        begin_data = pending["begin"]
+        try:
+            selected, mfa_config, begin_data, mfa_page_url = self._parse_mfa_pending(pending)
+            _import_session_cookies(self._session, pending.get("cookies") or [])
 
-        kmsi_cp = pending.get("kmsi_checkpoint")
-        if isinstance(kmsi_cp, dict) and kmsi_cp.get("html"):
-            kmsi_resp = self._response_from_saved(
-                str(kmsi_cp.get("url") or pending["mfa_page_url"]),
-                str(kmsi_cp["html"]),
-            )
-            step_resp = self._follow_post_mfa_response(
-                self._post_kmsi_interrupt(kmsi_resp),
-                str(mfa_config.get("urlPost") or pending["mfa_page_url"]),
-            )
-        else:
-            class _MfaPageRef:
-                def __init__(self, url: str) -> None:
-                    self.url = url
-                    self.text = ""
+            kmsi_cp = pending.get("kmsi_checkpoint")
+            if isinstance(kmsi_cp, dict) and kmsi_cp.get("html"):
+                kmsi_resp = self._response_from_saved(
+                    str(kmsi_cp.get("url") or mfa_page_url),
+                    str(kmsi_cp["html"]),
+                )
+                step_resp = self._follow_post_mfa_response(
+                    self._post_kmsi_interrupt(kmsi_resp),
+                    str(mfa_config.get("urlPost") or mfa_page_url),
+                )
+            else:
+                class _MfaPageRef:
+                    def __init__(self, url: str) -> None:
+                        self.url = url
+                        self.text = ""
 
-            mfa_resp = _MfaPageRef(str(pending["mfa_page_url"]))
-            skip_end_auth = bool(pending.get("end_auth_flow") and pending.get("end_auth_ctx"))
-            step_resp = self._mfa_finish_after_begin(
-                mfa_resp,
-                mfa_config,
-                selected,
-                begin_data,
-                totp_code.strip(),
-                skip_end_auth=skip_end_auth,
-                end_auth_flow=str(pending["end_auth_flow"]) if skip_end_auth else None,
-                end_auth_ctx=str(pending["end_auth_ctx"]) if skip_end_auth else None,
-            )
+                mfa_resp = _MfaPageRef(mfa_page_url)
+                skip_end_auth = bool(
+                    pending.get("end_auth_flow") and pending.get("end_auth_ctx")
+                )
+                step_resp = self._mfa_finish_after_begin(
+                    mfa_resp,
+                    mfa_config,
+                    selected,
+                    begin_data,
+                    totp_code.strip(),
+                    skip_end_auth=skip_end_auth,
+                    end_auth_flow=str(pending["end_auth_flow"]) if skip_end_auth else None,
+                    end_auth_ctx=str(pending["end_auth_ctx"]) if skip_end_auth else None,
+                )
 
-        saml_response = self._extract_saml_response(step_resp.text)
-        if not saml_response and self._is_error_page(step_resp):
-            code, msg = _extract_error_code_and_msg(step_resp.text)
-            raise self._build_error(step_resp, code, msg, "MFA verify")
-        if not saml_response:
-            raise MicrosoftSSOError(
-                "No SAML response after MFA verification.",
-                step="MFA verify",
-                recovery="Run: lighthouse auth login --mfa-method sms, then verify with a fresh code.",
-            )
+            saml_response = self._extract_saml_response(step_resp.text)
+            if not saml_response and self._is_error_page(step_resp):
+                code, msg = _extract_error_code_and_msg(step_resp.text)
+                raise self._build_error(step_resp, code, msg, "MFA verify")
+            if not saml_response:
+                raise MicrosoftSSOError(
+                    "No SAML response after MFA verification.",
+                    step="MFA verify",
+                    recovery="Run: lighthouse auth login --mfa-method sms, then verify with a fresh code.",
+                )
 
-        self._step_post_saml(saml_response, step_resp.text)
-        cookies = self._extract_d2l_cookies()
-        clear_mfa_pending()
-        return cookies
+            self._step_post_saml(saml_response, step_resp.text)
+            cookies = self._extract_d2l_cookies()
+            clear_mfa_pending()
+            return cookies
+        except MicrosoftSSOError:
+            clear_mfa_pending()
+            raise
 
     def _follow_redirect(self, resp: requests.Response, step: str) -> requests.Response:
         """Follow a 302 redirect to its Location."""
@@ -567,12 +601,12 @@ class MicrosoftSSOClient:
         step3_resp = self._step_post_credentials(
             ms_config, username, password, skip_username_prepare=True
         )
-        if on_credentials_submitted is not None:
-            on_credentials_submitted()
 
         # Step 4: Handle response — MFA or SAML or error
         saml_html = ""
         if self._is_mfa_page(step3_resp):
+            if on_credentials_submitted is not None:
+                on_credentials_submitted()
             # Step 4a: Handle MFA (two-phase: code collected after password accepted)
             step4_resp = self._step_handle_mfa(
                 step3_resp,
@@ -784,29 +818,31 @@ class MicrosoftSSOClient:
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=user_agent)
-            if export_cookies:
-                context.add_cookies(export_cookies)
-            page = context.new_page()
-            page.goto(ms_url, wait_until="networkidle", timeout=60000)
-            login_input = page.query_selector('input[name="loginfmt"]')
-            if login_input:
-                page.fill('input[name="loginfmt"]', username)
-                page.click("#idSIButton9")
-                page.wait_for_selector('input[name="passwd"]', timeout=30000)
-            pw_cfg = page.evaluate(
-                """() => ({
-                    urlPost: $Config.urlPost,
-                    sFT: $Config.sFT,
-                    sCtx: $Config.sCtx,
-                    canary: $Config.canary,
-                    sessionId: $Config.sessionId,
-                    i19: $Config.i19
-                })"""
-            )
-            referer = page.url
-            pw_cookies = context.cookies()
-            browser.close()
+            try:
+                context = browser.new_context(user_agent=user_agent)
+                if export_cookies:
+                    context.add_cookies(export_cookies)
+                page = context.new_page()
+                page.goto(ms_url, wait_until="networkidle", timeout=60000)
+                login_input = page.query_selector('input[name="loginfmt"]')
+                if login_input:
+                    page.fill('input[name="loginfmt"]', username)
+                    page.click("#idSIButton9")
+                    page.wait_for_selector('input[name="passwd"]', timeout=30000)
+                pw_cfg = page.evaluate(
+                    """() => ({
+                        urlPost: $Config.urlPost,
+                        sFT: $Config.sFT,
+                        sCtx: $Config.sCtx,
+                        canary: $Config.canary,
+                        sessionId: $Config.sessionId,
+                        i19: $Config.i19
+                    })"""
+                )
+                referer = page.url
+                pw_cookies = context.cookies()
+            finally:
+                browser.close()
 
         self._import_playwright_cookies(pw_cookies)
         _prune_stale_esctx_cookies(self._session)
@@ -1307,7 +1343,10 @@ class MicrosoftSSOClient:
         end_flow = str(begin_data.get("FlowToken") or flow_token)
         end_ctx = str(begin_data.get("Ctx") or ctx)
         polling = mfa_config.get("oPerAuthPollingInterval") or {}
-        poll_seconds = float(polling.get(selected.auth_method_id, 2))
+        try:
+            poll_seconds = float(polling.get(selected.auth_method_id, 2))
+        except (TypeError, ValueError):
+            poll_seconds = 2.0
 
         end_data: dict[str, Any] = {}
         if skip_end_auth and end_auth_flow and end_auth_ctx:
@@ -1484,7 +1523,11 @@ class MicrosoftSSOClient:
 
     def _is_hiddenform_page(self, html: str) -> bool:
         """Microsoft auto-submit interstitial (common after ProcessAuth)."""
-        return html.startswith(" Working... ") and 'name="hiddenform"' in html
+        if 'name="hiddenform"' in html or "name='hiddenform'" in html:
+            soup = BeautifulSoup(html, "html.parser")
+            if soup.find("form", attrs={"name": "hiddenform"}):
+                return True
+        return html.lstrip().startswith("Working...") and "hiddenform" in html
 
     def _post_hiddenform(self, html: str, base_url: str) -> requests.Response:
         """POST the auto-submit hiddenform interstitial."""
@@ -1682,7 +1725,10 @@ class MicrosoftSSOClient:
                 cookie_val = cookie.value if cookie.value is not None else ""
                 cookies[cookie.name] = cookie_val
 
-        missing = [n for n in D2L_COOKIE_NAMES if n not in cookies]
+        missing = [
+            n for n in D2L_COOKIE_NAMES
+            if n not in cookies or not str(cookies.get(n, "")).strip()
+        ]
         if missing:
             raise MicrosoftSSOError(
                 f"Missing required D2L cookies after SSO: {missing}",

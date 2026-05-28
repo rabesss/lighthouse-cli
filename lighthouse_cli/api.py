@@ -15,7 +15,7 @@ from contextlib import suppress
 
 import requests
 
-from .config import API_LE, BASE_URL, COOKIE_NAMES, load_cookies, save_cookies
+from .config import API_LE, BASE_URL, COOKIE_NAMES, load_cookies, missing_cookie_names, save_cookies
 from .utils import _sanitize_filename
 
 # CDP port for browser-harness
@@ -46,13 +46,16 @@ def _session_expired_msg(detail: str = "") -> str:
     """Build a structured session-expired message with all recovery options."""
     parts = [f"Session expired{' (' + detail + ')' if detail else ''}."]
     parts.append("Options:")
-    parts.append("  1. If you have a browser open: lighthouse auth login")
     parts.append(
-        "  2. For headless/CI: set LIGHTHOUSE_USERNAME, LIGHTHOUSE_PASSWORD env vars"
-        " and run: lighthouse auth login"
+        "  1. If Chrome is open and logged in to lighthouse.manipal.edu:"
+        " re-run any command (CDP auto-refresh may apply)"
     )
     parts.append(
-        "  3. For 2FA in CI: run with --totp <code> or use two-phase interactive login"
+        "  2. HTTP SSO: lighthouse auth login --mfa-method sms"
+        " (then lighthouse auth verify <code> if prompted)"
+    )
+    parts.append(
+        "  3. Set LIGHTHOUSE_USERNAME and LIGHTHOUSE_PASSWORD for non-interactive login"
     )
     return "\n".join(parts)
 
@@ -73,14 +76,24 @@ class LighthouseClient:
         self._cookies: dict[str, str] = {}
         self._loaded = False
         self._cache: dict[str, Any] = {}
-        self._auto_refreshed = False
 
     # -- cookie management --------------------------------------------------
+
+    def _apply_cookies_to_session(self, cookies: dict[str, str]) -> None:
+        """Load D2L cookies into the session jar so Set-Cookie responses are preserved."""
+        for name in COOKIE_NAMES:
+            self._session.cookies.set(
+                name,
+                cookies.get(name, ""),
+                domain="lighthouse.manipal.edu",
+                path="/",
+            )
 
     def _ensure_cookies(self) -> dict[str, str]:
         """Load cookies from disk on first use."""
         if not self._loaded:
             self._cookies = load_cookies()
+            self._apply_cookies_to_session(self._cookies)
             self._loaded = True
         return self._cookies
 
@@ -109,40 +122,39 @@ class LighthouseClient:
             _timeout: Request timeout in seconds (default 30).
         """
         cookies = self.cookies
-        if not cookies:
+        if missing_cookie_names(cookies):
             raise SessionExpiredError(_session_expired_msg("no cookies found"))
 
-        try:
-            return self._do_request(method, url, cookies, _skip_raise, _timeout, **kwargs)
-        except SessionExpiredError:
-            # Auto-refresh: attempt CDP cookie extraction once
-            if self._auto_refreshed:
-                raise SessionExpiredError(_session_expired_msg("auto-refresh already attempted"))
-
-            print("Session expired. Refreshing from browser...", file=sys.stderr)
+        refresh_attempted = False
+        while True:
             try:
-                new_cookies = refresh_auth_from_browser()
-            except Exception as exc:
-                raise SessionExpiredError(
-                    _session_expired_msg(f"auto-refresh failed: {exc}")
-                ) from exc
+                return self._do_request(method, url, _skip_raise, _timeout, **kwargs)
+            except SessionExpiredError:
+                if refresh_attempted:
+                    raise SessionExpiredError(
+                        _session_expired_msg("auto-refresh already attempted")
+                    )
+                refresh_attempted = True
+                print("Session expired. Refreshing from browser...", file=sys.stderr)
+                try:
+                    new_cookies = refresh_auth_from_browser()
+                except Exception as exc:
+                    raise SessionExpiredError(
+                        _session_expired_msg(f"auto-refresh failed: {exc}")
+                    ) from exc
 
-            # Validate extracted cookies contain all required names
-            missing = [n for n in COOKIE_NAMES if n not in new_cookies]
-            if missing:
-                raise SessionExpiredError(
-                    _session_expired_msg(f"CDP cookies missing: {missing}")
-                )
+                missing = missing_cookie_names(new_cookies)
+                if missing:
+                    raise SessionExpiredError(
+                        _session_expired_msg(f"CDP cookies missing: {missing}")
+                    )
 
-            # Update instance cookies and persist
-            save_cookies(new_cookies)
-            self._cookies = new_cookies
-            self._auto_refreshed = True
-
-            return self._do_request(method, url, new_cookies, _skip_raise, _timeout, **kwargs)
+                save_cookies(new_cookies)
+                self._cookies = new_cookies
+                self._apply_cookies_to_session(new_cookies)
 
     def _do_request(
-        self, method: str, url: str, cookies: dict[str, str],
+        self, method: str, url: str,
         # skip_raise forwarded from _request._skip_raise
         skip_raise: bool, timeout: int, **kwargs: Any,
     ) -> requests.Response:
@@ -151,7 +163,6 @@ class LighthouseClient:
             resp = self._session.request(
                 method,
                 url,
-                cookies=cookies,
                 allow_redirects=False,
                 timeout=timeout,
                 **kwargs,
@@ -516,7 +527,9 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
     import urllib.request
 
     # Get browser websocket URL
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version") as resp:
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{port}/json/version", timeout=10
+    ) as resp:
         ws_url = json.loads(resp.read())["webSocketDebuggerUrl"]
 
     try:

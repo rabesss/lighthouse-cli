@@ -73,7 +73,7 @@ lighthouse auth login --mfa-method sms --totp -
 - MFA config URLs and selected proof (`OneWaySMS`, etc.)
 - Checkpoints: `end_auth_flow` / `end_auth_ctx` after OTP accepted; `kmsi_checkpoint` before “Stay signed in”
 
-Cleared only after D2L cookies are extracted successfully.
+Cleared only after D2L cookies are extracted successfully. If `auth verify` fails, the pending file is removed so a stale `end_auth_flow` checkpoint cannot block the next attempt — run `auth login` again for a new code.
 
 ## Protocol details (why the payloads look this way)
 
