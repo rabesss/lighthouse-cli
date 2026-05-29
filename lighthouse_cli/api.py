@@ -29,6 +29,16 @@ DEFAULT_CDP_PORT = 34165
 class SessionExpiredError(Exception):
     """Raised when the server rejects our cookies (401 / redirect to login)."""
 
+    def __init__(self, message: str, recovery: str | None = None) -> None:
+        super().__init__(message)
+        self.recovery = recovery
+
+    def __str__(self) -> str:
+        parts = [super().__str__()]
+        if self.recovery:
+            parts.append(f"  Recovery: {self.recovery}")
+        return "\n".join(parts)
+
 
 class NetworkError(Exception):
     """Raised on connectivity / DNS / timeout issues."""
@@ -42,22 +52,19 @@ class CourseNotFoundError(Exception):
 # Expanded session-expired message
 # ---------------------------------------------------------------------------
 
+_SESSION_EXPIRED_RECOVERY = (
+    "Options:\n"
+    "  1. If Chrome is open and logged in to lighthouse.manipal.edu:"
+    " re-run any command (CDP auto-refresh may apply)\n"
+    "  2. HTTP SSO: lighthouse auth login --mfa-method sms"
+    " (then lighthouse auth verify <code> if prompted)\n"
+    "  3. Set LIGHTHOUSE_USERNAME and LIGHTHOUSE_PASSWORD for non-interactive login"
+)
+
+
 def _session_expired_msg(detail: str = "") -> str:
-    """Build a structured session-expired message with all recovery options."""
-    parts = [f"Session expired{' (' + detail + ')' if detail else ''}."]
-    parts.append("Options:")
-    parts.append(
-        "  1. If Chrome is open and logged in to lighthouse.manipal.edu:"
-        " re-run any command (CDP auto-refresh may apply)"
-    )
-    parts.append(
-        "  2. HTTP SSO: lighthouse auth login --mfa-method sms"
-        " (then lighthouse auth verify <code> if prompted)"
-    )
-    parts.append(
-        "  3. Set LIGHTHOUSE_USERNAME and LIGHTHOUSE_PASSWORD for non-interactive login"
-    )
-    return "\n".join(parts)
+    """Build a short session-expired message."""
+    return f"Session expired{' (' + detail + ')' if detail else ''}. Run: lighthouse auth login"
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +130,7 @@ class LighthouseClient:
         """
         cookies = self.cookies
         if missing_cookie_names(cookies):
-            raise SessionExpiredError(_session_expired_msg("no cookies found"))
+            raise SessionExpiredError(_session_expired_msg("no cookies found"), recovery=_SESSION_EXPIRED_RECOVERY)
 
         refresh_attempted = False
         while True:
@@ -132,7 +139,8 @@ class LighthouseClient:
             except SessionExpiredError:
                 if refresh_attempted:
                     raise SessionExpiredError(
-                        _session_expired_msg("auto-refresh already attempted")
+                        _session_expired_msg("auto-refresh already attempted"),
+                        recovery=_SESSION_EXPIRED_RECOVERY,
                     )
                 refresh_attempted = True
                 print("Session expired. Refreshing from browser...", file=sys.stderr)
@@ -140,13 +148,15 @@ class LighthouseClient:
                     new_cookies = refresh_auth_from_browser()
                 except Exception as exc:
                     raise SessionExpiredError(
-                        _session_expired_msg(f"auto-refresh failed: {exc}")
+                        _session_expired_msg(f"auto-refresh failed: {exc}"),
+                        recovery=_SESSION_EXPIRED_RECOVERY,
                     ) from exc
 
                 missing = missing_cookie_names(new_cookies)
                 if missing:
                     raise SessionExpiredError(
-                        _session_expired_msg(f"CDP cookies missing: {missing}")
+                        _session_expired_msg(f"CDP cookies missing: {missing}"),
+                        recovery=_SESSION_EXPIRED_RECOVERY,
                     )
 
                 save_cookies(new_cookies)
@@ -173,12 +183,14 @@ class LighthouseClient:
                 location = resp.headers.get("Location", "").lower()
                 if "login" in location or "auth" in location:
                     raise SessionExpiredError(
-                        _session_expired_msg(f"HTTP {resp.status_code} redirect to login")
+                        _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
+                        recovery=_SESSION_EXPIRED_RECOVERY,
                     )
 
             if resp.status_code == 401:
                 raise SessionExpiredError(
-                    _session_expired_msg("HTTP 401 Unauthorized")
+                    _session_expired_msg("HTTP 401 Unauthorized"),
+                    recovery=_SESSION_EXPIRED_RECOVERY,
                 )
 
             # Rate-limit: retry with backoff
@@ -409,7 +421,7 @@ class LighthouseClient:
         )
         # D2L redirects to login page when session is dead
         if resp.status_code in (301, 302, 303, 307, 308):
-            raise SessionExpiredError(_session_expired_msg(f"HTTP {resp.status_code} redirect to login"))
+            raise SessionExpiredError(_session_expired_msg(f"HTTP {resp.status_code} redirect to login"), recovery=_SESSION_EXPIRED_RECOVERY)
 
         if resp.status_code == 403:
             raise PermissionError(

@@ -421,7 +421,9 @@ def cmd_auth_login(
             print("\nInterrupted.", file=sys.stderr)
         return 130
 
-    except Exception as exc:
+    except (OSError, RuntimeError, ValueError, MicrosoftSSOError) as exc:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return _auth_error(str(exc), json_output)
 
 

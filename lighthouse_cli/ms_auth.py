@@ -1,15 +1,14 @@
-"""Pure HTTP Microsoft SSO client for lighthouse-cli.
+"""HTTP + optional Playwright username bootstrap Microsoft SSO client.
 
-Implements the full Microsoft Azure AD SSO login flow using only
-``requests`` and ``BeautifulSoup`` -- no browser, no Playwright, no CDP.
+Implements the full Microsoft Azure AD SSO login flow.
 
 Flow:
-1. GET lighthouse.manipal.edu/d2l/lp/auth/saml/login → 302 to Microsoft
-2. GET Microsoft login page → parse ``$Config`` JSON for flow tokens
-3. POST credentials to ``urlPost`` → response may be MFA page or SAML
-4. Handle MFA (ConvergedTFA page) → POST TOTP code
+1. GET lighthouse.manipal.edu/d2l/lp/auth/saml/login -> 302 to Microsoft
+2. GET Microsoft login page -> parse ``$Config`` JSON for flow tokens
+3. POST credentials to ``urlPost`` -> response may be MFA page or SAML
+4. Handle MFA (ConvergedTFA page) -> POST TOTP code
 5. Extract SAMLResponse from HTML form
-6. POST SAMLResponse to D2L ACS → capture d2l* session cookies
+6. POST SAMLResponse to D2L ACS -> capture d2l* session cookies
 """
 
 from __future__ import annotations
@@ -18,355 +17,71 @@ import json
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
-# Constants
+# Re-exports from sub-modules (preserve public API)
 # ---------------------------------------------------------------------------
-
-BASE_URL = "https://lighthouse.manipal.edu"
-LOGIN_PATH = "/d2l/lp/auth/saml/login"
-D2L_COOKIE_NAMES = (
-    "d2lSecureSessionVal",
-    "d2lSessionVal",
-    "d2lSameSiteCanaryA",
-    "d2lSameSiteCanaryB",
+from lighthouse_cli.ms_errors import (  # noqa: F401
+    BASE_URL,
+    D2L_COOKIE_NAMES,
+    LOGIN_PATH,
+    MFA_AUTH_APP_NOTIFY,
+    MFA_AUTH_APP_OTP,
+    MFA_AUTH_SMS,
+    MFA_METHOD_APP,
+    MFA_METHOD_AUTH_IDS,
+    MFA_METHOD_AUTO,
+    MFA_METHOD_CHOOSE,
+    MFA_METHOD_INSTRUCTIONS,
+    MFA_METHOD_SMS,
+    MfaPendingError,
+    MicrosoftSSOError,
+    MS_ERROR_CODES,
+    VALID_MFA_METHODS,
 )
-
-# CLI / env preference: auto | sms | app
-MFA_METHOD_AUTO = "auto"
-MFA_METHOD_SMS = "sms"
-MFA_METHOD_APP = "app"
-MFA_METHOD_CHOOSE = "choose"
-VALID_MFA_METHODS = (MFA_METHOD_AUTO, MFA_METHOD_SMS, MFA_METHOD_APP, MFA_METHOD_CHOOSE)
-
-# Microsoft SAS AuthMethodId values (see saml2aws AzureAD provider)
-MFA_AUTH_SMS = "OneWaySMS"
-MFA_AUTH_APP_OTP = "PhoneAppOTP"
-MFA_AUTH_APP_NOTIFY = "PhoneAppNotification"
-
-MFA_METHOD_AUTH_IDS: dict[str, tuple[str, ...]] = {
-    MFA_METHOD_SMS: (MFA_AUTH_SMS,),
-    MFA_METHOD_APP: (MFA_AUTH_APP_OTP, MFA_AUTH_APP_NOTIFY),
-}
-
-MFA_METHOD_INSTRUCTIONS: dict[str, str] = {
-    MFA_AUTH_SMS: "Check the SMS text message on your registered phone.",
-    MFA_AUTH_APP_OTP: "Open Microsoft Authenticator and enter the 6-digit code.",
-    MFA_AUTH_APP_NOTIFY: "Approve the sign-in request in Microsoft Authenticator.",
-}
-
-# Microsoft error codes and their meanings
-MS_ERROR_CODES: dict[int, str] = {
-    50034: "User account does not exist in this tenant. Check your email address.",
-    50053: "Account is locked. Too many sign-in attempts.",
-    50055: "Password is expired.",
-    50056: "Password is invalid or null.",
-    50057: "User account is disabled.",
-    50058: "Sign-in required. User needs to complete sign-in.",
-    50059: "Service unavailable.",
-    50064: "Credential validation failed.",
-    50072: "User needs to perform multi-factor authentication.",
-    50074: "Strong authentication is required.",
-    50076: "User needs to perform multi-factor authentication (MFA).",
-    50079: "User needs to enroll in multi-factor authentication.",
-    50126: "Invalid username or password.",
-    50128: "Domain hint is invalid.",
-    50131: "Device is not in required device state.",
-    50133: "Password is incorrect or account is locked.",
-    50140: "User needs to accept Terms of Use.",
-    50144: "User's password has expired.",
-    50158: "External security challenge not satisfied.",
-    50173: "Fresh token needed.",
-    53000: "Device is not compliant.",
-    53003: "Access blocked by conditional access policy.",
-    65001: "Application needs permission to access resources.",
-}
-
-
-# ---------------------------------------------------------------------------
-# Exception
-# ---------------------------------------------------------------------------
-
-class MicrosoftSSOError(Exception):
-    """Raised when any step of the Microsoft SSO flow fails."""
-
-    def __init__(self, message: str, step: str | None = None, recovery: str | None = None) -> None:
-        super().__init__(message)
-        self.step = step
-        self.recovery = recovery
-
-    def __str__(self) -> str:
-        parts = [super().__str__()]
-        if self.step:
-            parts.append(f"  Step: {self.step}")
-        if self.recovery:
-            parts.append(f"  Fix: {self.recovery}")
-        return "\n".join(parts)
-
-
-class MfaPendingError(MicrosoftSSOError):
-    """BeginAuth succeeded; complete with ``lighthouse auth verify <code>``."""
-
-
-# ---------------------------------------------------------------------------
-# Token extraction helpers
-# ---------------------------------------------------------------------------
-
-def _extract_balanced_json_object(text: str, start: int) -> str | None:
-    """Return a ``{...}`` JSON object substring starting at ``start`` (must be ``{``)."""
-    if start >= len(text) or text[start] != "{":
-        return None
-    depth = 0
-    in_string = False
-    escape = False
-    for idx in range(start, len(text)):
-        ch = text[idx]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-    return None
-
-
-def _extract_config_json(html: str) -> dict[str, Any] | None:
-    """Extract the ``$Config`` JavaScript object from Microsoft's login page.
-
-    Uses brace-balanced parsing because ``$Config`` contains deeply nested JSON
-    (non-greedy regex stops at the first ``}`` and drops ``sFT`` / ``sCtx``).
-    """
-    pos = 0
-    while True:
-        m = re.search(r"\$Config\s*=", html[pos:])
-        if not m:
-            break
-        match_end = pos + m.end()
-        brace = html.find("{", match_end)
-        if brace < 0:
-            pos = match_end
-            continue
-        blob = _extract_balanced_json_object(html, brace)
-        if blob:
-            try:
-                parsed = json.loads(blob)
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-        pos = match_end
-    return None
-
-
-def _extract_error_code_and_msg(html: str) -> tuple[int | None, str | None]:
-    """Extract Microsoft error code and message from an error page.
-
-    Looks for patterns like ``serverError\":"50126"`` or ``sErrTxt\":"..."``
-    in the page's JavaScript or HTML.
-    """
-    # Try serverError in a script — "serverError": "50126" (JSON-style)
-    m = re.search(r'''serverError["']?\s*:\s*["']([0-9]+)["']''', html)
-    if not m:
-        # Try without the key quote: serverError": "50126"
-        m = re.search(r'serverError["\'][^:]*:\s*["\']([0-9]+)["\']', html)
-    code = int(m.group(1)) if m else None
-
-    page_cfg = _extract_config_json(html) or {}
-    cfg_code = page_cfg.get("sErrorCode") or page_cfg.get("iErrorCode")
-    if cfg_code and str(cfg_code) not in ("", "0", "50058"):
-        try:
-            code = int(str(cfg_code))
-        except ValueError:
-            pass
-    if page_cfg.get("pgid") == "ConvergedError":
-        msg = msg or str(page_cfg.get("strServiceExceptionMessage") or page_cfg.get("strMainMessage") or "")
-
-    # ConvergedTFA / KMSI pages often embed error.aspx?err=504 in JS — not a real failure.
-    if code == 504 and "error.aspx" in html and (
-        "ConvergedTFA" in html or page_cfg.get("pgid") in ("ConvergedTFA", "CmsiInterrupt")
-    ):
-        code = None
-
-    # Try sErrTxt — flexible pattern for JSON key
-    m = re.search(r'''sErrTxt["']?\s*:\s*["'](.+?)["']''', html, re.DOTALL)
-    msg = m.group(1) if m else None
-
-    # Fallback: look for <div class="error"> text (case-insensitive)
-    if not msg:
-        soup = BeautifulSoup(html, "html.parser")
-        for err_div in soup.find_all(
-            lambda tag: tag.name == "div"
-            and any(
-                "error" in (tag.get(attr, "") or "").lower()
-                for attr in ("id", "class")
-            )
-        ):
-            text = err_div.get_text(strip=True)
-            if text:
-                msg = text
-                break
-
-    return code, msg
-
-
-@dataclass(frozen=True)
-class UserProof:
-    """A registered MFA method on the user's Microsoft account."""
-
-    auth_method_id: str
-    display: str
-    data: str
-    is_default: bool
-
-
-def _parse_user_proofs(config: dict[str, Any]) -> list[UserProof]:
-    proofs: list[UserProof] = []
-    for raw in config.get("arrUserProofs") or []:
-        if not isinstance(raw, dict):
-            continue
-        auth_id = str(raw.get("authMethodId") or "")
-        if not auth_id:
-            continue
-        proofs.append(
-            UserProof(
-                auth_method_id=auth_id,
-                display=str(raw.get("display") or auth_id),
-                data=str(raw.get("data") or ""),
-                is_default=bool(raw.get("isDefault")),
-            )
-        )
-    return proofs
-
-
-def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
-    """Interactively pick one of several registered MFA methods."""
-    if len(proofs) == 1:
-        return proofs[0]
-    if not sys.stdin.isatty():
-        raise MicrosoftSSOError(
-            "Multiple MFA methods are available; pick one with --mfa-method sms|app.",
-            step="MFA",
-            recovery="Re-run with --mfa-method or use a single-method account.",
-        )
-    print("\nChoose a verification method:", flush=True)
-    for idx, proof in enumerate(proofs, start=1):
-        default = " (Microsoft default)" if proof.is_default else ""
-        print(f"  {idx}) {proof.display}{default}", flush=True)
-    while True:
-        choice = input(f"Enter 1–{len(proofs)} [1]: ").strip() or "1"
-        if choice.isdigit() and 1 <= int(choice) <= len(proofs):
-            return proofs[int(choice) - 1]
-        print("Invalid choice, try again.", flush=True)
-
-
-def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
-    """Pick an MFA method based on user preference and tenant defaults."""
-    if not proofs:
-        raise MicrosoftSSOError(
-            "No MFA methods are registered on this account.",
-            step="MFA",
-            recovery="Enroll SMS or Authenticator in your Microsoft account security settings.",
-        )
-
-    if preference == MFA_METHOD_CHOOSE:
-        return _prompt_user_proof_choice(proofs)
-
-    if preference != MFA_METHOD_AUTO:
-        for auth_id in MFA_METHOD_AUTH_IDS.get(preference, ()):
-            for proof in proofs:
-                if proof.auth_method_id == auth_id:
-                    return proof
-        available = ", ".join(p.display for p in proofs)
-        raise MicrosoftSSOError(
-            f"Requested MFA method '{preference}' is not available. Options: {available}",
-            step="MFA",
-            recovery="Use --mfa-method auto, choose, or register the method in Microsoft security settings.",
-        )
-
-    # auto: tenant default, else first registered method
-    for proof in proofs:
-        if proof.is_default:
-            return proof
-    return proofs[0]
-
-
-def _absolute_url(base_url: str, path: str) -> str:
-    """Resolve Microsoft login URLs (often tenant-relative paths)."""
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    parsed = urlparse(base_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    if path.startswith("/"):
-        return f"{origin}{path}"
-    return urljoin(f"{origin}/", path)
-
-
-def _tenant_id_from_ms_url(ms_url: str) -> str:
-    """Extract Azure AD tenant id from a Microsoft login URL."""
-    m = re.search(r"login\.microsoftonline\.com/([0-9a-f-]{36})/", ms_url, re.IGNORECASE)
-    return m.group(1) if m else "common"
-
-
-def _prune_stale_esctx_cookies(session: requests.Session) -> None:
-    """Keep a single ``esctx-*`` cookie; stale values break password POST."""
-    named = [c for c in session.cookies if c.name.startswith("esctx-")]
-    if len(named) <= 1:
-        return
-    for cookie in named[:-1]:
-        session.cookies.clear(cookie.domain, cookie.path, cookie.name)
-
-
-def _export_session_cookies(session: requests.Session) -> list[dict[str, str]]:
-    return [
-        {
-            "name": c.name,
-            "value": c.value,
-            "domain": c.domain or "",
-            "path": c.path or "/",
-        }
-        for c in session.cookies
-    ]
-
-
-def _import_session_cookies(session: requests.Session, cookies: list[dict[str, str]]) -> None:
-    for cookie in cookies:
-        session.cookies.set(
-            cookie["name"],
-            cookie["value"],
-            domain=cookie.get("domain") or "",
-            path=cookie.get("path") or "/",
-        )
-
-
-def _mask_phone_hint(data: str) -> str:
-    digits = re.sub(r"\D", "", data)
-    if len(digits) >= 4:
-        return f"***{digits[-4:]}"
-    if data:
-        return data
-    return "your phone"
+from lighthouse_cli.ms_mfa import (  # noqa: F401
+    UserProof,
+    _parse_user_proofs,
+    _prompt_user_proof_choice,
+    _select_user_proof,
+)
+from lighthouse_cli.ms_parse import (  # noqa: F401
+    _extract_balanced_json_object,
+    _extract_config_json,
+    _extract_error_code_and_msg,
+)
+from lighthouse_cli.ms_session import (  # noqa: F401
+    _absolute_url,
+    _export_session_cookies,
+    _import_session_cookies,
+    _mask_phone_hint,
+    _prune_stale_esctx_cookies,
+    _tenant_id_from_ms_url,
+)
 
 
 # ---------------------------------------------------------------------------
 # Main client
 # ---------------------------------------------------------------------------
+
+
+class _MfaPageRef(NamedTuple):
+    """Minimal MFA-page reference for resuming a saved BeginAuth session.
+
+    Only ``.url`` (to resolve relative SAS endpoints) and ``.text`` are read, so
+    a full ``requests.Response`` is unnecessary when resuming MFA from disk.
+    """
+
+    url: str
+    text: str = ""
+
 
 class MicrosoftSSOClient:
     """HTTP client for Microsoft Azure AD SSO + D2L login.
@@ -376,11 +91,14 @@ class MicrosoftSSOClient:
     ``esctx`` session cookies to in-page JavaScript state that pure HTTP cannot
     reproduce for this tenant's SAML login.
 
+    Each call to :meth:`login` creates a fresh ``requests.Session`` so the
+    client is safely reusable between login attempts.
+
     Usage::
 
         client = MicrosoftSSOClient()
         cookies = client.login("user@manipal.edu", "password", "123456")
-        # cookies is a dict of d2l cookie name → value
+        # cookies is a dict of d2l cookie name -> value
     """
 
     def __init__(
@@ -389,14 +107,18 @@ class MicrosoftSSOClient:
         timeout: int = 30,
         user_agent: str | None = None,
     ) -> None:
+        self._user_agent = user_agent or (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        )
+        # Note: login() creates its own fresh session for each login attempt.
+        # This constructor session is used by complete_mfa_pending(), which
+        # resumes an existing flow without going through login().
         self._session = requests.Session()
         self._timeout = timeout
         self._session.headers.update({
-            "User-Agent": user_agent or (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": self._user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         })
@@ -420,6 +142,10 @@ class MicrosoftSSOClient:
             timeout=self._timeout,
             **kwargs,
         )
+
+    def _post_with_redirects(self, url: str, **kwargs: Any) -> requests.Response:
+        """POST allowing redirects. Used for SAML ACS where the redirect chain sets cookies."""
+        return self._session.post(url, allow_redirects=True, timeout=self._timeout, **kwargs)
 
     def _checkpoint_mfa_pending(self, **updates: Any) -> None:
         """Persist in-progress MFA state so verify can resume after interruptions."""
@@ -495,12 +221,7 @@ class MicrosoftSSOClient:
                     str(mfa_config.get("urlPost") or mfa_page_url),
                 )
             else:
-                class _MfaPageRef:
-                    def __init__(self, url: str) -> None:
-                        self.url = url
-                        self.text = ""
-
-                mfa_resp = _MfaPageRef(mfa_page_url)
+                mfa_resp = _MfaPageRef(url=mfa_page_url)
                 skip_end_auth = bool(
                     pending.get("end_auth_flow") and pending.get("end_auth_ctx")
                 )
@@ -587,6 +308,14 @@ class MicrosoftSSOClient:
                 f"Invalid mfa_method {mfa_method!r}. Use: {', '.join(VALID_MFA_METHODS)}",
                 step="MFA",
             )
+
+        # Create a fresh session for each login attempt (safe reuse).
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": self._user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
 
         # Step 1: Initiate D2L SAML login
         step1 = self._step_initiate_saml()
@@ -888,7 +617,7 @@ class MicrosoftSSOClient:
         self._session.get(
             (
                 "https://autologon.microsoftazuread-sso.com/"
-                f"learner.manipal.edu/winauth/ssoprobe?client-request-id={client_request_id}"
+                f"{tenant_id}/winauth/ssoprobe?client-request-id={client_request_id}"
                 f"&_={int(time.time() * 1000)}"
             ),
             headers={"Referer": referer},
@@ -1333,9 +1062,69 @@ class MicrosoftSSOClient:
         end_auth_ctx: str | None = None,
     ) -> requests.Response:
         """EndAuth + ProcessAuth after a successful BeginAuth."""
-        end_url = mfa_config.get("urlEndAuth") or "/common/SAS/EndAuth"
         process_url = mfa_config.get("urlPost") or "/common/SAS/ProcessAuth"
         sft_name = str(mfa_config.get("sFTName") or "flowToken")
+
+        # Poll EndAuth until success or failure.
+        flow_token, ctx, end_data = self._poll_end_auth(
+            mfa_resp,
+            mfa_config,
+            selected,
+            begin_data,
+            totp_code,
+            skip_end_auth=skip_end_auth,
+            end_auth_flow=end_auth_flow,
+            end_auth_ctx=end_auth_ctx,
+        )
+
+        # ProcessAuth: EndAuth already consumed the OTP; only pass tokens (saml2aws pattern).
+        process_data: dict[str, str] = {
+            sft_name: flow_token,
+            "request": ctx,
+        }
+        if login_name:
+            process_data["login"] = login_name
+        elif mfa_config.get("sPOST_Username"):
+            process_data["login"] = str(mfa_config["sPOST_Username"])
+        canary = mfa_config.get("canary")
+        if canary:
+            process_data["canary"] = str(canary)
+
+        resp = self._post(self._resolve_mfa_url(mfa_resp, str(process_url)), data=process_data)
+
+        page_cfg = _extract_config_json(resp.text) or {}
+        if page_cfg.get("pgid") in ("CmsiInterrupt", "KmsiInterrupt"):
+            self._checkpoint_mfa_pending(
+                kmsi_checkpoint={"url": resp.url, "html": resp.text},
+            )
+
+        if self._is_mfa_page(resp):
+            raise MicrosoftSSOError(
+                "2FA verification failed: invalid or expired code.",
+                step="MFA",
+                recovery="Request a new 2FA code and try again.",
+            )
+
+        return self._follow_post_mfa_response(resp, str(process_url))
+
+    def _poll_end_auth(
+        self,
+        mfa_resp: Any,
+        mfa_config: dict[str, Any],
+        selected: UserProof,
+        begin_data: dict[str, Any],
+        totp_code: str,
+        *,
+        skip_end_auth: bool = False,
+        end_auth_flow: str | None = None,
+        end_auth_ctx: str | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Poll the EndAuth API until MFA verification succeeds.
+
+        Returns:
+            Tuple of (flow_token, ctx, end_data) for use in ProcessAuth.
+        """
+        end_url = mfa_config.get("urlEndAuth") or "/common/SAS/EndAuth"
         flow_token = str(mfa_config.get("sFT") or "")
         ctx = str(mfa_config.get("sCtx") or "")
 
@@ -1347,6 +1136,7 @@ class MicrosoftSSOClient:
             poll_seconds = float(polling.get(selected.auth_method_id, 2))
         except (TypeError, ValueError):
             poll_seconds = 2.0
+        poll_seconds = max(0.5, poll_seconds)
 
         end_data: dict[str, Any] = {}
         if skip_end_auth and end_auth_flow and end_auth_ctx:
@@ -1429,35 +1219,11 @@ class MicrosoftSSOClient:
                 recovery="Try again and complete verification promptly.",
             )
 
-        # ProcessAuth: EndAuth already consumed the OTP; only pass tokens (saml2aws pattern).
-        process_data: dict[str, str] = {
-            sft_name: str(end_data.get("FlowToken") or end_flow),
-            "request": str(end_data.get("Ctx") or end_ctx),
-        }
-        if login_name:
-            process_data["login"] = login_name
-        elif mfa_config.get("sPOST_Username"):
-            process_data["login"] = str(mfa_config["sPOST_Username"])
-        canary = mfa_config.get("canary")
-        if canary:
-            process_data["canary"] = str(canary)
-
-        resp = self._post(self._resolve_mfa_url(mfa_resp, str(process_url)), data=process_data)
-
-        page_cfg = _extract_config_json(resp.text) or {}
-        if page_cfg.get("pgid") in ("CmsiInterrupt", "KmsiInterrupt"):
-            self._checkpoint_mfa_pending(
-                kmsi_checkpoint={"url": resp.url, "html": resp.text},
-            )
-
-        if self._is_mfa_page(resp):
-            raise MicrosoftSSOError(
-                "2FA verification failed: invalid or expired code.",
-                step="MFA",
-                recovery="Request a new 2FA code and try again.",
-            )
-
-        return self._follow_post_mfa_response(resp, str(process_url))
+        return (
+            str(end_data.get("FlowToken") or end_flow),
+            str(end_data.get("Ctx") or end_ctx),
+            end_data,
+        )
 
     def _step_handle_mfa_legacy_form(
         self,
@@ -1670,6 +1436,8 @@ class MicrosoftSSOClient:
         """Step 5: POST the SAMLResponse to the D2L ACS endpoint.
 
         The SAML form typically has an action pointing to D2L's ACS.
+        ACS MUST follow redirects because d2l cookies are set during the
+        redirect chain.
         """
         acs_url = f"{BASE_URL}/d2l/lp/auth/saml/consume"
         data: dict[str, str] = {"SAMLResponse": saml_response}
@@ -1686,12 +1454,7 @@ class MicrosoftSSOClient:
                     if name and name not in data:
                         data[str(name)] = str(inp.get("value") or "")
 
-        self._session.post(
-            acs_url,
-            data=data,
-            allow_redirects=True,
-            timeout=self._timeout,
-        )
+        self._post_with_redirects(acs_url, data=data)
 
         if any(n.startswith("d2l") for n in self._session.cookies.keys()):
             return

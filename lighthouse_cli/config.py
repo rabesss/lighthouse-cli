@@ -119,10 +119,15 @@ def save_mfa_pending(payload: dict) -> None:
     ensure_config_dir()
     data = {"version": MFA_PENDING_VERSION, **payload}
     tmp = MFA_PENDING_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    with suppress(OSError):
-        tmp.chmod(0o600)
-    tmp.replace(MFA_PENDING_FILE)
+    try:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        with suppress(OSError):
+            tmp.chmod(0o600)
+        tmp.replace(MFA_PENDING_FILE)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink()
+        raise
     with suppress(OSError):
         MFA_PENDING_FILE.chmod(0o600)
 

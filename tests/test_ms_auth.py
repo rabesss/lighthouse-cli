@@ -215,6 +215,15 @@ class TestExtractErrorCode:
         code, msg = _extract_error_code_and_msg(html)
         assert msg == "Your account is locked."
 
+    def test_504_error_aspx_suppressed_case_insensitive(self) -> None:
+        # B8: mixed-case "Error.aspx" on a ConvergedTFA page is a benign 504.
+        html = (
+            '<html><script>$Config={"serverError":"504"};</script>'
+            "ConvergedTFA redirect to /common/Error.aspx?err=504</html>"
+        )
+        code, _ = _extract_error_code_and_msg(html)
+        assert code is None
+
 
 # ---------------------------------------------------------------------------
 # MicrosoftSSOClient unit tests
@@ -426,12 +435,17 @@ class TestFullLoginFlow:
         return responses
 
     def test_full_login_flow_with_mfa(self) -> None:
-        """Complete login flow: SAML init → MS config → POST creds → MFA → SAML → cookies."""
+        """Complete login flow: SAML init -> MS config -> POST creds -> MFA -> SAML -> cookies."""
         client = MicrosoftSSOClient()
+
+        # Build mock session that will be used when login() creates a fresh session.
+        mock_session = MagicMock()
+        mock_session.headers = {}
+        mock_session.cookies = requests.cookies.RequestsCookieJar()
 
         # Set up cookie jar simulation
         for name in D2L_COOKIE_NAMES:
-            client._session.cookies.set(
+            mock_session.cookies.set(
                 name, f"test-{name}",
                 domain="lighthouse.manipal.edu",
             )
@@ -454,20 +468,21 @@ class TestFullLoginFlow:
         get_responses = [
             resp_saml_init,      # Step 1: GET SAML init
             resp_ms_config,      # Step 2: GET MS config
-            resp_saml,           # Step 4a: follow redirect from TOTP POST → SAML page
+            resp_saml,           # Step 4a: follow redirect from TOTP POST -> SAML page
             resp_acs,            # Step 5b: follow ACS redirect
         ]
-        client._session.get = MagicMock(side_effect=get_responses)
+        mock_session.get = MagicMock(side_effect=get_responses)
 
         # POST sequence: credentials, TOTP, SAML
         post_responses = [
-            resp_mfa,            # Step 3: POST credentials → MFA
+            resp_mfa,            # Step 3: POST credentials -> MFA
             resp_post_totp_redirect,  # Step 4: POST TOTP
             resp_acs,            # Step 5: POST SAML
         ]
-        client._session.post = MagicMock(side_effect=post_responses)
+        mock_session.post = MagicMock(side_effect=post_responses)
 
-        cookies = client.login("test@manipal.edu", "password123", "123456")
+        with patch("requests.Session", return_value=mock_session):
+            cookies = client.login("test@manipal.edu", "password123", "123456")
 
         assert len(cookies) == 4
         for name in D2L_COOKIE_NAMES:
@@ -478,48 +493,62 @@ class TestFullLoginFlow:
         """Invalid credentials raise MicrosoftSSOError with descriptive message."""
         client = MicrosoftSSOClient()
 
+        mock_session = MagicMock()
+        mock_session.headers = {}
+        mock_session.cookies = requests.cookies.RequestsCookieJar()
+
         resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
         resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
         resp_error = make_mock_response(200, text=SAMPLE_ERROR_HTML)
 
-        client._session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config])
-        client._session.post = MagicMock(return_value=resp_error)
+        mock_session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config])
+        mock_session.post = MagicMock(return_value=resp_error)
 
-        with pytest.raises(MicrosoftSSOError, match="50126"):
-            client.login("bad@manipal.edu", "wrong_password", "123456")
+        with patch("requests.Session", return_value=mock_session):
+            with pytest.raises(MicrosoftSSOError, match="50126"):
+                client.login("bad@manipal.edu", "wrong_password", "123456")
         client.close()
 
     def test_login_mfa_with_wrong_code(self) -> None:
         """Wrong 2FA code raises MicrosoftSSOError."""
         client = MicrosoftSSOClient()
 
+        mock_session = MagicMock()
+        mock_session.headers = {}
+        mock_session.cookies = requests.cookies.RequestsCookieJar()
+
         resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
         resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
         resp_mfa = make_mock_response(200, text=SAMPLE_MFA_HTML)
-        # Wrong 2FA code → stay on MFA page (200, still shows MFA)
+        # Wrong 2FA code -> stay on MFA page (200, still shows MFA)
         resp_mfa_again = make_mock_response(200, text=SAMPLE_MFA_HTML)
 
-        client._session.get = MagicMock(side_effect=[
+        mock_session.get = MagicMock(side_effect=[
             resp_saml_init,
             resp_ms_config,
         ])
-        # POST creds → MFA; POST wrong TOTP → MFA again
-        client._session.post = MagicMock(side_effect=[
+        # POST creds -> MFA; POST wrong TOTP -> MFA page again
+        mock_session.post = MagicMock(side_effect=[
             resp_mfa,        # POST creds
-            resp_mfa_again,  # POST wrong TOTP → MFA page again
+            resp_mfa_again,  # POST wrong TOTP -> MFA page again
         ])
 
         # _step_handle_mfa will detect MFA page and raise error
-        with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
-            client.login("test@manipal.edu", "password123", "000000")
+        with patch("requests.Session", return_value=mock_session):
+            with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
+                client.login("test@manipal.edu", "password123", "000000")
         client.close()
 
     def test_login_without_mfa(self) -> None:
         """Login without MFA (direct SAML after credentials)."""
         client = MicrosoftSSOClient()
 
+        mock_session = MagicMock()
+        mock_session.headers = {}
+        mock_session.cookies = requests.cookies.RequestsCookieJar()
+
         for name in D2L_COOKIE_NAMES:
-            client._session.cookies.set(name, f"val-{name}", domain="lighthouse.manipal.edu")
+            mock_session.cookies.set(name, f"val-{name}", domain="lighthouse.manipal.edu")
 
         resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
         resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
@@ -529,10 +558,11 @@ class TestFullLoginFlow:
             302, headers={"Location": f"{BASE_URL}/d2l/home"}
         )
 
-        client._session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config, resp_acs])
-        client._session.post = MagicMock(side_effect=[resp_saml_direct, resp_acs])
+        mock_session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config, resp_acs])
+        mock_session.post = MagicMock(side_effect=[resp_saml_direct, resp_acs])
 
-        cookies = client.login("test@manipal.edu", "password123", None)
+        with patch("requests.Session", return_value=mock_session):
+            cookies = client.login("test@manipal.edu", "password123", None)
         assert len(cookies) == 4
         client.close()
 
