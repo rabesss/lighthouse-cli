@@ -40,3 +40,6 @@ scorecard.png
 # Local credentials (never commit)
 .env.lighthouse
 credentials.lighthouse.env
+
+# Personal / generated artifacts (reviews, screenshots, notes)
+local-artifacts/
