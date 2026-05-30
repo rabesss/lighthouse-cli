@@ -152,13 +152,25 @@ class TestMfaMethodSelection:
     def test_choose_prompts_for_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        monkeypatch.setattr("builtins.input", lambda _: "2")
+        monkeypatch.setattr("builtins.input", lambda *_: "2")
         selected = _select_user_proof(proofs, MFA_METHOD_CHOOSE)
         assert selected.auth_method_id == "OneWaySMS"
 
     def test_choose_single_proof_skips_prompt(self) -> None:
         single = [UserProof("OneWaySMS", "SMS", "+91", True)]
         assert _prompt_user_proof_choice(single).auth_method_id == "OneWaySMS"
+
+
+class TestCollectTotpAfterChallenge:
+    def test_app_otp_keeps_preprovided_code(self) -> None:
+        """PhoneAppOTP is offline TOTP: a pre-provided --totp code must be kept, not discarded."""
+        client = MicrosoftSSOClient()
+        selected = UserProof("PhoneAppOTP", "Authenticator app", "", True)
+        code = client._collect_totp_after_challenge(
+            selected, "123456", read_totp_after_challenge=False, sms_triggered=False
+        )
+        assert code == "123456"
+        client.close()
 
 
 class TestAbsoluteUrl:

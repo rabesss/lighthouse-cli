@@ -53,15 +53,16 @@ def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
             step="MFA",
             recovery="Re-run with --mfa-method or use a single-method account.",
         )
-    print("\nChoose a verification method:", flush=True)
+    print("\nChoose a verification method:", flush=True, file=sys.stderr)
     for idx, proof in enumerate(proofs, start=1):
         default = " (Microsoft default)" if proof.is_default else ""
-        print(f"  {idx}) {proof.display}{default}", flush=True)
+        print(f"  {idx}) {proof.display}{default}", flush=True, file=sys.stderr)
     while True:
-        choice = input(f"Enter 1\u2013{len(proofs)} [1]: ").strip() or "1"
+        print(f"Enter 1\u2013{len(proofs)} [1]: ", end="", flush=True, file=sys.stderr)
+        choice = input().strip() or "1"
         if choice.isdigit() and 1 <= int(choice) <= len(proofs):
             return proofs[int(choice) - 1]
-        print("Invalid choice, try again.", flush=True)
+        print("Invalid choice, try again.", flush=True, file=sys.stderr)
 
 
 def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
