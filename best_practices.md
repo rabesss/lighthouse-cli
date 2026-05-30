@@ -1,7 +1,7 @@
 # Best Practices — lighthouse-cli
 
 Repo-wide coding standards Qodo Merge checks PRs against. Canonical, fuller
-rules: [`review.md`](review.md).
+rules: [`REVIEW.md`](REVIEW.md).
 
 ## Secrets handling
 Never log, print, or include credentials, session cookies, TOTP codes, or SAML

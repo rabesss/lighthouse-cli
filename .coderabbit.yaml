@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
-# Canonical rules: ./review.md
+# Canonical rules: ./REVIEW.md
 language: en-US
 early_access: false
 reviews:
@@ -44,3 +44,10 @@ reviews:
   tools:
     ruff:
       enabled: true
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "REVIEW.md"
+      - "AGENTS.md"
+      - ".github/copilot-instructions.md"

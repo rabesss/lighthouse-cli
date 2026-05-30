@@ -3,7 +3,7 @@
 Guidance for AI coding agents and AI code reviewers working in this repository
 (OpenAI Codex, Google Jules, and any agent that reads `AGENTS.md`). Human
 contributors should also follow this. The PR-review charter that the review
-bots enforce lives in [`review.md`](review.md).
+bots enforce lives in [`REVIEW.md`](REVIEW.md).
 
 ## Project
 

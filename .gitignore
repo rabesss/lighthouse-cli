@@ -31,6 +31,8 @@ HANDOFF.md
 # Desloppify local state
 .desloppify/
 # Agent/tool local state (not part of the project)
+.gemini/skills/
+.github/skills/
 .agents/
 .claude/
 .kiro/
