@@ -1,4 +1,4 @@
-"""Tests for lighthouse auth login command."""
+"""Tests for lighthouse auth login command (pure HTTP auth)."""
 
 from __future__ import annotations
 
@@ -12,52 +12,21 @@ import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.cli import cli
+from lighthouse_cli.ms_auth import MicrosoftSSOError, D2L_COOKIE_NAMES
 
 
 # ---------------------------------------------------------------------------
 # Shared mock helpers
 # ---------------------------------------------------------------------------
 
-def make_mock_playwright_with_browser(
-    cookies: list[dict] | None = None,
-) -> tuple[MagicMock, MagicMock, MagicMock]:
-    """Build a properly chained Playwright mock.
-
-    Chain: sync_playwright() -> pw -> pw.start() -> pw -> pw.chromium.launch() -> browser
-
-    Returns (mock_playwright, pw_mock, mock_browser).
-    """
-    mock_browser = MagicMock()
-    mock_context = MagicMock()
-    mock_page = MagicMock()
-
-    if cookies is None:
-        cookies = [
-            {"name": "d2lSecureSessionVal", "value": "sec123"},
-            {"name": "d2lSessionVal", "value": "ses123"},
-            {"name": "d2lSameSiteCanaryA", "value": "canaryA"},
-            {"name": "d2lSameSiteCanaryB", "value": "canaryB"},
-        ]
-    mock_context.cookies.return_value = cookies
-    mock_context.pages.return_value = [mock_page]
-    mock_context.new_page.return_value = mock_page
-    mock_browser.new_context.return_value = mock_context
-    mock_browser.close.return_value = None
-    mock_page.goto = MagicMock()
-    mock_page.fill = MagicMock()
-    mock_page.click = MagicMock()
-    mock_page.wait_for_url = MagicMock()
-    mock_page.wait_for_selector = MagicMock(return_value=mock_page)  # return a mock element
-    mock_page.query_selector_all = MagicMock(return_value=[])
-    mock_page.wait_for_timeout = MagicMock()  # used in SSO flow
-
-    mock_playwright = MagicMock()
-    pw_mock = MagicMock()
-    mock_playwright.return_value = pw_mock
-    pw_mock.start.return_value = pw_mock
-    pw_mock.chromium.launch.return_value = mock_browser
-
-    return mock_playwright, pw_mock, mock_browser
+def _make_d2l_cookies() -> dict[str, str]:
+    """Return a valid D2L cookies dict."""
+    return {
+        "d2lSecureSessionVal": "sec123",
+        "d2lSessionVal": "ses123",
+        "d2lSameSiteCanaryA": "canaryA",
+        "d2lSameSiteCanaryB": "canaryB",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +46,8 @@ def config_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def cookies_path() -> Path:
-    """Path to cookies.json, resolving via env var."""
-    return Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", str(Path.home() / ".config" / "lighthouse-cli"))) / "cookies.json"
+def cookies_path(config_dir: Path) -> Path:
+    return config_dir / "cookies.json"
 
 
 # ---------------------------------------------------------------------------
@@ -112,37 +80,26 @@ def test_auth_login_appears_in_auth_help(cli_runner: CliRunner) -> None:
 def test_credentials_via_flags_skip_prompt(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--user and --pass flags supply credentials without prompting."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--user", "user@manipal.edu", "--pass", "secret", "--totp", "123456"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--user", "user@manipal.edu", "--pass", "secret", "--totp", "123456"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
     assert "Username:" not in result.output
@@ -156,7 +113,6 @@ def test_credentials_via_flags_skip_prompt(
 def test_credentials_via_env_vars(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """LIGHTHOUSE_USERNAME/PASSWORD env vars supply credentials."""
@@ -164,31 +120,21 @@ def test_credentials_via_env_vars(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
     assert "Username:" not in result.output
@@ -197,7 +143,6 @@ def test_credentials_via_env_vars(
 def test_flags_take_precedence_over_env_vars(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--user/--pass flags take precedence over LIGHTHOUSE_USERNAME/PASSWORD."""
@@ -205,47 +150,36 @@ def test_flags_take_precedence_over_env_vars(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "env_user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "env_secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--user", "flag_user@manipal.edu", "--pass", "flag_secret", "--totp", "123456"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--user", "flag_user@manipal.edu", "--pass", "flag_secret", "--totp", "123456"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
-    mock_authenticator.authenticate.assert_called_once()
-    call_args = mock_authenticator.authenticate.call_args.args
+    mock_sso.login.assert_called_once()
+    call_args = mock_sso.login.call_args.args
     assert call_args[0] == "flag_user@manipal.edu"
     assert call_args[1] == "flag_secret"
 
 
 # ---------------------------------------------------------------------------
-# VAL-AUTH-005 / VAL-AUTH-006: 2FA via prompt/flag/stdin
+# VAL-AUTH-005 / VAL-AUTH-006: 2FA via flag/stdin
 # ---------------------------------------------------------------------------
 
 def test_totp_flag_submits_code(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--totp submits the 2FA code without prompting."""
@@ -253,41 +187,30 @@ def test_totp_flag_submits_code(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
-    mock_authenticator.authenticate.assert_called_once()
-    assert mock_authenticator.authenticate.call_args.args[2] == "123456"
+    mock_sso.login.assert_called_once()
+    assert mock_sso.login.call_args.args[2] == "123456"
 
 
 def test_totp_stdin_pipe(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--totp - reads the 2FA code from stdin pipe."""
@@ -295,129 +218,28 @@ def test_totp_stdin_pipe(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "-"],
-                    input="123456\n",
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "-"],
+                input="123456\n",
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
-    mock_authenticator.authenticate.assert_called_once()
-    assert mock_authenticator.authenticate.call_args.args[2] == "123456"
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-008 / VAL-AUTH-009 / VAL-AUTH-010: Browser launch and SSO
-# ---------------------------------------------------------------------------
-
-def test_headless_browser_launch(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Playwright launches headless Chromium."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
-
-    launch_kwargs = {}
-
-    def capture_launch(**kwargs: Any) -> MagicMock:
-        launch_kwargs.update(kwargs)
-        return mock_browser
-
-    pw_mock = mock_playwright.return_value
-    pw_mock.start.return_value = pw_mock
-    pw_mock.chromium.launch.side_effect = capture_launch
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-
-    assert pw_mock.chromium.launch.called
-    assert launch_kwargs.get("headless") is True
-    auth.close()
-
-
-def test_sso_navigation_chain(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Browser navigates D2L -> Microsoft SSO -> 2FA -> D2L redirect."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-
-        # Get the page that was actually created
-        page = auth.page
-        assert page is not None
-
-        # Simulate SSO navigation with mock
-        auth.navigate_sso("user@manipal.edu", "secret", "123456")
-
-        # Verify goto was called (D2L login page)
-        assert page.goto.called
-        # Verify fill was called for credentials
-        assert page.fill.called
-        # Verify click was called for submit
-        assert page.click.called
-        auth.close()
-
-
-def test_cookie_extraction_after_sso(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """All 4 d2l cookies extracted from browser context."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    cookies = [
-        {"name": "d2lSecureSessionVal", "value": "sec123", "domain": "lighthouse.manipal.edu"},
-        {"name": "d2lSessionVal", "value": "ses123", "domain": "lighthouse.manipal.edu"},
-        {"name": "d2lSameSiteCanaryA", "value": "canaryA", "domain": "lighthouse.manipal.edu"},
-        {"name": "d2lSameSiteCanaryB", "value": "canaryB", "domain": "lighthouse.manipal.edu"},
-    ]
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser(cookies)
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        extracted = auth.extract_cookies()
-        auth.close()
-
-    assert len(extracted) == 4
-    assert "d2lSecureSessionVal" in extracted
-    assert "d2lSessionVal" in extracted
-    assert "d2lSameSiteCanaryA" in extracted
-    assert "d2lSameSiteCanaryB" in extracted
-    assert all(extracted[k] for k in extracted)
+    mock_sso.login.assert_called_once()
+    # SMS reads stdin after BeginAuth, not at CLI parse time.
+    assert mock_sso.login.call_args.args[2] is None
+    assert mock_sso.login.call_args.kwargs.get("read_totp_after_challenge") is True
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +249,6 @@ def test_cookie_extraction_after_sso(
 def test_cookies_saved_to_file(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """cookies.json written with correct format and 0600 permissions."""
@@ -435,21 +256,20 @@ def test_cookies_saved_to_file(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
+    # Also patch the config module globals since they're computed at import time
+    import lighthouse_cli.config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", config_dir / "cookies.json")
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
+    cookies = _make_d2l_cookies()
 
-    with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
+
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
         with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.check_auth.return_value = True
-            mock_client.cookies = cookies
             mock_client_cls.return_value = mock_client
             result = cli_runner.invoke(
                 cli,
@@ -458,11 +278,13 @@ def test_cookies_saved_to_file(
             )
 
     assert result.exit_code == 0
+    cookies_path = config_dir / "cookies.json"
     assert cookies_path.exists()
     data = json.loads(cookies_path.read_text())
-    assert "d2lSecureSessionVal" in data
-    assert data["d2lSecureSessionVal"] == "sec123"
-    # Check permissions
+    assert "cookies" in data
+    assert "extracted_at" in data
+    assert "d2lSecureSessionVal" in data["cookies"]
+    assert data["cookies"]["d2lSecureSessionVal"] == "sec123"
     mode = cookies_path.stat().st_mode & 0o777
     assert mode == 0o600
 
@@ -470,7 +292,6 @@ def test_cookies_saved_to_file(
 def test_post_login_session_verification(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """check_auth() confirms session is valid after login."""
@@ -478,31 +299,21 @@ def test_post_login_session_verification(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
     mock_client.check_auth.assert_called_once()
@@ -515,33 +326,26 @@ def test_post_login_session_verification(
 def test_auth_status_works_after_login(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cookies from auth login work with auth status."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    # Pre-write valid cookies
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
+    cookies = _make_d2l_cookies()
+
+    import lighthouse_cli.config as config_mod
+    cookies_path = config_dir / "cookies.json"
     cookies_path.write_text(json.dumps(cookies))
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", cookies_path)
 
-    # Point api module's CONFIG_DIR to our tmp config_dir
-    import lighthouse_cli.api as api_module
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = cookies_path
-
-    with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
-        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls2:
+    with patch("lighthouse_cli.commands.LighthouseClient") as mock_commands:
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_auth:
             mock_client = MagicMock()
             mock_client.check_auth.return_value = True
             mock_client.cookies = cookies
-            mock_client_cls.return_value = mock_client
-            mock_client_cls2.return_value = mock_client
+            mock_commands.return_value = mock_client
+            mock_auth.return_value = mock_client
             result = cli_runner.invoke(cli, ["auth", "status"], catch_exceptions=False)
 
     assert result.exit_code == 0
@@ -562,24 +366,22 @@ def test_wrong_credentials_error(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "wrong_password")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError(
+        "[50126] Invalid username or password.",
+        step="POST credentials",
+        recovery="Double-check your email and password.",
+    )
 
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("Login failed: invalid credentials")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
-    assert "invalid credentials" in result.output.lower() or "login failed" in result.output.lower()
+    assert "50126" in result.output or "Invalid" in result.output
     assert "Traceback" not in result.output
 
 
@@ -593,21 +395,19 @@ def test_wrong_totp_error(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError(
+        "2FA verification failed: invalid or expired code.",
+        step="MFA",
+        recovery="Request a new 2FA code and try again.",
+    )
 
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("2FA verification failed: invalid code")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "wrong"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "wrong"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
     assert "2FA" in result.output or "verification" in result.output
@@ -624,28 +424,26 @@ def test_network_failure_during_sso(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError(
+        "Failed to redirect to Microsoft SSO.",
+        step="initiate SAML",
+        recovery="Check that lighthouse.manipal.edu is reachable.",
+    )
 
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("Network error: unable to reach lighthouse.manipal.edu")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
-    assert "network" in result.output.lower() or "unable to reach" in result.output.lower()
+    assert "Microsoft" in result.output or "lighthouse" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
-# VAL-AUTH-020: 2FA timeout
+# VAL-AUTH-020: 2FA timeout (now: empty code rejection)
 # ---------------------------------------------------------------------------
 
 def test_totp_timeout_error(
@@ -653,175 +451,27 @@ def test_totp_timeout_error(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2FA timeout produces clear error."""
+    """Empty 2FA code produces clear error."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError(
+        "2FA code is required but was empty.",
+        step="MFA",
+        recovery="Provide a 2FA code via --totp flag or pipe.",
+    )
 
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("2FA timed out after 120 seconds")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
-    assert "timed out" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-021: Browser launch failure
-# ---------------------------------------------------------------------------
-
-def test_browser_launch_failure(
-    cli_runner: CliRunner,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Browser launch failure produces clear error with remediation hints."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
-    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
-
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("No suitable browser found. Install Chrome/Chromium or set CHROME_PATH")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
-
-    assert result.exit_code == 1
-    assert "browser" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-024: Concurrent auth attempts (atomic writes)
-# ---------------------------------------------------------------------------
-
-def test_concurrent_auth_no_corruption(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """cookies.json is valid JSON after concurrent auth attempts."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    cookies1 = {
-        "d2lSecureSessionVal": "sec1",
-        "d2lSessionVal": "ses1",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies2 = {
-        "d2lSecureSessionVal": "sec2",
-        "d2lSessionVal": "ses2",
-        "d2lSameSiteCanaryA": "canaryA2",
-        "d2lSameSiteCanaryB": "canaryB2",
-    }
-
-    # Use config.save_cookies directly
-    import lighthouse_cli.config as config_module
-    import lighthouse_cli.api as api_module
-    import threading
-
-    # Point config module's CONFIG_DIR to our tmp config_dir
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    # Force re-read of env var by patching the globals
-    config_module.CONFIG_DIR = config_dir
-    config_module.COOKIE_FILE = config_dir / "cookies.json"
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = config_dir / "cookies.json"
-
-    errors = []
-
-    def write(value: dict) -> None:
-        try:
-            config_module.save_cookies(value)
-        except Exception as e:
-            errors.append(e)
-
-    t1 = threading.Thread(target=write, args=(cookies1,))
-    t2 = threading.Thread(target=write, args=(cookies2,))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    cookies_path = config_dir / "cookies.json"
-    assert cookies_path.exists()
-    data = json.loads(cookies_path.read_text())
-    # Must have all 4 cookies from whichever write finished last
-    assert len(data) >= 4
-    assert "d2lSecureSessionVal" in data
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-025: Config directory auto-creation
-# ---------------------------------------------------------------------------
-
-def test_config_directory_auto_created(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Config directory is created if missing."""
-    config_dir = tmp_path / ".config" / "lighthouse-cli"
-    assert not config_dir.exists()
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
-    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-
-    # Point config/api modules' CONFIG_DIR to our tmp config_dir
-    import lighthouse_cli.api as api_module
-    import lighthouse_cli.config as config_module
-    config_module.CONFIG_DIR = config_dir
-    config_module.COOKIE_FILE = config_dir / "cookies.json"
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = config_dir / "cookies.json"
-
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.check_auth.return_value = True
-            mock_client.cookies = cookies
-            mock_client_cls.return_value = mock_client
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
-
-    assert config_dir.exists()
-    mode = config_dir.stat().st_mode & 0o777
-    # Config dir may be created with 0o755 (umask-based), cookies file has 0o600
-    assert mode in (0o700, 0o755)
+    assert "2FA" in result.output or "code" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -838,34 +488,24 @@ def test_json_output_success(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456", "--json"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456", "--json"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
-    output = result.output
-    data = json.loads(output)
+    data = json.loads(result.output)
     assert data.get("success") is True
     assert "cookies" in data
 
@@ -880,69 +520,23 @@ def test_json_output_failure(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "wrong")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError(
+        "Invalid username or password.",
+        step="POST credentials",
+    )
 
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("Login failed: invalid credentials")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456", "--json"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456", "--json"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
     data = json.loads(result.output)
     assert data.get("success") is False
     assert "error" in data
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-027 / VAL-AUTH-028: Browser cleanup
-# ---------------------------------------------------------------------------
-
-def test_browser_cleanup_on_success(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No orphan browser processes after successful login."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        auth.close()
-        mock_browser.close.assert_called_once()
-
-
-def test_browser_cleanup_on_failure(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No orphan browser processes after failed login."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser(cookies=[])
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator, AuthenticationError
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        try:
-            auth.authenticate("user@manipal.edu", "wrong", "123456")
-        except AuthenticationError:
-            pass
-        finally:
-            auth.close()
-        mock_browser.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -954,7 +548,7 @@ def test_empty_password_rejected(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty password exits with error before browser launch."""
+    """Empty password exits with error before network call."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "")
@@ -974,7 +568,7 @@ def test_empty_username_rejected(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty username exits with error before browser launch."""
+    """Empty username exits with error before network call."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
@@ -1014,7 +608,7 @@ def test_totp_without_value_error(
 
 
 # ---------------------------------------------------------------------------
-# VAL-AUTH-033: SSO page structure change detection
+# VAL-AUTH-033: SSO error detection
 # ---------------------------------------------------------------------------
 
 def test_sso_page_structure_change_error(
@@ -1022,31 +616,27 @@ def test_sso_page_structure_change_error(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SSO page structure change produces descriptive error."""
+    """MS SSO page structure change produces descriptive error."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
-
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError(
-        "Could not find expected element on SSO page: username field"
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError(
+        "Could not find Microsoft login configuration on the page.",
+        step="get MS config",
+        recovery="Microsoft may have changed their login page.",
     )
-    mock_authenticator.close = MagicMock()
 
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
-    assert "could not find" in result.output.lower()
+    assert "could not find" in result.output.lower() or "Microsoft" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1063,30 +653,21 @@ def test_password_not_logged(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "super_secret_password")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456", "--json"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456", "--json"],
+                catch_exceptions=False,
+            )
 
     assert "super_secret_password" not in result.output
     assert "super_secret_password" not in result.stderr
@@ -1098,18 +679,13 @@ def test_password_not_logged(
 
 def test_totp_not_persisted(
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TOTP code is never written to cookies.json."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
+    cookies = _make_d2l_cookies()
+    cookies_path = config_dir / "cookies.json"
     cookies_path.write_text(json.dumps(cookies))
 
     content = cookies_path.read_text()
@@ -1131,30 +707,21 @@ def test_exit_code_success(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
+    cookies = _make_d2l_cookies()
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456"],
-                    catch_exceptions=False,
-                )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456"],
+                catch_exceptions=False,
+            )
 
     assert result.exit_code == 0
 
@@ -1169,21 +736,15 @@ def test_exit_code_auth_failure(
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "wrong")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = MicrosoftSSOError("Invalid credentials")
 
-    from lighthouse_cli.auth import AuthenticationError
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = AuthenticationError("Login failed")
-    mock_authenticator.close = MagicMock()
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456"],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 1
 
@@ -1214,66 +775,24 @@ def test_exit_code_cli_usage_error(
 def test_keyboard_interrupt_exits_cleanly(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """KeyboardInterrupt terminates browser and exits with code 130."""
+    """KeyboardInterrupt exits with code 130."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    mock_sso = MagicMock()
+    mock_sso.login.side_effect = KeyboardInterrupt()
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.side_effect = KeyboardInterrupt()
-    mock_authenticator.close = MagicMock()
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        result = cli_runner.invoke(
+            cli,
+            ["auth", "login", "--totp", "123456"],
+            catch_exceptions=False,
+        )
 
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            result = cli_runner.invoke(
-                cli,
-                ["auth", "login", "--totp", "123456"],
-                catch_exceptions=False,
-            )
-
-    # Should exit cleanly with code 130
     assert result.exit_code == 130
-    # No partial cookies.json (should not exist or be valid)
-    if cookies_path.exists():
-        data = json.loads(cookies_path.read_text())
-        # If exists, should not be partial (should have all 4 cookies or none)
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-040: Headless mode
-# ---------------------------------------------------------------------------
-
-def test_headless_mode_no_visible_window(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Browser runs in headless mode with no visible window."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser()
-
-    launch_kwargs = {}
-
-    def capture_launch(**kwargs: Any) -> MagicMock:
-        launch_kwargs.update(kwargs)
-        return mock_browser
-
-    pw_mock = mock_playwright.return_value
-    pw_mock.start.return_value = pw_mock
-    pw_mock.chromium.launch.side_effect = capture_launch
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-        auth.close()
-
-    assert launch_kwargs.get("headless") is True
 
 
 # ---------------------------------------------------------------------------
@@ -1283,19 +802,16 @@ def test_headless_mode_no_visible_window(
 def test_non_tty_no_credentials_error(
     cli_runner: CliRunner,
     config_dir: Path,
-    cookies_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-TTY stdin with no credentials produces error, exit code 1."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    # No env vars, no flags
     monkeypatch.delenv("LIGHTHOUSE_USERNAME", raising=False)
     monkeypatch.delenv("LIGHTHOUSE_PASSWORD", raising=False)
 
-    # CliRunner stdin is not a TTY, so _is_interactive() returns False
     with patch("lighthouse_cli.auth.CredentialStore") as mock_store_cls:
         mock_store = MagicMock()
-        mock_store.load.return_value = None  # No stored credentials
+        mock_store.load.return_value = None
         mock_store_cls.return_value = mock_store
 
         result = cli_runner.invoke(
@@ -1306,234 +822,107 @@ def test_non_tty_no_credentials_error(
 
     assert result.exit_code == 1
     assert "credentials" in result.output.lower() or "required" in result.output.lower()
-    # Should NOT hang (CliRunner returns immediately)
 
 
 # ---------------------------------------------------------------------------
-# VAL-AUTH-005: 2FA code via interactive prompt
+# VAL-AUTH-024: Concurrent auth attempts (atomic writes)
 # ---------------------------------------------------------------------------
 
-def test_interactive_totp_prompt_at_authenticator_level(
+def test_concurrent_auth_no_corruption(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When --totp is not provided, HeadlessAuthenticator._handle_2fa prompts via getpass."""
+    """cookies.json is valid JSON after concurrent auth attempts."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    cookies_list = [
-        {"name": "d2lSecureSessionVal", "value": "sec123", "domain": "lighthouse.manipal.edu"},
-        {"name": "d2lSessionVal", "value": "ses123", "domain": "lighthouse.manipal.edu"},
-        {"name": "d2lSameSiteCanaryA", "value": "canaryA", "domain": "lighthouse.manipal.edu"},
-        {"name": "d2lSameSiteCanaryB", "value": "canaryB", "domain": "lighthouse.manipal.edu"},
-    ]
-    mock_playwright, _, mock_browser = make_mock_playwright_with_browser(cookies_list)
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        from lighthouse_cli.auth import HeadlessAuthenticator
-        auth = HeadlessAuthenticator()
-        auth.launch_browser()
-
-        # Mock getpass to return a 2FA code interactively
-        with patch("getpass.getpass", return_value="654321") as mock_getpass:
-            auth._handle_2fa(None)  # None = interactive prompt path
-
-            # Verify getpass was called with the prompt containing "2FA"
-            mock_getpass.assert_called_once()
-            prompt_text = mock_getpass.call_args.args[0]
-            assert "2FA" in prompt_text or "code" in prompt_text.lower()
-
-        auth.close()
-
-
-def test_interactive_totp_prompt_cmd_passes_none(
-    cli_runner: CliRunner,
-    config_dir: Path,
-    cookies_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """cmd_auth_login passes totp_code=None to authenticator when --totp is not given."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
-    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
+    cookies1 = _make_d2l_cookies()
+    cookies2 = {
+        "d2lSecureSessionVal": "sec2",
+        "d2lSessionVal": "ses2",
+        "d2lSameSiteCanaryA": "canaryA2",
+        "d2lSameSiteCanaryB": "canaryB2",
     }
 
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
+    import lighthouse_cli.config as config_module
+    import threading
 
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "COOKIE_FILE", config_dir / "cookies.json")
 
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = True
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
+    errors = []
 
-                with patch("getpass.getpass", return_value="654321"):
-                    result = cli_runner.invoke(
-                        cli,
-                        ["auth", "login"],  # No --totp → interactive prompt
-                        catch_exceptions=False,
-                    )
+    def write(value: dict) -> None:
+        try:
+            config_module.save_cookies(value)
+        except Exception as e:
+            errors.append(e)
 
-    assert result.exit_code == 0
-    # Verify authenticate was called with None for totp_code (interactive path)
-    mock_authenticator.authenticate.assert_called_once()
-    assert mock_authenticator.authenticate.call_args.args[2] is None
+    t1 = threading.Thread(target=write, args=(cookies1,))
+    t2 = threading.Thread(target=write, args=(cookies2,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-014: Stored credentials loaded on subsequent runs
-# ---------------------------------------------------------------------------
-
-def test_stored_credentials_loaded_on_subsequent_run(
-    cli_runner: CliRunner,
-    config_dir: Path,
-    cookies_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Subsequent auth login uses stored credentials without prompting."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    # No env vars
-    monkeypatch.delenv("LIGHTHOUSE_USERNAME", raising=False)
-    monkeypatch.delenv("LIGHTHOUSE_PASSWORD", raising=False)
-
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    # Mock CredentialStore to return stored credentials
-    with patch("lighthouse_cli.auth.CredentialStore") as mock_store_cls:
-        mock_store = MagicMock()
-        mock_store.load.return_value = ("stored_user@manipal.edu", "stored_secret")
-        mock_store_cls.return_value = mock_store
-
-        with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-            with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-                with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                    mock_client = MagicMock()
-                    mock_client.check_auth.return_value = True
-                    mock_client.cookies = cookies
-                    mock_client_cls.return_value = mock_client
-                    result = cli_runner.invoke(
-                        cli,
-                        ["auth", "login", "--totp", "123456"],
-                        catch_exceptions=False,
-                    )
-
-    assert result.exit_code == 0
-    # Verify stored credentials were used
-    mock_authenticator.authenticate.assert_called_once()
-    assert mock_authenticator.authenticate.call_args.args[0] == "stored_user@manipal.edu"
-    assert mock_authenticator.authenticate.call_args.args[1] == "stored_secret"
-    # No credential prompts in output
-    assert "Username:" not in result.output
-    assert "Password:" not in result.output
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-016: Auth-dependent commands work after login
-# ---------------------------------------------------------------------------
-
-def test_auth_commands_compatible_with_login_cookies(
-    cli_runner: CliRunner,
-    config_dir: Path,
-    cookies_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cookies from auth login are compatible with auth status and other commands."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    # Simulate cookies written by auth login
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-    cookies_path.write_text(json.dumps(cookies))
-
-    # Point api module to our tmp config
-    import lighthouse_cli.api as api_module
-    api_module.CONFIG_DIR = config_dir
-    api_module.COOKIE_FILE = cookies_path
-
-    # Verify auth status works
-    with patch("lighthouse_cli.commands.LighthouseClient") as mock_client_cls:
-        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls2:
-            mock_client = MagicMock()
-            mock_client.check_auth.return_value = True
-            mock_client.cookies = cookies
-            mock_client_cls.return_value = mock_client
-            mock_client_cls2.return_value = mock_client
-            result = cli_runner.invoke(cli, ["auth", "status"], catch_exceptions=False)
-
-    assert result.exit_code == 0
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-034: Cookies written even if verification fails
-# ---------------------------------------------------------------------------
-
-def test_cookies_saved_even_if_verification_fails(
-    cli_runner: CliRunner,
-    config_dir: Path,
-    cookies_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cookies are saved even when post-login session verification fails."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
-    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-
-    cookies = {
-        "d2lSecureSessionVal": "sec123",
-        "d2lSessionVal": "ses123",
-        "d2lSameSiteCanaryA": "canaryA",
-        "d2lSameSiteCanaryB": "canaryB",
-    }
-
-    mock_playwright, _, _ = make_mock_playwright_with_browser()
-
-    mock_authenticator = MagicMock()
-    mock_authenticator.authenticate.return_value = cookies
-
-    with patch("lighthouse_cli.auth.sync_playwright", mock_playwright):
-        with patch("lighthouse_cli.auth.HeadlessAuthenticator", return_value=mock_authenticator):
-            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
-                mock_client = MagicMock()
-                mock_client.check_auth.return_value = False  # Verification FAILS
-                mock_client.cookies = cookies
-                mock_client_cls.return_value = mock_client
-                result = cli_runner.invoke(
-                    cli,
-                    ["auth", "login", "--totp", "123456", "--json"],
-                    catch_exceptions=False,
-                )
-
-    # Command should fail (exit 1) because verification failed
-    assert result.exit_code == 1
-    # But cookies.json should still exist with the extracted cookies
+    cookies_path = config_dir / "cookies.json"
     assert cookies_path.exists()
     data = json.loads(cookies_path.read_text())
-    assert "d2lSecureSessionVal" in data
-    assert data["d2lSecureSessionVal"] == "sec123"
-    # Error message should mention verification failure
-    output_data = json.loads(result.output)
-    assert output_data["success"] is False
-    assert "verification" in output_data["error"].lower()
+    assert "cookies" in data
+    assert len(data["cookies"]) >= 4
+    assert "d2lSecureSessionVal" in data["cookies"]
+
+
+# ---------------------------------------------------------------------------
+# VAL-AUTH-025: Config directory auto-creation
+# ---------------------------------------------------------------------------
+
+def test_config_directory_auto_created(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config directory is created if missing."""
+    config_dir = tmp_path / ".config" / "lighthouse-cli"
+    assert not config_dir.exists()
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    import lighthouse_cli.config as config_module
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "COOKIE_FILE", config_dir / "cookies.json")
+
+    cookies = _make_d2l_cookies()
+
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = cookies
+
+    with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+        with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.check_auth.return_value = True
+            mock_client_cls.return_value = mock_client
+            result = cli_runner.invoke(
+                cli,
+                ["auth", "login", "--totp", "123456"],
+                catch_exceptions=False,
+            )
+
+    assert config_dir.exists()
+    mode = config_dir.stat().st_mode & 0o777
+    assert mode in (0o700, 0o755)
+
+
+# ---------------------------------------------------------------------------
+# Removed browser-specific tests
+# ---------------------------------------------------------------------------
+# The following tests have been removed because they tested Playwright browser
+# launch behavior which is no longer needed:
+# - test_headless_browser_launch
+# - test_sso_navigation_chain
+# - test_cookie_extraction_after_sso
+# - test_browser_cleanup_on_success
+# - test_browser_cleanup_on_failure
+# - test_browser_launch_failure
+# - test_headless_mode_no_visible_window
+# Their equivalents are now tested in tests/test_ms_auth.py using HTTP mocks.

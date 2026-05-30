@@ -9,7 +9,7 @@ from contextlib import suppress
 from typing import Any
 
 from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
-from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR
+from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
 from .manifest import MANIFEST_FILENAME, Manifest, ManifestCorruptError, compute_sha256
 from .utils import _sanitize_filename, get_course_name as _get_course_name, resolve_course_folder_name as _resolve_course_folder_name
 from .display import error as _error, output_json as _output_json, print_table as _print_table, short as _short, fmt_date as _fmt_date, utc_now_iso as _utc_now_iso
@@ -143,7 +143,7 @@ def cmd_auth_status(json_output: bool = False) -> int:
     client = LighthouseClient()
     cookies = client.cookies
     if not cookies:
-        return _error("No cookies found. Run: lighthouse auth refresh")
+        return _error("No cookies found. Run: lighthouse auth login")
 
     valid = client.check_auth()
     if json_output:
@@ -152,31 +152,9 @@ def cmd_auth_status(json_output: bool = False) -> int:
 
     if valid:
         print(f"Session valid. Cookies: {', '.join(cookies.keys())}")
+        warn_if_cookies_stale()
         return 0
-    return _error("Session expired. Run: lighthouse auth refresh")
-
-
-def cmd_auth_refresh(cdp_port: int | None = None, json_output: bool = False) -> int:
-    """Extract fresh cookies from browser and verify."""
-    from .api import refresh_auth_from_browser
-
-    try:
-        cookies = refresh_auth_from_browser(cdp_port)
-    except Exception as exc:
-        return _error(str(exc))
-
-    # Verify
-    valid = LighthouseClient().check_auth()
-    if json_output:
-        _output_json({"valid": valid, "cookies": list(cookies.keys())})
-        return 0 if valid else 1
-
-    if valid:
-        print(f"Auth refreshed and verified. Cookies: {', '.join(cookies.keys())}")
-        return 0
-    return _error("Cookies extracted but session verification failed.")
-
-
+    return _error("Session expired. Run: lighthouse auth login")
 def cmd_semesters(json_output: bool = False) -> int:
     """List all semesters."""
     client = LighthouseClient()

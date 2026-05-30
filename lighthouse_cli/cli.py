@@ -13,7 +13,6 @@ import click
 from . import __version__
 from .commands import (
     cmd_announcements,
-    cmd_auth_refresh,
     cmd_auth_status,
     cmd_calendar,
     cmd_content,
@@ -40,7 +39,7 @@ def cli() -> None:
     """lighthouse-cli – CLI for D2L Brightspace LMS at lighthouse.manipal.edu.
 
     Interact with courses, content, grades, and more via D2L REST APIs.
-    Run 'lighthouse auth refresh' first to set up your session.
+    Run 'lighthouse auth login' first to set up your session.
     """
 
 
@@ -61,40 +60,95 @@ def auth_status(json_output: bool) -> None:
 
 
 @auth.command("refresh")
+@click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
+@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
+@click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option(
-    "--cdp-port",
-    type=int,
+    "--mfa-method",
+    type=click.Choice(["auto", "sms", "app", "choose"]),
     default=None,
-    envvar="LIGHTHOUSE_CDP_PORT",
-    help="Chrome DevTools Protocol port (default: 34165).",
+    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_refresh(cdp_port: int | None, json_output: bool) -> None:
-    """Extract fresh cookies from the browser via CDP."""
-    raise SystemExit(cmd_auth_refresh(cdp_port, json_output))
+def auth_refresh(
+    username: str | None,
+    password: str | None,
+    totp: str | None,
+    mfa_method: str | None,
+    json_output: bool,
+) -> None:
+    """Refresh session cookies via Microsoft SSO.
+
+    Runs the full HTTP-based SSO login flow to obtain fresh session cookies.
+    Equivalent to ``auth login`` without the ``--save-credentials`` option.
+    """
+    raise SystemExit(cmd_auth_login(
+        username=username,
+        password=password,
+        totp_code=totp,
+        totp_stdin=(totp == "-"),
+        json_output=json_output,
+        mfa_method=mfa_method,
+    ))
 
 
 @auth.command("login")
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
 @click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
-@click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
-@click.option("--save-credentials", "save_credentials", is_flag=True, default=False, help="Store credentials encrypted for future use.")
+@click.option("--totp", "totp", default=None, help="2FA code. Omit for two-phase interactive login.")
+@click.option(
+    "--mfa-method",
+    type=click.Choice(["auto", "sms", "app", "choose"]),
+    default=None,
+    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+)
+@click.option(
+    "--save-credentials",
+    "save_credentials",
+    is_flag=True,
+    default=False,
+    help="Save email/password encrypted for future logins (session cookies still expire ~5 days).",
+)
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
-def auth_login(username: str | None, password: str | None, totp: str | None, save_credentials: bool, json_output: bool) -> None:
-    """Log in to D2L via headless browser (Microsoft SSO + 2FA).
+def auth_login(
+    username: str | None,
+    password: str | None,
+    totp: str | None,
+    mfa_method: str | None,
+    save_credentials: bool,
+    json_output: bool,
+) -> None:
+    """Log in to D2L via Microsoft SSO (pure HTTP, no browser required).
 
     Credentials can be provided via:
       --user/--pass flags
       LIGHTHOUSE_USERNAME/PASSWORD env vars
       Interactive prompts (if TTY)
 
-    2FA codes can be provided via:
-      --totp <code> flag
-      --totp - (read from stdin)
-      Interactive prompt (if TTY)
+    Two-phase interactive login (TTY): username/password first, then verification
+    code after Microsoft accepts your password.
 
-    On success, D2L session cookies are saved to ~/.config/lighthouse-cli/cookies.json.
-    Use --save-credentials to store credentials encrypted for future logins.
+    MFA: --mfa-method auto (default), sms, app, or choose (pick from a list).
+    Text codes may arrive via SMS or WhatsApp depending on Microsoft; the CLI
+    cannot select the delivery channel.
+
+    Session cookies typically expire after ~5 days (MAHE tenant policy); re-run
+    login when auth status fails. --save-credentials stores email/password only.
+
+    2FA (SMS/WhatsApp): two-step (recommended for agents and scripts):
+
+      lighthouse auth login --mfa-method sms
+      lighthouse auth verify <code>
+
+    Do not run login twice — each login sends a new code. In a TTY, login alone
+    prompts for the code after it is sent.
+
+    On success, D2L session cookies are saved to
+    ~/.config/lighthouse-cli/cookies.json.
+
+    Use --save-credentials to store email/password encrypted (requires:
+    pip install lighthouse-cli[credentials]). You still re-authenticate when
+    cookies expire.
     """
     raise SystemExit(cmd_auth_login(
         username=username,
@@ -103,7 +157,24 @@ def auth_login(username: str | None, password: str | None, totp: str | None, sav
         totp_stdin=(totp == "-"),
         save_credentials=save_credentials,
         json_output=json_output,
+        mfa_method=mfa_method,
     ))
+
+
+@auth.command("verify")
+@click.argument("code")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON.")
+def auth_verify(code: str, json_output: bool) -> None:
+    """Complete login with the verification code from the current ``auth login`` session.
+
+    Use after ``auth login`` prints "Verification code sent." Do not run a second
+    ``auth login`` — that sends a new code and invalidates the previous one.
+    """
+    from lighthouse_cli.auth import cmd_auth_verify
+
+    raise SystemExit(cmd_auth_verify(code, json_output=json_output))
+
+
 
 
 # ---------------------------------------------------------------------------

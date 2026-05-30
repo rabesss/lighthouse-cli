@@ -32,6 +32,16 @@ HANDOFF.md
 .desloppify/
 # Agent/tool local state (not part of the project)
 .agents/
+.claude/
+.kiro/
 .omc/
 skills-lock.json
 scorecard.png
+.omo/
+
+# Local credentials (never commit)
+.env.lighthouse
+credentials.lighthouse.env
+
+# Personal / generated artifacts (reviews, screenshots, notes)
+local-artifacts/
