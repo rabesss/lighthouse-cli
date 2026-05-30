@@ -105,7 +105,10 @@ def _extract_error_code_and_msg(html: str) -> tuple[int | None, str | None]:
         for err_div in soup.find_all(
             lambda tag: tag.name == "div"
             and any(
-                "error" in (tag.get(attr, "") or "").lower()
+                "error" in (
+                    " ".join(tag.get(attr, [])) if attr == "class"
+                    else (tag.get(attr, "") or "")
+                ).lower()
                 for attr in ("id", "class")
             )
         ):

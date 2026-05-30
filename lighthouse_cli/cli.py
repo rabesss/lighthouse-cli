@@ -141,7 +141,7 @@ def auth_login(
       lighthouse auth verify <code>
 
     Do not run login twice — each login sends a new code. In a TTY, login alone
-  prompts for the code after it is sent.
+    prompts for the code after it is sent.
 
     On success, D2L session cookies are saved to
     ~/.config/lighthouse-cli/cookies.json.

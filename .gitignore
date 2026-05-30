@@ -32,6 +32,8 @@ HANDOFF.md
 .desloppify/
 # Agent/tool local state (not part of the project)
 .agents/
+.claude/
+.kiro/
 .omc/
 skills-lock.json
 scorecard.png
