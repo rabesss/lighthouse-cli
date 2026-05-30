@@ -1,0 +1,30 @@
+# Qodo Merge / PR-Agent configuration for lighthouse-cli
+# Docs: https://docs.qodo.ai/  | Canonical rules: ./review.md
+# Longer NL standards live in ./best_practices.md (auto-discovered at repo root).
+
+[github_app]
+# Commands run automatically when a PR is opened. "/review" enables auto-review.
+pr_commands = ["/describe", "/review", "/improve"]
+
+[config]
+verbosity_level = 1
+
+# Qodo v1 (PR-Agent) review tool.
+[pr_reviewer]
+require_security_review = true
+require_tests_review = true
+require_score_review = true
+extra_instructions = """\
+Python 3.11 Click+requests CLI for the D2L Brightspace LMS. Enforce:
+1. SECRETS: flag any logging/echoing/f-string/exception text that could leak a password, session cookie (d2lSecureSessionVal/d2lSessionVal/canaries), TOTP code, or SAML token. CredentialStore (Fernet/keyring) values must never reach stdout, stderr, disk, or tracebacks.
+2. JSON CONTRACT: when --json is passed, stdout must contain ONLY machine-parseable JSON; flag any print()/banner/prompt/log (including input() prompts) that writes non-JSON to stdout instead of sys.stderr.
+3. MFA: SMS/WhatsApp codes are server-sent on BeginAuth (a literal --totp cannot match; use auth login -> auth verify); offline Authenticator PhoneAppOTP IS valid pre-provided. Resume a pending MFA session only when its saved method matches the request.
+4. TYPING: require `from __future__ import annotations`, `X | None` (not Optional), no bare `Callable`.
+5. ROBUSTNESS: wrap subprocess/Playwright/CDP failures into clean errors; no raw tracebacks. Keep deps pinned in pyproject.toml.
+"""
+
+# Qodo v2 (agentic review) reads guidelines from here.
+[review_agent]
+issues_user_guidelines = """\
+Block (P0) credential leaks (passwords, D2L cookies, TOTP, SAML tokens) and any human-readable stdout on a --json path. Flag (P1) MFA logic that treats a literal --totp as a server-sent SMS code or conflates SMS with offline PhoneAppOTP, missing `from __future__ import annotations`, Optional/bare Callable usage, and unwrapped subprocess/Playwright/CDP calls.
+"""

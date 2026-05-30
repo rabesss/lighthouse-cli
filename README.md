@@ -70,15 +70,18 @@ graph TD
     A1 -.->|auto-loads| CRED
 ```
 
-- **Auth (CDP):** Session-based cookie auth. Four cookies are needed:
-  `d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
-  `d2lSameSiteCanaryB`. Extracted from the browser via Chrome DevTools
-  Protocol (CDP) — either through `browser-harness` CLI, Python websockets,
-  or a Node.js fallback.
-- **Auth (SSO):** HTTP Microsoft SSO (`ms_auth.py`) with optional Playwright
-  for the username step only. SMS MFA uses `auth login` then `auth verify`
-  so the OTP matches the same `BeginAuth` session. See
+- **Auth (SSO — primary):** Pure-HTTP Microsoft Entra (Azure AD) SSO
+  (`ms_auth.py`, split across `ms_parse`/`ms_session`/`ms_mfa`/`ms_errors`),
+  with optional Playwright for the username "Next" step only. SMS MFA uses
+  `auth login` then `auth verify` so the OTP matches the same `BeginAuth`
+  session; offline Authenticator TOTP completes in one step with
+  `--mfa-method app --totp <code>`. See
   [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
+- **Auth (CDP — `auth refresh` only):** Session cookies
+  (`d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
+  `d2lSameSiteCanaryB`) can also be extracted from a running browser via
+  Chrome DevTools Protocol — through `browser-harness`, Python websockets,
+  or a Node.js fallback.
 - **API:** D2L REST API — LE v1.93, LP v1.59.
 - **Cookie storage:** `~/.config/lighthouse-cli/cookies.json` (permissions
   `0600`). Override with `LIGHTHOUSE_CONFIG_DIR` env var.
@@ -962,21 +965,29 @@ lighthouse-cli/
     __init__.py            Version string (__version__ = "0.1.0")
     api.py                 LighthouseClient — HTTP client, auth, cookie
                            management, all API methods, course ID resolution,
-                           CDP-based cookie extraction
-    auth.py                HeadlessAuthenticator — Playwright-based headless
-                           browser SSO authentication with 2FA support;
+                           CDP-based cookie extraction (used by auth refresh)
+    auth.py                cmd_auth_login / cmd_auth_verify orchestration;
                            CredentialStore — Fernet encryption with keyring
-                           fallback for secure credential storage; cmd_auth_login
+                           fallback for secure credential storage
+    ms_auth.py             MicrosoftSSOClient — pure-HTTP Microsoft Entra (Azure
+                           AD) SSO (SAML + ConvergedTFA MFA); username bootstrap
+                           via optional Playwright
+    ms_parse.py            $Config / HTML / SAML extraction helpers
+    ms_session.py          cookie & session helpers (export/import, phone mask)
+    ms_mfa.py              MFA proof types + selection (SMS vs app TOTP)
+    ms_errors.py           MicrosoftSSOError + MFA method constants
     commands.py            Command implementations — data fetching, formatting,
-                           output (rich tables + plain text fallback + JSON);
-                           includes sync, assignments, and submit commands
-    cli.py                 Click command wiring — CLI entry point, argument
-                           and option definitions
+                           output (rich tables + plain text fallback + JSON)
+    cli.py                 Click command wiring — CLI entry point, arguments
+    config.py              cookies.json / mfa_pending.json storage helpers
+    show.py, display.py    shared table/JSON rendering helpers
+    submit.py              dropbox file-submission command
+    assignments.py         assignment listing + attachment download
+    course_config.py       course tracking + semester mapping
     manifest.py            Manifest class — load/save manifest files, add_entry,
                            atomic writes, SHA-256 file hashing for incremental
                            sync and deduplication
-    utils.py               Shared utilities — _sanitize_filename() for cleaning
-                           URL-encoded filenames and other helpers
+    utils.py               Shared utilities — _sanitize_filename() and helpers
 ```
 
 **Key classes and functions:**
@@ -988,9 +999,10 @@ lighthouse-cli/
   OrgUnitId or name substring) to an integer course ID.
 - `refresh_auth_from_browser()` (api.py) — Extracts cookies from browser via
   CDP (tries browser-harness, then websockets, then Node.js).
-- `HeadlessAuthenticator` (auth.py) — Playwright-based SSO authentication.
-  Launches headless Chromium, navigates to login page, waits for user
-  auth (including 2FA), extracts session cookies.
+- `MicrosoftSSOClient` (ms_auth.py) — pure-HTTP Microsoft Entra (Azure AD) SSO:
+  replays the `$Config` / SAS-MFA / SAML ACS endpoints, handles two-step SMS
+  MFA and offline Authenticator TOTP, and returns D2L session cookies.
+  Playwright is used only to bootstrap the username "Next" step.
 - `CredentialStore` (auth.py) — Secure credential storage using Fernet
   symmetric encryption with OS keyring fallback.
 - `Manifest` (manifest.py) — Manages `.lighthouse.json` files in download
@@ -1036,6 +1048,24 @@ lighthouse-cli/
 |----------|---------|-------------|
 | `LIGHTHOUSE_CONFIG_DIR` | `~/.config/lighthouse-cli` | Directory for cookie storage |
 | `LIGHTHOUSE_CDP_PORT` | `34165` | Default CDP port for `auth refresh` |
+
+## Contributing & AI Code Review
+
+Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md); the
+PR-review charter (what reviewers check, by severity) lives in
+[`review.md`](review.md). Run `pytest -q` before opening a PR.
+
+This repo is wired for several AI reviewers. Each reads its own committed
+config; all derive from `review.md`:
+
+| Reviewer | Config file(s) |
+|----------|----------------|
+| OpenAI Codex / Google Jules | [`AGENTS.md`](AGENTS.md) |
+| Gemini Code Assist | [`.gemini/config.yaml`](.gemini/config.yaml), [`.gemini/styleguide.md`](.gemini/styleguide.md) |
+| CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) |
+| Qodo Merge | [`.pr_agent.toml`](.pr_agent.toml), [`best_practices.md`](best_practices.md) |
+| Socket Security | [`socket.yml`](socket.yml) |
+| Kilo Code, Pullfrog | dashboard-only — paste [`review.md`](review.md) into their consoles |
 
 ## License
 

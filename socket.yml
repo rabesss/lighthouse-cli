@@ -1,0 +1,23 @@
+# Socket Security configuration for lighthouse-cli
+# Docs: https://docs.socket.dev/docs/socket-yml
+# Supply-chain scanning only (Socket does not review source code).
+version: 2
+
+# Scan when Python dependency manifests change.
+triggerPaths:
+  - "pyproject.toml"
+  - "requirements*.txt"
+
+issueRules:
+  # Typosquats — the project handles credentials; a malicious look-alike dep is high risk.
+  didYouMean: true
+  # Unpinned VCS/HTTP deps — this repo pins exact versions in pyproject.toml.
+  gitDependency: true
+  httpDependency: true
+  # Malware and critical CVEs on new/updated dependencies.
+  malware: true
+  criticalCVE: true
+
+githubApp:
+  enabled: true
+  pullRequestAlertsEnabled: true
