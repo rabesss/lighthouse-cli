@@ -152,7 +152,7 @@ class TestMfaMethodSelection:
     def test_choose_prompts_for_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        monkeypatch.setattr("builtins.input", lambda _: "2")
+        monkeypatch.setattr("builtins.input", lambda *_: "2")
         selected = _select_user_proof(proofs, MFA_METHOD_CHOOSE)
         assert selected.auth_method_id == "OneWaySMS"
 

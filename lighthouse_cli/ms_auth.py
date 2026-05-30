@@ -872,7 +872,9 @@ class MicrosoftSSOClient:
             label = "Enter verification code: "
             if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
                 label = "Press Enter after approving in Authenticator: "
-            return input(label).strip()
+            # Prompt on stderr so stdout stays JSON-only under --json in a TTY.
+            print(label, end="", flush=True, file=sys.stderr)
+            return input().strip()
         return sys.stdin.readline().strip()
 
     def _step_handle_mfa(

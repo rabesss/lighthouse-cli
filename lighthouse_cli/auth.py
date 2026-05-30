@@ -331,8 +331,11 @@ def cmd_auth_login(
         if totp_code is not None and totp_code.strip() == "":
             return _auth_error("2FA code cannot be empty", json_output, 2)
 
-        # Resume same MFA session (no second BeginAuth / new code).
-        if totp_code and not totp_stdin and load_mfa_pending():
+        # Resume the pending MFA session only when the provided code belongs to it.
+        # An explicit --mfa-method that differs from the pending session (e.g. an offline
+        # app TOTP after a stale SMS pending) must start a fresh flow, not verify the old one.
+        pending = load_mfa_pending() if (totp_code and not totp_stdin) else None
+        if pending and resolved_mfa_method in (MFA_METHOD_AUTO, pending.get("mfa_method")):
             return cmd_auth_verify(totp_code, json_output=json_output, config_dir=config_dir)
 
         defer_mfa_to_pending = (

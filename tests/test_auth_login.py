@@ -208,6 +208,36 @@ def test_totp_flag_submits_code(
     assert mock_sso.login.call_args.args[2] == "123456"
 
 
+def test_explicit_app_method_ignores_stale_sms_pending(
+    cli_runner: CliRunner,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit --mfa-method app with a literal code starts a fresh flow rather than
+    resuming a leftover SMS pending session (offline app TOTP belongs to no SMS session)."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    mock_sso = MagicMock()
+    mock_sso.login.return_value = _make_d2l_cookies()
+
+    with patch("lighthouse_cli.auth.load_mfa_pending", return_value={"mfa_method": "sms"}):
+        with patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso):
+            with patch("lighthouse_cli.auth.LighthouseClient") as mock_client_cls:
+                mock_client_cls.return_value.check_auth.return_value = True
+                result = cli_runner.invoke(
+                    cli,
+                    ["auth", "login", "--mfa-method", "app", "--totp", "123456"],
+                    catch_exceptions=False,
+                )
+
+    assert result.exit_code == 0
+    mock_sso.login.assert_called_once()
+    assert mock_sso.login.call_args.args[2] == "123456"
+    mock_sso.complete_mfa_pending.assert_not_called()
+
+
 def test_totp_stdin_pipe(
     cli_runner: CliRunner,
     config_dir: Path,

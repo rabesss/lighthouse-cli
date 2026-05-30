@@ -58,7 +58,8 @@ def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
         default = " (Microsoft default)" if proof.is_default else ""
         print(f"  {idx}) {proof.display}{default}", flush=True, file=sys.stderr)
     while True:
-        choice = input(f"Enter 1\u2013{len(proofs)} [1]: ").strip() or "1"
+        print(f"Enter 1\u2013{len(proofs)} [1]: ", end="", flush=True, file=sys.stderr)
+        choice = input().strip() or "1"
         if choice.isdigit() and 1 <= int(choice) <= len(proofs):
             return proofs[int(choice) - 1]
         print("Invalid choice, try again.", flush=True, file=sys.stderr)
