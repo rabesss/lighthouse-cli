@@ -545,33 +545,40 @@ class MicrosoftSSOClient:
                 "path": cookie.path or "/",
             })
 
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            try:
-                context = browser.new_context(user_agent=user_agent)
-                if export_cookies:
-                    context.add_cookies(export_cookies)
-                page = context.new_page()
-                page.goto(ms_url, wait_until="networkidle", timeout=60000)
-                login_input = page.query_selector('input[name="loginfmt"]')
-                if login_input:
-                    page.fill('input[name="loginfmt"]', username)
-                    page.click("#idSIButton9")
-                    page.wait_for_selector('input[name="passwd"]', timeout=30000)
-                pw_cfg = page.evaluate(
-                    """() => ({
-                        urlPost: $Config.urlPost,
-                        sFT: $Config.sFT,
-                        sCtx: $Config.sCtx,
-                        canary: $Config.canary,
-                        sessionId: $Config.sessionId,
-                        i19: $Config.i19
-                    })"""
-                )
-                referer = page.url
-                pw_cookies = context.cookies()
-            finally:
-                browser.close()
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                try:
+                    context = browser.new_context(user_agent=user_agent)
+                    if export_cookies:
+                        context.add_cookies(export_cookies)
+                    page = context.new_page()
+                    page.goto(ms_url, wait_until="networkidle", timeout=60000)
+                    login_input = page.query_selector('input[name="loginfmt"]')
+                    if login_input:
+                        page.fill('input[name="loginfmt"]', username)
+                        page.click("#idSIButton9")
+                        page.wait_for_selector('input[name="passwd"]', timeout=30000)
+                    pw_cfg = page.evaluate(
+                        """() => ({
+                            urlPost: $Config.urlPost,
+                            sFT: $Config.sFT,
+                            sCtx: $Config.sCtx,
+                            canary: $Config.canary,
+                            sessionId: $Config.sessionId,
+                            i19: $Config.i19
+                        })"""
+                    )
+                    referer = page.url
+                    pw_cookies = context.cookies()
+                finally:
+                    browser.close()
+        except Exception as exc:
+            raise MicrosoftSSOError(
+                f"Playwright username bootstrap failed: {exc}",
+                step="prepare username",
+                recovery="Ensure Chromium is installed: playwright install chromium",
+            ) from exc
 
         self._import_playwright_cookies(pw_cookies)
         _prune_stale_esctx_cookies(self._session)
@@ -841,23 +848,24 @@ class MicrosoftSSOClient:
     ) -> None:
         if not sys.stdin.isatty():
             return
-        print("\n--- Second factor required ---", flush=True)
-        print("Registered verification methods on your account:", flush=True)
+        print("\n--- Second factor required ---", flush=True, file=sys.stderr)
+        print("Registered verification methods on your account:", flush=True, file=sys.stderr)
         for proof in proofs:
             marker = " (selected)" if proof.auth_method_id == selected.auth_method_id else ""
-            print(f"  • {proof.display}{marker}", flush=True)
+            print(f"  • {proof.display}{marker}", flush=True, file=sys.stderr)
         hint = MFA_METHOD_INSTRUCTIONS.get(
             selected.auth_method_id,
             "Enter the verification code from the method shown above.",
         )
         if selected.auth_method_id == MFA_AUTH_SMS and sms_triggered:
             phone = _mask_phone_hint(selected.data)
-            print(f"\nA code was requested for {phone}.", flush=True)
+            print(f"\nA code was requested for {phone}.", flush=True, file=sys.stderr)
             print(
                 "Delivery (SMS vs WhatsApp) is chosen by Microsoft; the CLI cannot force a channel.",
                 flush=True,
+                file=sys.stderr,
             )
-        print(f"\n{hint}", flush=True)
+        print(f"\n{hint}", flush=True, file=sys.stderr)
 
     def _prompt_mfa_code(self, selected: UserProof) -> str:
         if sys.stdin.isatty():
@@ -905,8 +913,12 @@ class MicrosoftSSOClient:
         read_totp_after_challenge: bool,
         sms_triggered: bool,
     ) -> str:
-        """Collect OTP after BeginAuth; SMS/OTP always issue a fresh code on BeginAuth."""
-        needs_fresh_code = selected.auth_method_id in (MFA_AUTH_SMS, MFA_AUTH_APP_OTP)
+        """Collect OTP after BeginAuth.
+
+        Only SMS issues a fresh server-sent code on BeginAuth; PhoneAppOTP is an
+        offline TOTP generated on the user's device, so a pre-provided code stays valid.
+        """
+        needs_fresh_code = selected.auth_method_id == MFA_AUTH_SMS
         if needs_fresh_code and totp_code and not read_totp_after_challenge:
             totp_code = None
 
@@ -933,6 +945,7 @@ class MicrosoftSSOClient:
                         "A verification code was just sent. "
                         "Enter the code from this message (not an older one):",
                         flush=True,
+                        file=sys.stderr,
                     )
                 return self._prompt_mfa_code(selected)
             raise MicrosoftSSOError(
@@ -1208,6 +1221,7 @@ class MicrosoftSSOClient:
                     print(
                         f"Approve sign-in in Authenticator (number shown: {entropy}).",
                         flush=True,
+                        file=sys.stderr,
                     )
             time.sleep(poll_seconds)
             end_flow = str(end_data.get("FlowToken") or end_flow)
@@ -1238,8 +1252,8 @@ class MicrosoftSSOClient:
 
         if totp_code is None:
             if sys.stdin.isatty():
-                print("\n--- Second factor required ---", flush=True)
-                print("Enter the verification code shown on the Microsoft sign-in page.", flush=True)
+                print("\n--- Second factor required ---", flush=True, file=sys.stderr)
+                print("Enter the verification code shown on the Microsoft sign-in page.", flush=True, file=sys.stderr)
                 totp_code = _getpass.getpass("Enter verification code: ")
             else:
                 totp_code = sys.stdin.readline().strip()

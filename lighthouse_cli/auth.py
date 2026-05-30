@@ -322,10 +322,11 @@ def cmd_auth_login(
             totp_code = None
         elif totp_code is not None and resolved_mfa_method in (
             MFA_METHOD_SMS,
-            MFA_METHOD_APP,
             MFA_METHOD_CHOOSE,
         ):
             # Literal --totp <code> cannot match the code BeginAuth is about to send.
+            # App/Authenticator TOTP is generated offline, so a pre-provided code is
+            # valid for non-interactive --mfa-method app logins; do not discard it.
             totp_code = None
         if totp_code is not None and totp_code.strip() == "":
             return _auth_error("2FA code cannot be empty", json_output, 2)

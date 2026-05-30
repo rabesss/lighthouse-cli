@@ -161,6 +161,18 @@ class TestMfaMethodSelection:
         assert _prompt_user_proof_choice(single).auth_method_id == "OneWaySMS"
 
 
+class TestCollectTotpAfterChallenge:
+    def test_app_otp_keeps_preprovided_code(self) -> None:
+        """PhoneAppOTP is offline TOTP: a pre-provided --totp code must be kept, not discarded."""
+        client = MicrosoftSSOClient()
+        selected = UserProof("PhoneAppOTP", "Authenticator app", "", True)
+        code = client._collect_totp_after_challenge(
+            selected, "123456", read_totp_after_challenge=False, sms_triggered=False
+        )
+        assert code == "123456"
+        client.close()
+
+
 class TestAbsoluteUrl:
     def test_resolves_tenant_relative_kmsi_path(self) -> None:
         base = "https://login.microsoftonline.com/29bebd42-f1ff-4c3d-9688-067e3460dc1f/login"
