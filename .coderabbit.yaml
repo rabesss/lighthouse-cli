@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Canonical rules: ./review.md
+language: en-US
+early_access: false
+reviews:
+  profile: assertive
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!.venv/**"
+    - "!**/*.lock"
+  path_instructions:
+    - path: "lighthouse_cli/{auth,ms_auth,ms_mfa,ms_session,api,config}.py"
+      instructions: >
+        SECURITY (P0): flag any code path that logs, prints, f-strings, or
+        includes in exceptions/tracebacks a password, session cookie
+        (d2lSecureSessionVal, d2lSessionVal, d2lSameSiteCanaryA/B), TOTP/OTP code,
+        or SAML token / SAMLResponse. Secrets must flow only through
+        CredentialStore (Fernet + keyring); never plaintext to disk or
+        stdout/stderr. MFA: SMS/WhatsApp codes are server-sent on BeginAuth so a
+        literal --totp cannot match them (two-step auth login -> auth verify);
+        only on-device Authenticator PhoneAppOTP codes are valid pre-provided.
+        Resume a pending MFA session only when its saved method matches the
+        request.
+    - path: "lighthouse_cli/{commands,cli,show,display,submit}.py"
+      instructions: >
+        When --json is passed, stdout MUST stay pure machine-parseable JSON: all
+        prompts, banners, progress, and log lines go to sys.stderr. Flag any
+        print()/click.echo() of human text to stdout in a --json branch, and any
+        input(prompt) whose prompt is not first written to stderr. Commands
+        return exit code 0 on success, 1 on error.
+    - path: "lighthouse_cli/**/*.py"
+      instructions: >
+        Static typing: require `from __future__ import annotations`; prefer
+        `X | None` over Optional; no bare `Callable` (use `Callable[..., T]`).
+        Wrap subprocess/Playwright/CDP failures and surface clean errors — never
+        leak a raw traceback.
+    - path: "pyproject.toml"
+      instructions: >
+        Dependencies must be pinned/bounded (supply-chain). Flag new or unpinned
+        deps and possible typosquats; verify versions are explicit.
+  tools:
+    ruff:
+      enabled: true

@@ -1,0 +1,13 @@
+# Gemini Code Assist configuration for lighthouse-cli
+# Schema: https://developers.google.com/gemini-code-assist/docs/customize-gemini-behavior-github
+have_fun: false
+ignore_patterns:
+  - "docs/adr/**"        # historical decision records; reviewed by humans
+code_review:
+  disable: false
+  comment_severity_threshold: MEDIUM   # surface secret-leak & JSON-stdout issues
+  max_review_comments: -1
+  pull_request_opened:
+    summary: true
+    code_review: true
+    include_drafts: true

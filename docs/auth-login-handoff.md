@@ -18,3 +18,5 @@ lighthouse auth status
 2. Do **not** run `login` twice while waiting for OTP.
 3. Use the code from the **latest** “code sent” message only.
 4. Install: `pip install -e '.[auth,credentials]'` in a venv + `playwright install chromium`.
+5. **App/Authenticator** instead of SMS: `lighthouse auth login --mfa-method app --totp <code>`
+   completes in one step (offline TOTP — no `verify`).

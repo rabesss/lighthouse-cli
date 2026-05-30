@@ -65,6 +65,17 @@ lighthouse auth login --mfa-method sms --totp -
 # Type code when prompted (after "code sent")
 ```
 
+### Offline Authenticator (app TOTP) — one step
+
+```bash
+lighthouse auth login --mfa-method app --totp 123456
+```
+
+`PhoneAppOTP` codes are generated on-device, so (unlike SMS) a pre-provided
+`--totp` is valid and login completes in a single command — no `verify` step.
+An explicit `--mfa-method app` starts a fresh app flow and will not resume a
+stale SMS `mfa_pending.json`.
+
 ## MFA session file
 
 `~/.config/lighthouse-cli/mfa_pending.json` (mode `0600`) holds:
