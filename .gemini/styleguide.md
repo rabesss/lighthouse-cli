@@ -1,7 +1,7 @@
 # lighthouse-cli Review Style Guide (Python 3.11, Click + requests)
 
 This guide expands Gemini Code Assist's review. The canonical rules live in
-[`review.md`](../review.md); the highest-priority ones are repeated here.
+[`REVIEW.md`](../REVIEW.md); the highest-priority ones are repeated here.
 
 ## Secrets & credentials (CRITICAL)
 

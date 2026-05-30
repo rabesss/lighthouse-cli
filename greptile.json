@@ -1,0 +1,13 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic", "syntax"],
+  "instructions": "Follow REVIEW.md and AGENTS.md at the repo root. P0: flag any logging, printing, f-string, or exception text that could leak a password, session cookie (d2lSecureSessionVal/d2lSessionVal/d2lSameSiteCanaryA/B), TOTP/OTP code, or SAML token; credentials must flow only through CredentialStore (Fernet + keyring). P0: when --json is passed, stdout must be valid JSON only; all prompts, banners, logs, and input() prompts must go to sys.stderr. P1: SMS/WhatsApp codes are server-sent on BeginAuth so a literal --totp cannot match (use auth login then auth verify), while offline Authenticator PhoneAppOTP codes are valid pre-provided; resume a pending MFA session only when its saved method matches. P1: require `from __future__ import annotations`, X | None (not Optional), and no bare Callable; wrap subprocess/Playwright/CDP failures into clean errors. Do NOT flag passing --totp for --mfa-method app, or dict[str, Any] for raw D2L REST JSON at the API boundary.",
+  "ignorePatterns": "docs/adr/**\n*.pyc",
+  "excludeAuthors": ["dependabot[bot]"],
+  "customContext": {
+    "files": [
+      { "path": "REVIEW.md", "description": "Canonical review charter" },
+      { "path": "AGENTS.md", "description": "Architecture, conventions, reviewer map" }
+    ]
+  }
+}

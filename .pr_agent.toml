@@ -1,5 +1,5 @@
 # Qodo Merge / PR-Agent configuration for lighthouse-cli
-# Docs: https://docs.qodo.ai/  | Canonical rules: ./review.md
+# Docs: https://docs.qodo.ai/  | Canonical rules: ./REVIEW.md
 # Longer NL standards live in ./best_practices.md (auto-discovered at repo root).
 
 [github_app]

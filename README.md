@@ -1053,19 +1053,26 @@ lighthouse-cli/
 
 Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md); the
 PR-review charter (what reviewers check, by severity) lives in
-[`review.md`](review.md). Run `pytest -q` before opening a PR.
+[`REVIEW.md`](REVIEW.md). Run `pytest -q` before opening a PR.
 
 This repo is wired for several AI reviewers. Each reads its own committed
-config; all derive from `review.md`:
+config; all derive from `REVIEW.md`:
 
 | Reviewer | Config file(s) |
 |----------|----------------|
-| OpenAI Codex / Google Jules | [`AGENTS.md`](AGENTS.md) |
+| OpenAI Codex / Google Jules / Devin | [`AGENTS.md`](AGENTS.md) |
 | Gemini Code Assist | [`.gemini/config.yaml`](.gemini/config.yaml), [`.gemini/styleguide.md`](.gemini/styleguide.md) |
-| CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) |
+| CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) (ingests `REVIEW.md` + `AGENTS.md`) |
 | Qodo Merge | [`.pr_agent.toml`](.pr_agent.toml), [`best_practices.md`](best_practices.md) |
-| Socket Security | [`socket.yml`](socket.yml) |
-| Kilo Code, Pullfrog | dashboard-only — paste [`review.md`](review.md) into their consoles |
+| GitHub Copilot | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
+| Greptile | [`greptile.json`](greptile.json) |
+| Kilo Code | [`REVIEW.md`](REVIEW.md) — enable "Use REVIEW.md" in the Kilo dashboard |
+| Socket Security | [`socket.yml`](socket.yml) (supply-chain) |
+| Pullfrog | [`AGENTS.md`](AGENTS.md) + Pullfrog dashboard |
+
+> Kilo reads `REVIEW.md` from the PR **base** branch, so policy changes take
+> effect only after they merge to `main`. CodeRabbit/Greptile read their config
+> from the PR source branch (effective within the same PR).
 
 ## License
 

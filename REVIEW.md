@@ -7,16 +7,21 @@ it:
 | Reviewer | How it reads these rules |
 |----------|--------------------------|
 | OpenAI Codex (`chatgpt-codex-connector`) | [`AGENTS.md`](AGENTS.md) → `## Review guidelines` |
-| Google Jules | [`AGENTS.md`](AGENTS.md) (conventions) |
+| Google Jules (`google-labs-jules`) | [`AGENTS.md`](AGENTS.md) (conventions) |
+| Devin (`devin-ai-integration`) | [`AGENTS.md`](AGENTS.md) + Devin dashboard/Wiki |
 | Gemini Code Assist | [`.gemini/styleguide.md`](.gemini/styleguide.md) + [`.gemini/config.yaml`](.gemini/config.yaml) |
-| CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) → `reviews.path_instructions` |
+| CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) (also ingests this file + `AGENTS.md`) |
 | Qodo Merge | [`.pr_agent.toml`](.pr_agent.toml) + [`best_practices.md`](best_practices.md) |
+| GitHub Copilot | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
+| Greptile | [`greptile.json`](greptile.json) (loads this file via `customContext`) |
+| Kilo Code (`kilo-code-bot`) | **this file** — read from the PR base branch; enable "Use REVIEW.md" in the Kilo dashboard |
 | Socket Security | [`socket.yml`](socket.yml) (supply-chain only) |
-| Kilo Code | **dashboard-only** — paste this file's rules at <https://app.kilo.ai/code-reviews/review-md> |
-| Pullfrog | **dashboard-only** — paste this file's rules into Console → Modes → Review instructions |
+| Pullfrog | [`AGENTS.md`](AGENTS.md) + Pullfrog dashboard |
 
-> Kilo and Pullfrog do not read a committed file for their GitHub reviews; this
-> `review.md` is the version-controlled text to paste into their dashboards.
+> Kilo reads this `REVIEW.md` from the PR **base** branch (so an unreviewed PR
+> can't rewrite the policy that judges it) — changes take effect after they
+> merge to `main`. Pullfrog and Devin honor `AGENTS.md` and are otherwise
+> steered from their dashboards.
 
 Severity: **P0 / Critical** = block merge; **P1 / High** = must address;
 **P2 / Medium** = should address.
