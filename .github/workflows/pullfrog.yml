@@ -28,3 +28,6 @@ jobs:
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ inputs.prompt }}
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          PULLFROG_MODEL: zai/glm-5.2
