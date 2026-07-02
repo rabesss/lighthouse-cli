@@ -1,16 +1,21 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "enabled_providers": ["zai-coding-plan"],
   "provider": {
-    "zai": {
-      "npm": "@ai-sdk/openai-compatible@2.0.50",
-      "name": "Z.AI GLM Coding Plan",
+    "zai-coding-plan": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Z.AI Coding Plan",
       "options": {
         "baseURL": "https://api.z.ai/api/coding/paas/v4",
         "apiKey": "{env:ZAI_API_KEY}"
       },
       "models": {
         "glm-5.2": {
-          "name": "GLM-5.2"
+          "name": "GLM 5.2",
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         }
       }
     }
