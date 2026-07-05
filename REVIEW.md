@@ -79,3 +79,8 @@ Severity: **P0 / Critical** = block merge; **P1 / High** = must address;
 - Passing `--totp` for `--mfa-method app` (offline TOTP) is correct.
 - `dict[str, Any]` for raw D2L REST JSON at the API boundary is intentional.
 - Reading external JSON fields with `.get(...)` (optional fields) is correct.
+
+## Agent-Maintained Review Memory
+Agents that open or update PRs in this repository must keep this section current when review history shows a repeated pattern. Add dated bullets only for durable repo-specific lessons, not one-off PR commentary.
+
+- No recurring repo-specific review patterns have been recorded yet.

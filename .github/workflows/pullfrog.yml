@@ -32,7 +32,7 @@ jobs:
           model: zai-coding-plan/glm-5.2
         env:
           PULLFROG_MODEL: zai-coding-plan/glm-5.2
-          OPENCODE_CONFIG: ${{ github.workspace }}/opencode.json
+          OPENCODE_CONFIG: ${{ github.workspace }}/.github/pullfrog-opencode.json
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
 
           # add at least one provider API key
