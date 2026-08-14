@@ -29,12 +29,7 @@ jobs:
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ inputs.prompt }}
-          model: zai-coding-plan/glm-5.2
         env:
-          PULLFROG_MODEL: zai-coding-plan/glm-5.2
-          OPENCODE_CONFIG: ${{ github.workspace }}/.github/pullfrog-opencode.json
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-
           # add at least one provider API key
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
