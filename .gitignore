@@ -28,8 +28,6 @@ droid-wiki/
 CONTEXT.md
 HANDOFF.md
 
-# Desloppify local state
-.desloppify/
 # Agent/tool local state (not part of the project)
 .gemini/skills/
 .github/skills/
@@ -38,7 +36,6 @@ HANDOFF.md
 .kiro/
 .omc/
 skills-lock.json
-scorecard.png
 .omo/
 
 # Local credentials (never commit)
