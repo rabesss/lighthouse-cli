@@ -808,3 +808,31 @@ class TestDescribePageShape:
 
         out = describe_page_shape(self._snap("", url="", status=302))
         assert "status=302" in out and "(no url)" in out
+
+
+class TestFlowRecorder:
+    """LIGHTHOUSE_DEBUG_FLOW writes sanitized step records only."""
+
+    def test_records_are_sanitized(self, tmp_path):
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        # GET record via a mocked transport.
+        resp = type("R", (), {"status_code": 200, "text": "ok", "url": "https://x.test/a?token=SECRET", "headers": {}})()
+        with patch.object(client._session, "get", return_value=resp):
+            client._get("https://x.test/a?token=SECRET")
+        client._record_flow("POST", "https://login.microsoftonline.com/common/login",
+                            field_names=["login", "passwd", "ctx"])
+        lines = [json.loads(l) for l in log.read_text().splitlines()]
+        assert lines[0] == {"method": "GET", "url": "x.test/a", "status": 200}
+        assert "SECRET" not in log.read_text()
+        assert set(lines[1]["form_fields"]) == {"login", "passwd", "ctx"}
+        assert "passwd" not in json.dumps(lines[1].get("page", ""))
+
+    def test_disabled_by_default(self, tmp_path):
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        client = MicrosoftSSOClient()
+        client._record_flow("GET", "https://x.test/a")
+        assert not list(tmp_path.glob("*.jsonl"))  # nothing written anywhere

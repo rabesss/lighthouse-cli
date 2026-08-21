@@ -27,6 +27,7 @@ JavaScript state that pure HTTP cannot reproduce for this tenant's SAML login.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -491,6 +492,7 @@ class MicrosoftSSOClient:
         *,
         timeout: int = 30,
         user_agent: str | None = None,
+        flow_log: str | None = None,
     ) -> None:
         self._user_agent = user_agent or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -502,6 +504,11 @@ class MicrosoftSSOClient:
         # resumes an existing flow without going through login().
         self._session = requests.Session()
         self._timeout = timeout
+        # Diagnostics: when LIGHTHOUSE_DEBUG_FLOW names a file, append one
+        # sanitized JSON record per HTTP step (method, origin+path, status,
+        # form field NAMES, page shape). Never request/response bodies, never
+        # headers, cookies, tokens, or query strings.
+        self._flow_log = flow_log or os.environ.get("LIGHTHOUSE_DEBUG_FLOW") or ""
         self._session.headers.update({
             "User-Agent": self._user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -510,27 +517,65 @@ class MicrosoftSSOClient:
 
     # -- transport -------------------------------------------------------------
 
+    def _record_flow(
+        self,
+        method: str,
+        url: str,
+        status: int | None = None,
+        *,
+        field_names: list[str] | None = None,
+        page_shape: str | None = None,
+    ) -> None:
+        """Append one sanitized step record when LIGHTHOUSE_DEBUG_FLOW is set."""
+        if not self._flow_log:
+            return
+        try:
+            parsed = urlparse(url)
+            entry: dict[str, Any] = {
+                "method": method,
+                "url": f"{parsed.netloc}{parsed.path}" if parsed.netloc else "(no url)",
+            }
+            if status is not None:
+                entry["status"] = status
+            if field_names is not None:
+                entry["form_fields"] = field_names  # names only, never values
+            if page_shape:
+                entry["page"] = page_shape
+            with open(self._flow_log, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass  # diagnostics must never break the login flow
+
     def _get(self, url: str, **kwargs: Any) -> requests.Response:
         """GET with timeout and allow_redirects=False."""
-        return self._session.get(
+        resp = self._session.get(
             url,
             allow_redirects=False,
             timeout=self._timeout,
             **kwargs,
         )
+        self._record_flow("GET", url, resp.status_code)
+        return resp
 
     def _post(self, url: str, **kwargs: Any) -> requests.Response:
         """POST with timeout and allow_redirects=False."""
-        return self._session.post(
+        data = kwargs.get("data")
+        if isinstance(data, dict):
+            self._record_flow("POST", url, field_names=sorted(data.keys()))
+        resp = self._session.post(
             url,
             allow_redirects=False,
             timeout=self._timeout,
             **kwargs,
         )
+        self._record_flow("POST", url, resp.status_code)
+        return resp
 
     def _post_with_redirects(self, url: str, **kwargs: Any) -> requests.Response:
         """POST allowing redirects. Used for SAML ACS where the redirect chain sets cookies."""
-        return self._session.post(url, allow_redirects=True, timeout=self._timeout, **kwargs)
+        resp = self._session.post(url, allow_redirects=True, timeout=self._timeout, **kwargs)
+        self._record_flow("POST*", url, resp.status_code)
+        return resp
 
     def _snapshot(self, resp: requests.Response) -> ResponseSnapshot:
         return ResponseSnapshot.from_response(resp)
@@ -702,8 +747,9 @@ class MicrosoftSSOClient:
         snap = self._step_post_credentials(
             ms_config, username, password, skip_username_prepare=True
         )
-
-        # Step 4: Handle response — MFA or SAML or error
+        self._record_flow(
+            "PAGE", snap.url, snap.status_code, page_shape=describe_page_shape(snap)
+        )
         if is_mfa_page(snap.html):
             if on_credentials_submitted is not None:
                 on_credentials_submitted()
