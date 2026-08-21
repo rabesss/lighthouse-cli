@@ -926,7 +926,12 @@ class MicrosoftSSOClient:
     def _post_dsso_status(self, config: dict[str, Any], canary: str) -> None:
         """Report desktop SSO probe result (browser fires this around username entry)."""
         referer = str(config.get("_ms_url", ""))
-        self._session.post(
+        self._record_flow(
+            "POST",
+            "https://login.microsoftonline.com/common/instrumentation/dssostatus",
+            field_names=["resultCode", "ssoDelay", "log"],
+        )
+        resp = self._session.post(
             "https://login.microsoftonline.com/common/instrumentation/dssostatus",
             json={
                 "resultCode": 2,
@@ -943,8 +948,12 @@ class MicrosoftSSOClient:
                 "hpgrequestid": str(config.get("sessionId") or ""),
                 "Referer": referer,
             },
-            allow_redirects=False,
             timeout=self._timeout,
+        )
+        self._record_flow(
+            "POST",
+            "https://login.microsoftonline.com/common/instrumentation/dssostatus",
+            resp.status_code,
         )
 
     def _import_playwright_cookies(self, pw_cookies: list[dict[str, Any]]) -> None:
@@ -1133,6 +1142,7 @@ class MicrosoftSSOClient:
             "hpgrequestid": str(config.get("sessionId") or ""),
             "Referer": str(config.get("_ms_url", "")),
         }
+        self._record_flow("POST", gct_full, field_names=sorted(payload.keys()))
         resp = self._session.post(
             gct_full,
             json=payload,
@@ -1140,11 +1150,20 @@ class MicrosoftSSOClient:
             allow_redirects=False,
             timeout=self._timeout,
         )
+        gct_keys: list[str] = []
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                gct_keys = sorted(data.keys())
+            except json.JSONDecodeError:
+                gct_keys = ["(unparseable)"]
+        self._record_flow(
+            "GCT",
+            gct_full,
+            resp.status_code,
+            field_names=gct_keys,
+        )
         if resp.status_code != 200:
-            return config
-        try:
-            data = resp.json()
-        except json.JSONDecodeError:
             return config
 
         updated = dict(config)
