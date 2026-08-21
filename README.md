@@ -378,7 +378,7 @@ with `Modules` containing sub-`Modules` and `Topics`.
 
 ---
 
-### `lighthouse download COURSE_ID [TOPIC_ID] [-o DIR] [--dry-run] [--include-assignments] [--types TYPES] [--json]`
+### `lighthouse download COURSE_ID [-o DIR] [--dry-run] [--include-assignments] [--types TYPES] [--json]`
 
 Download files from a course.
 
@@ -387,7 +387,6 @@ Download files from a course.
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `COURSE_ID` | Yes | Numeric OrgUnitId or name substring |
-| `TOPIC_ID` | No | Specific topic to download. If omitted, downloads all files |
 
 **Flags:**
 
@@ -411,11 +410,6 @@ Downloads create course-name subdirectories (e.g.
 `~/Downloads/lighthouse/Introduction to CS/` instead of
 `~/Downloads/lighthouse/1001/`).
 
-**Human output (single file):**
-```
-Downloaded: ~/Downloads/lighthouse/Introduction to CS/Unit 1/L1-L2 Introduction.pdf (245.3 KB)
-```
-
 **Human output (all files, `--dry-run`):**
 ```
 Would download 12 files to ~/Downloads/lighthouse/Introduction to CS/
@@ -434,18 +428,9 @@ Would download 12 files to ~/Downloads/lighthouse/Introduction to CS/
 ]
 ```
 
-**JSON output (`--json`, single file download):**
-```json
-{
-  "path": "/home/user/Downloads/lighthouse/Introduction to CS/L1-L2 Introduction.pdf",
-  "size_kb": 245.3,
-  "filename": "L1-L2 Introduction.pdf"
-}
-```
-
 ---
 
-### `lighthouse sync COURSE_ID [TOPIC_ID] [-o DIR] [--semester FILTER] [--also COURSE] [--force] [--json]`
+### `lighthouse sync COURSE_ID [-o DIR] [--semester FILTER] [--also COURSE] [--force] [--json]`
 
 Incremental sync command that downloads only new or changed files using
 manifest-based tracking with SHA-256 dedup.
@@ -455,7 +440,6 @@ manifest-based tracking with SHA-256 dedup.
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `COURSE_ID` | Yes | Numeric OrgUnitId or name substring |
-| `TOPIC_ID` | No | Specific topic to sync. If omitted, syncs all files |
 
 **Flags:**
 
@@ -901,36 +885,32 @@ programmatically. Here's the recommended workflow:
    $ lighthouse download "signals" --dry-run --json
    # returns [{topic_id, title, path}, ...]
 
-6. Download specific files
-   $ lighthouse download "signals" 2345 --json
-   # returns {path, size_kb, filename}
-
-7. Download all files from a course
+6. Download all files from a course
    $ lighthouse download "signals"
    # saves to ~/Downloads/lighthouse/{course-name}/
 
-8. Download including assignment attachments
+7. Download including assignment attachments
    $ lighthouse download "signals" --include-assignments --json
 
-9. Filter downloads by file type
+8. Filter downloads by file type
    $ lighthouse download "signals" --types pdf,docx --json
 
-10. Incremental sync — only download new/changed files
+9. Incremental sync — only download new/changed files
     $ lighthouse sync "signals" --json
     # returns {new, updated, unchanged, orphaned, downloaded_bytes}
 
-11. Sync multiple courses at once
+10. Sync multiple courses at once
     $ lighthouse sync "signals" --also "math" --also "physics" --json
 
-12. Check assignments for a course
+11. Check assignments for a course
     $ lighthouse assignments "signals" --json
     # returns [{Id, Name, DueDate, Availability}, ...]
 
-13. Submit a file to a dropbox folder
+12. Submit a file to a dropbox folder
     $ lighthouse submit -f homework.pdf "signals" "Homework 1" --yes --json
     # returns {submission_id, folder_id, course_id, file, submitted_at}
 
-14. Resolve folder ID by name
+13. Resolve folder ID by name
     $ lighthouse submit -f report.pdf "signals" "Lab Report" --yes --json
     # resolves "Lab Report" -> folder ID
 ```

@@ -247,7 +247,6 @@ def content(course_id: str, json_output: bool) -> None:
 
 @cli.command("download")
 @click.argument("course_id", required=False)
-@click.argument("topic_id", required=False, type=int)
 @click.option("-o", "--output-dir", default=None, help="Custom download directory.")
 @click.option("--dry-run", is_flag=True, default=False, help="List files without downloading.")
 @click.option("--json", "json_output", is_flag=True, help="Output raw JSON.")
@@ -260,7 +259,6 @@ def content(course_id: str, json_output: bool) -> None:
 @click.option("--attachment", "attachment_id", default=None, type=int, help="Download a specific attachment from an assignment folder.")
 def download(
     course_id: str | None,
-    topic_id: int | None,
     output_dir: str | None,
     dry_run: bool,
     json_output: bool,
@@ -275,8 +273,7 @@ def download(
     """Download files from a course.
 
     If COURSE_ID is given, download that course. Without COURSE_ID,
-    downloads all courses from the latest semester. If TOPIC_ID is also
-    given, download that single file from the specified course.
+    downloads all courses from the latest semester.
 
     Scope options:
       --semester  Filter courses to a specific semester (by name or ID)
@@ -290,7 +287,6 @@ def download(
     raise SystemExit(
         cmd_download(
             course_id,
-            topic_id=topic_id,
             output_dir=output_dir,
             dry_run=dry_run,
             json_output=json_output,
