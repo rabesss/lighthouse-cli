@@ -525,8 +525,10 @@ class TestAlsoFlag:
                 ["download", "--semester", "200", "--also", "99999", "-o", str(output_dir)],
             )
 
-            # Should exit with error (partial failure)
-            assert result.exit_code == 1
+            # Invalid --also is scope leniency: warning on stderr, exit unaffected
+            # (uniform exit matrix — also_errors never affect exit codes).
+            assert result.exit_code == 0
+            assert "99999" in result.output  # resolution error still reported
             # Course B-222 should still be downloaded
             course_dirs = {d.name for d in output_dir.iterdir()}
             assert "Course B-222" in course_dirs

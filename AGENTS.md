@@ -31,8 +31,11 @@ There is no separate build step. Lint with `ruff` if available.
   `--json` vs human output).
 - `lighthouse_cli/api.py` — `LighthouseClient` (D2L REST client, cookie mgmt,
   course-id resolution, CDP cookie extraction for `auth refresh`).
-- `lighthouse_cli/auth.py` — `cmd_auth_login` / `cmd_auth_verify` and
-  `CredentialStore` (Fernet + OS keyring).
+- `lighthouse_cli/auth.py` — `cmd_auth_login` / `cmd_auth_verify`.
+- `lighthouse_cli/credential_store.py` — `CredentialStore`: single owner of
+  secret sealing (Fernet envelopes; key from `LIGHTHOUSE_SECRETS_PASSPHRASE`
+  or the OS keyring) for `credentials.json`, `cookies.json`, and the MFA
+  pending checkpoint.
 - **Microsoft SSO is split into focused modules** (do not re-monolithize):
   `ms_auth.py` (`MicrosoftSSOClient`), `ms_parse.py` (HTML/`$Config` parsing),
   `ms_session.py` (cookie/session helpers), `ms_mfa.py` (MFA proof selection),

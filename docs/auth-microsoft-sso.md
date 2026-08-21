@@ -78,11 +78,16 @@ stale SMS `mfa_pending.json`.
 
 ## MFA session file
 
-`~/.config/lighthouse-cli/mfa_pending.json` (mode `0600`) holds:
+`~/.config/lighthouse-cli/mfa_pending.json` (mode `0600`) seals everything
+secret via `CredentialStore` (Fernet envelope; see README "Encryption key
+sources"). Sealed inside:
 
 - Session cookies, `BeginAuth` response (`SessionId`, `FlowToken`, `Ctx`)
 - MFA config URLs and selected proof (`OneWaySMS`, etc.)
 - Checkpoints: `end_auth_flow` / `end_auth_ctx` after OTP accepted; `kmsi_checkpoint` before “Stay signed in”
+
+Only `created_at` and `mfa_method` remain as plaintext metadata beside the
+ciphertext.
 
 Cleared only after D2L cookies are extracted successfully. If `auth verify` fails, the pending file is removed so a stale `end_auth_flow` checkpoint cannot block the next attempt — run `auth login` again for a new code.
 
