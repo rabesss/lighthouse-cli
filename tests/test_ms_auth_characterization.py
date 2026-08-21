@@ -772,3 +772,39 @@ class TestDeferAndResume:
             client.close()
 
         assert read_pending() is None
+
+
+class TestDescribePageShape:
+    """Sanitized diagnostics for unrecognized post-credentials pages."""
+
+    def _snap(self, html: str, url: str = "https://login.microsoftonline.com/x", status: int = 200):
+        from lighthouse_cli.ms_auth import ResponseSnapshot
+
+        return ResponseSnapshot(url=url, status_code=status, location="", html=html)
+
+    def test_summary_contains_structure_not_tokens(self):
+        from lighthouse_cli.ms_auth import describe_page_shape
+
+        html = (
+            "<title>Stay signed in?</title>"
+            '$Config={"pgid":"ConvergedKmsi","sFT":"SECRET-FLOW-TOKEN",'
+            '"sCtx":"SECRET-CTX","urlPost":"/common/SAS"};'
+            "<form action='/common/SAS/ProcessAuth'>"
+        )
+        snap = self._snap(html, url="https://login.microsoftonline.com/kmsi?ctx=SECRET-QUERY")
+        out = describe_page_shape(snap)
+        assert "ConvergedKmsi" in out
+        assert "Stay signed in?" in out
+        assert "status=200" in out
+        assert "url=login.microsoftonline.com/kmsi" in out
+        assert "ProcessAuth-form=1" in out
+        # No token material may leak: query string stripped, $Config values absent.
+        assert "SECRET-QUERY" not in out
+        assert "SECRET-FLOW-TOKEN" not in out
+        assert "SECRET-CTX" not in out
+
+    def test_empty_page_is_safe(self):
+        from lighthouse_cli.ms_auth import describe_page_shape
+
+        out = describe_page_shape(self._snap("", url="", status=302))
+        assert "status=302" in out and "(no url)" in out

@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, NamedTuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -190,6 +190,38 @@ def is_error_page(snapshot: ResponseSnapshot) -> bool:
         or "serrtxt" in text
         or "password is incorrect" in text
         or "account does not exist" in text
+    )
+
+
+def describe_page_shape(snapshot: ResponseSnapshot) -> str:
+    """One-line, secret-free summary of an unrecognized Microsoft page.
+
+    Diagnostics only: host+path (query stripped — it can carry ctx/flowToken
+    material), $Config pgid, and structural marker booleans.  Never includes
+    HTML fragments or token values.
+    """
+    url = snapshot.url or ""
+    parsed = urlparse(url)
+    location = f"{parsed.netloc}{parsed.path}" if parsed.netloc else "(no url)"
+    cfg = _extract_config_json(snapshot.html) or {}
+    pgid = str(cfg.get("pgid") or "-")
+    html = snapshot.html
+    markers = {
+        "arrUserProofs": bool(cfg.get("arrUserProofs")),
+        "otc-input": 'name="otc"' in html,
+        "ProcessAuth-form": "/SAS/ProcessAuth" in html,
+        "KmsiInterrupt": "KmsiInterrupt" in html,
+        "ConvergedTFA": "ConvergedTFA" in html,
+        "SAMLResponse": "SAMLResponse" in html,
+        "sFT-present": bool(cfg.get("sFT")),
+        "urlPost": bool(cfg.get("urlPost")),
+    }
+    flags = " ".join(f"{k}={int(v)}" for k, v in markers.items())
+    title_match = re.search(r"<title[^>]*>([^<]{0,80})", html)
+    title = title_match.group(1).strip() if title_match else "-"
+    return (
+        f"page: status={snapshot.status_code} url={location} pgid={pgid} "
+        f"title={title!r} {flags}"
     )
 
 
@@ -696,7 +728,9 @@ class MicrosoftSSOClient:
             if not saml_response:
                 code, msg = _extract_error_code_and_msg(saml_html)
                 raise build_sso_error(
-                    code, msg, "POST credentials (unexpected response)"
+                    code,
+                    msg or f"Unexpected response — {describe_page_shape(snap)}",
+                    "POST credentials (unexpected response)",
                 )
 
         # Step 5: POST SAMLResponse to D2L ACS
@@ -727,6 +761,11 @@ class MicrosoftSSOClient:
             if is_error_page(snap):
                 code, msg = _extract_error_code_and_msg(snap.html)
                 raise build_sso_error(code, msg, "POST credentials")
+            print(
+                f"no_mfa — unrecognized post-credentials page: "
+                f"{describe_page_shape(snap)}",
+                file=sys.stderr,
+            )
             return MfaProbeResult(page="no_mfa", proofs=[])
         cfg = _extract_config_json(snap.html) or {}
         return MfaProbeResult(page="legacy_form", proofs=_parse_user_proofs(cfg))
