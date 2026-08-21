@@ -18,7 +18,7 @@ from click.testing import CliRunner
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.manifest import MANIFEST_FILENAME
-from lighthouse_cli.sync_engine import Mode, run_course
+from lighthouse_cli.sync_engine import Mode, flatten_all_topics, run_course
 
 ORG_ID = 44347
 LM_OLD = "2026-01-01T00:00:00Z"
@@ -554,3 +554,52 @@ class TestDryRunCliFixes:
         assert result.exit_code == 0, result.output
         assert "Would download 1 files" in result.output
         assert "[1110] f.pdf" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Path containment: hostile module/topic titles must never escape the root
+# ---------------------------------------------------------------------------
+
+class TestPathContainment:
+    """TOC titles are professor-controlled input; assembled paths must stay
+    inside the course directory (devin-review P0)."""
+
+    def test_traversal_module_title_sanitized_in_flatten(self):
+        topics = flatten_all_topics([{"Title": "../../evil", "Modules": [], "Topics": [
+            {"TopicId": 100, "Title": "f.pdf", "TypeIdentifier": "File", "Url": "", "LastModifiedDate": LM_NEW},
+        ]}])
+        assert topics[0]["path"] == "_.._evil/f.pdf"
+        assert ".." not in Path(topics[0]["path"]).parent.as_posix().split("/")
+
+    def test_traversal_download_lands_under_course_root(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW), module="../../evil")},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+        assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
+        assert not (root.parent / "evil").exists()
+        for p in (root / "Test-44347").rglob("*"):
+            assert p.resolve().is_relative_to((root / "Test-44347").resolve())
+
+    def test_absolute_module_title_clamped_to_root(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW), module="/tmp/pwn")},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+        assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
+        assert not Path("/tmp/pwn").exists()
+
+    def test_dotdot_topic_title_cannot_escape(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "..", "File", LM_NEW), module="Mod")},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+        assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
+        for p in (root / "Test-44347").rglob("*"):
+            assert p.resolve().is_relative_to((root / "Test-44347").resolve())

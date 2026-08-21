@@ -68,6 +68,11 @@ def download_and_persist_topic(
         content, filename = client.download_topic_file(org_id, int(tid))
         sanitized_name = _sanitize_filename(filename)
     file_dest = dest / Path(topic["path"]).parent
+    # Defense in depth: module/topic titles are sanitized per component at
+    # flatten time, but never trust assembled paths — clamp anything that
+    # resolves outside the course root.
+    if not file_dest.resolve().is_relative_to(dest.resolve()):
+        file_dest = dest
     file_dest.mkdir(parents=True, exist_ok=True)
     filepath = file_dest / sanitized_name
     filepath.write_bytes(content)
@@ -94,13 +99,14 @@ def flatten_all_topics(modules: list[dict], prefix: str = "") -> list[dict[str, 
     """
     topics: list[dict[str, Any]] = []
     for mod in modules:
-        new_prefix = f"{prefix}/{mod.get('Title', '')}" if prefix else mod.get("Title", "")
+        safe_prefix = _sanitize_filename(mod.get("Title", ""))
+        new_prefix = f"{prefix}/{safe_prefix}" if prefix else safe_prefix
         topics.extend(flatten_all_topics(mod.get("Modules", []), new_prefix))
         for topic in mod.get("Topics", []):
             topics.append({
                 "topic_id": topic.get("TopicId"), "title": topic.get("Title", ""),
                 "url": topic.get("Url"), "type": topic.get("TypeIdentifier", ""),
-                "path": f"{new_prefix}/{topic.get('Title', '')}",
+                "path": f"{new_prefix}/{_sanitize_filename(topic.get('Title', ''))}",
                 "last_modified": topic.get("LastModifiedDate", ""),
             })
     return topics
