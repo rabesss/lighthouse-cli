@@ -35,8 +35,10 @@ Legacy formats are migrated on first successful read: raw-Fernet
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +55,7 @@ CONFIG_DIR_ENV = "LIGHTHOUSE_CONFIG_DIR"
 DEFAULT_CONFIG_DIR = "~/.config/lighthouse-cli"
 
 FORMAT_VERSION = 2
-_KDF_ITERATIONS = 300_000
+_KDF_ITERATIONS = 600_000
 
 #: Envelope header keys — never treated as artifact metadata.
 _ENVELOPE_KEYS = frozenset({"v", "key_source", "kdf_salt", "ciphertext"})
@@ -102,24 +104,43 @@ def _keyring_backend_available(keyring_mod: Any) -> bool:
         return True
 
 
+@lru_cache(maxsize=32)
 def _derive_passphrase_key(passphrase: str, salt: bytes) -> bytes:
-    """PBKDF2-HMAC-SHA256 → urlsafe base64 Fernet key (cached per salt)."""
-    cache_key = (passphrase, salt)
-    cached = _derive_passphrase_key._cache.get(cache_key)  # type: ignore[attr-defined]
-    if cached is not None:
-        return cached
+    """PBKDF2-HMAC-SHA256 → urlsafe base64 Fernet key (LRU-capped at 32)."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
         iterations=_KDF_ITERATIONS,
     )
-    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
-    _derive_passphrase_key._cache[cache_key] = key  # type: ignore[attr-defined]
-    return key
+    return base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
 
 
-_derive_passphrase_key._cache = {}  # type: ignore[attr-defined]
+def _fernet_from_key(key: bytes) -> Fernet:
+    """Wrap ``key`` in Fernet; malformed keys raise a clean error (F1)."""
+    try:
+        return Fernet(key)
+    except Exception as exc:
+        raise CredentialStoreError(
+            "The stored encryption key is malformed; sealed data cannot be "
+            f"opened ({exc.__class__.__name__}). Check {PASSPHRASE_ENV} or "
+            "your system keyring."
+        ) from None
+
+
+def _decode_kdf_salt(salt_b64: str) -> bytes:
+    """Decode an envelope's KDF salt; corruption raises a clean error (F1)."""
+    try:
+        salt = base64.b64decode(salt_b64, validate=True)
+    except Exception:
+        raise CredentialStoreError(
+            "Sealed data has an invalid KDF salt and cannot be opened."
+        ) from None
+    if not salt:
+        raise CredentialStoreError(
+            "Sealed data has an invalid KDF salt and cannot be opened."
+        )
+    return salt
 
 
 def _keyring_read_entry(keyring_mod: Any) -> str | None:
@@ -225,10 +246,6 @@ class CredentialStore:
 
     # -- envelope primitives ---------------------------------------------------
 
-    def seal_bytes(self, data: bytes) -> bytes:
-        """Seal ``data`` into a versioned envelope using the resolution order."""
-        return self._seal_payload(data)
-
     def open_bytes(self, blob: bytes) -> bytes:
         """Open a sealed envelope, decrypting with the RECORDED key source."""
         envelope = _parse_envelope(blob)
@@ -267,7 +284,7 @@ class CredentialStore:
             return None
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"{path.name} is corrupted ({exc.__class__.__name__})."
             ) from None
@@ -329,10 +346,6 @@ class CredentialStore:
             raise CredentialStoreError("Credentials file is corrupted.")
         return data.get("username", ""), data.get("password", "")
 
-    def exists(self) -> bool:
-        """Check if stored credentials exist."""
-        return self.credentials_file.exists()
-
     def _load_and_migrate_legacy(self, blob: bytes) -> tuple[str, str]:
         """Decrypt legacy raw-Fernet credentials with the keyring key, then
         re-seal them as a v2 envelope recording the keyring source.
@@ -341,7 +354,7 @@ class CredentialStore:
         """
         key = _keyring_key(create=False)
         try:
-            plaintext = Fernet(key).decrypt(blob)
+            plaintext = _fernet_from_key(key).decrypt(blob)
             data = json.loads(plaintext.decode("utf-8"))
         except InvalidToken:
             raise CredentialStoreError(
@@ -399,39 +412,56 @@ class CredentialStore:
                 )
             salt = os.urandom(16)
             doc["kdf_salt"] = base64.b64encode(salt).decode("ascii")
-            fernet = Fernet(_derive_passphrase_key(passphrase, salt))
+            fernet = _fernet_from_key(_derive_passphrase_key(passphrase, salt))
         else:
-            fernet = Fernet(_keyring_key(create=True))
+            fernet = _fernet_from_key(_keyring_key(create=True))
         doc["ciphertext"] = fernet.encrypt(plaintext).decode("ascii")
         return json.dumps(doc, indent=2).encode("utf-8")
 
     def _open_envelope(self, envelope: dict[str, Any]) -> bytes:
+        """Decrypt a parsed envelope; every failure is a clean error.
+
+        Corrupted salts, malformed keys, non-ascii ciphertext, and raw
+        cryptography errors all surface as :class:`CredentialStoreError` —
+        never as tracebacks (binascii/Unicode/ValueError).
+        """
         source = envelope.get("key_source")
-        if source == "passphrase":
-            salt_b64 = envelope.get("kdf_salt")
-            if not isinstance(salt_b64, str):
-                raise CredentialStoreError(
-                    "Sealed data is missing its KDF salt and cannot be opened."
-                )
-            passphrase = _passphrase_from_env()
-            if passphrase is None:
-                raise CredentialStoreError(
-                    f"This data was sealed with {PASSPHRASE_ENV}; set the same "
-                    "passphrase to decrypt it."
-                )
-            key = _derive_passphrase_key(passphrase, base64.b64decode(salt_b64))
-        elif source == "keyring":
-            key = _keyring_key(create=False)
-        else:
-            raise CredentialStoreError(
-                "Sealed data records an unknown key source and cannot be opened."
-            )
         try:
-            return Fernet(key).decrypt(str(envelope["ciphertext"]).encode("ascii"))
+            if source == "passphrase":
+                salt_b64 = envelope.get("kdf_salt")
+                if not isinstance(salt_b64, str):
+                    raise CredentialStoreError(
+                        "Sealed data is missing its KDF salt and cannot be opened."
+                    )
+                passphrase = _passphrase_from_env()
+                if passphrase is None:
+                    raise CredentialStoreError(
+                        f"This data was sealed with {PASSPHRASE_ENV}; set the same "
+                        "passphrase to decrypt it."
+                    )
+                key = _derive_passphrase_key(passphrase, _decode_kdf_salt(salt_b64))
+            elif source == "keyring":
+                key = _keyring_key(create=False)
+            else:
+                raise CredentialStoreError(
+                    "Sealed data records an unknown key source and cannot be opened."
+                )
+            fernet = _fernet_from_key(key)
+            ciphertext = envelope.get("ciphertext")
+            if not isinstance(ciphertext, str):
+                raise CredentialStoreError(
+                    "Sealed data has no readable ciphertext and cannot be opened."
+                )
+            return fernet.decrypt(ciphertext.encode("ascii"))
         except InvalidToken:
             raise CredentialStoreError(
                 "Decryption failed — the data was sealed with a different key. "
                 f"Check {PASSPHRASE_ENV} or your system keyring."
+            ) from None
+        except (binascii.Error, UnicodeError, ValueError) as exc:
+            raise CredentialStoreError(
+                "Sealed data is corrupted "
+                f"({exc.__class__.__name__}) and cannot be opened."
             ) from None
 
 

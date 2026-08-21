@@ -565,11 +565,8 @@ def test_auth_status_works_after_login(
 
     cookies = _make_d2l_cookies()
 
-    import lighthouse_cli.config as config_mod
     cookies_path = config_dir / "cookies.json"
     cookies_path.write_text(json.dumps(cookies))
-    monkeypatch.setattr(config_mod, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(config_mod, "COOKIE_FILE", cookies_path)
 
     with patch("lighthouse_cli.commands.LighthouseClient") as mock_commands:
         with patch.object(auth_mod, "LighthouseClient") as mock_auth:
@@ -606,6 +603,24 @@ def test_wrong_credentials_error(
     assert result.exit_code == 1
     assert "50126" in result.output or "Invalid" in result.output
     assert "Traceback" not in result.output
+
+
+def test_unexpected_error_never_leaks_exception_text(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A third-party exception renders as `Unexpected error (<Type>)` + guidance —
+    never raw str(exc), which may embed URLs or tokens."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    leaky = RuntimeError("https://login.microsoftonline.com/token?code=SECRET")
+    with _mock_sso(login_side_effect=leaky):
+        result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
+
+    assert result.exit_code == 1
+    assert "Unexpected error (RuntimeError)" in result.output
+    assert "SECRET" not in result.output
+    assert "microsoftonline" not in result.output
 
 
 def test_wrong_totp_error(
@@ -661,7 +676,10 @@ def test_unexpected_failure_wrapped_cleanly(
     assert result.exit_code == 1
     data = json.loads(result.output)
     assert data["success"] is False
-    assert "kaboom" in data["error"]
+    # F18: only the exception TYPE is surfaced — raw str(exc) may embed
+    # URLs/tokens, so the message text must not appear.
+    assert "Unexpected error (RuntimeError)" in data["error"]
+    assert "kaboom" not in result.output
     assert "Traceback" not in result.output
     assert "Traceback" not in result.stderr
 
@@ -915,16 +933,25 @@ def test_password_not_logged(
 
 
 def test_totp_not_persisted(
-    isolated_config: Path,
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TOTP code is never written to cookies.json."""
-    cookies = _make_d2l_cookies()
-    cookies_path = isolated_config / "cookies.json"
-    cookies_path.write_text(json.dumps(cookies))
+    """A real (mocked-SSO) login never leaks the TOTP into the sealed artifact."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    totp = "654321SENTINEL"
 
-    content = cookies_path.read_text()
-    assert "123456" not in content
-    assert "totp" not in content.lower()
+    with _mock_sso():
+        result = _invoke_login(cli_runner, ["--totp", totp])
+
+    assert result.exit_code == 0
+    cookies_path = isolated_config / "cookies.json"
+    assert cookies_path.exists()
+    raw = cookies_path.read_bytes()
+    # The artifact on disk is a sealed envelope; the code must appear in it
+    # neither as plaintext nor URL-encoded.
+    assert totp.encode() not in raw
+    import urllib.parse
+    assert urllib.parse.quote(totp).encode() not in raw
 
 
 # ---------------------------------------------------------------------------
@@ -1057,10 +1084,6 @@ def test_config_directory_auto_created(
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-
-    import lighthouse_cli.config as config_module
-    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(config_module, "COOKIE_FILE", config_dir / "cookies.json")
 
     with _mock_sso():
         result = _invoke_login(cli_runner, ["--totp", "123456"])

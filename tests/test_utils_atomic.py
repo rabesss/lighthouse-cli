@@ -61,19 +61,54 @@ class TestAtomicWriteModes:
         self, tmp_path: os.PathLike, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """0600-intended files must never be briefly world-readable: the temp
-        carries its final mode from creation, before any bytes are written."""
+        is created WITH its final mode — spy on the os.open(..., mode) call."""
         import lighthouse_cli.utils as utils_mod
 
         observed: list[int] = []
-        real_replace = os.replace
+        real_open = os.open
 
-        def spy_replace(src, dst):
-            observed.append(os.stat(src).st_mode & 0o777)
-            return real_replace(src, dst)
+        def spy_open(path, flags, mode=0o666, **kwargs):
+            if str(path).endswith(".tmp") and (flags & os.O_CREAT):
+                observed.append(mode & 0o777)
+            return real_open(path, flags, mode, **kwargs)
 
-        monkeypatch.setattr(utils_mod.os, "replace", spy_replace)
+        monkeypatch.setattr(utils_mod.os, "open", spy_open)
         atomic_write(tmp_path / "secret.txt", "payload", mode=0o600)
-        assert observed == [0o600]
+        assert observed == [0o600], "temp must be created with 0600 in one shot"
+
+
+class TestAtomicWriteCollisionRetry:
+    def test_eexist_collision_retries_with_new_temp(
+        self, tmp_path: os.PathLike, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An O_EXCL collision retries with a fresh name and never unlinks
+        another writer's in-flight temp."""
+        import uuid as uuid_mod
+
+        import lighthouse_cli.utils as utils_mod
+
+        colliding = tmp_path / "target.txt.stolen.tmp"
+        colliding.write_bytes(b"other writer's payload")
+
+        real_uuid4 = uuid_mod.uuid4
+        counter = {"n": 0}
+
+        class FakeUUID:
+            def __init__(self, hex_value: str) -> None:
+                self.hex = hex_value
+
+        def fake_uuid4() -> FakeUUID:
+            counter["n"] += 1
+            if counter["n"] == 1:
+                return FakeUUID("stolen")
+            return real_uuid4()
+
+        monkeypatch.setattr(utils_mod.uuid, "uuid4", fake_uuid4)
+        atomic_write(tmp_path / "target.txt", "mine", mode=0o600)
+
+        # The other writer's temp is untouched; our data landed atomically.
+        assert colliding.read_bytes() == b"other writer's payload"
+        assert (tmp_path / "target.txt").read_text() == "mine"
 
 
 # ---------------------------------------------------------------------------

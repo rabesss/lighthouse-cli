@@ -112,6 +112,7 @@ def test_corrupted_credentials_fallback(
 
 def test_passphrase_sealed_survives_keyring_loss(
     config_dir: Path,
+    credentials_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decryption uses the RECORDED key source: a passphrase-sealed artifact
@@ -121,10 +122,15 @@ def test_passphrase_sealed_survives_keyring_loss(
     store = CredentialStore()
     store.save("user@manipal.edu", "secret_password")
 
+    # The premise below IS the passphrase source — pin it explicitly.
+    doc = json.loads(credentials_path.read_text())
+    assert doc["key_source"] == "passphrase"
+
     import sys as _sys
     monkeypatch.setitem(_sys.modules, "keyring", None)  # import becomes unavailable
     store2 = CredentialStore()
     assert store2.load() == ("user@manipal.edu", "secret_password")
+
 
 def test_keyring_sealed_fails_cleanly_on_wrong_key(
     config_dir: Path,
@@ -235,17 +241,6 @@ def test_config_dir_env_var_respected(
     assert not (tmp_path / ".config" / "lighthouse-cli" / "credentials.json").exists()
 
 
-def test_store_exists(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """CredentialStore.exists() returns True when credentials file exists."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
-    assert not store.exists()
-
-    store.save("user@manipal.edu", "secret")
-    assert store.exists()
-
-
 # ---------------------------------------------------------------------------
 # Additional tests for CredentialStore
 # ---------------------------------------------------------------------------
@@ -258,4 +253,75 @@ def test_store_no_credentials_file_returns_none(monkeypatch: pytest.MonkeyPatch,
 
     store = CredentialStore()
     assert store.load() is None
-    assert not store.exists()
+
+
+# ---------------------------------------------------------------------------
+# F1: any malformed artifact or key raises CredentialStoreError, never a raw
+# binascii.Error / UnicodeEncodeError / ValueError traceback.
+# ---------------------------------------------------------------------------
+
+def _sealed_doc(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Save credentials and return the parsed sealed envelope."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    CredentialStore().save("user@manipal.edu", "secret_password")
+    return json.loads((config_dir / "credentials.json").read_text())
+
+
+def test_truncated_kdf_salt_raises_clean_error(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["kdf_salt"] = doc["kdf_salt"][: len(doc["kdf_salt"]) // 2]  # breaks padding
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+
+def test_non_base64_kdf_salt_raises_clean_error(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["kdf_salt"] = "!!!not-base64!!!"
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+
+def test_non_ascii_ciphertext_raises_clean_error(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["ciphertext"] = "gAAAA-ünïcödé-ciphertext"
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+def test_corrupt_keyring_entry_raises_clean_error(
+    config_dir: Path,
+    credentials_path: Path,
+    fake_keyring: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hand-mangled keyring entry wraps Fernet's raw ValueError cleanly."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    fake_keyring.set_password("lighthouse-cli", "credential-key", "not-a-fernet-key")
+    credentials_path.write_text(json.dumps({
+        "v": 2, "key_source": "keyring", "ciphertext": "gAAAAA",
+    }))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+
+# ---------------------------------------------------------------------------
+# F15: the passphrase-derived-key cache is bounded.
+# ---------------------------------------------------------------------------
+
+def test_passphrase_key_cache_is_bounded(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lighthouse_cli.credential_store import _derive_passphrase_key
+
+    for i in range(40):
+        _derive_passphrase_key(f"pass-{i}", bytes([i]) * 16)
+    info = _derive_passphrase_key.cache_info()
+    assert info.currsize <= 32

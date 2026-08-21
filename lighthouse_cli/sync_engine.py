@@ -13,8 +13,9 @@ mode:
               file-body fetches, NO filesystem writes and NO manifest
               mutation (``FORCE`` + ``PLAN`` therefore deletes nothing)
 
-The engine NEVER prints and NEVER prompts. Every outcome — including
-warnings — is returned as data for the caller to render.
+The engine emits no human output to stdout; assignment-phase failures log
+to stderr outside the topic pipeline (assignments.py).  Every outcome —
+including warnings — is returned as data for the caller to render.
 """
 
 from __future__ import annotations
@@ -209,9 +210,11 @@ def run_course(
 
         if mode is Mode.SYNC and existing is not None:
             if existing.get("last_modified") == (topic.get("last_modified") or ""):
-                skipped.append(build_entry(tid, existing.get("filename", ""), existing.get("filename", ""), existing))
+                filename = existing.get("filename", "")
+                rel_path = str(Path(topic["path"]).parent / filename)
+                skipped.append(build_entry(tid, filename, rel_path, existing))
                 if file_hash := existing.get("sha256", ""):
-                    _track_duplicate(sha_hashes, file_hash, tid, existing.get("filename", ""))
+                    _track_duplicate(sha_hashes, file_hash, tid, filename)
                 continue
             target_list = updated
         else:

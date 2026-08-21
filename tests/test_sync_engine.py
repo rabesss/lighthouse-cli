@@ -477,7 +477,7 @@ class TestExitMatrix:
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg), _scoped_client():
             result = runner.invoke(cli, ["sync", "--semester", "100", "-o", str(output_dir), "--json"])
         assert result.exit_code == 1, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)  # stdout stays pure JSON
         assert any(e.get("type") == "manifest_corrupt"
                    for c in data["courses"] for e in c["errors"])
 
@@ -554,6 +554,97 @@ class TestDryRunCliFixes:
         assert result.exit_code == 0, result.output
         assert "Would download 1 files" in result.output
         assert "[1110] f.pdf" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Review-fix regressions (PR #12 triage F6/F7/F9)
+# ---------------------------------------------------------------------------
+
+class TestReviewFixRegressions:
+    @pytest.fixture
+    def runner(self) -> CliRunner:
+        return CliRunner()
+
+    def test_skipped_entry_reports_module_relative_path(self, root):
+        """SYNC skips carry the module-relative path, not the bare filename."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+        )
+        _seed_manifest(root / "Test-44347", {"100": _mentry(filename="file.pdf")})
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["path"] == "Mod/file.pdf"
+        assert not client.body_calls()
+
+    def test_skipped_entries_still_feed_duplicate_detection(self, root):
+        """The F9 path rewrite must not drop SHA-256 tracking of skips."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "a.pdf", "File", LM_OLD), (200, "b.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+        )
+        _seed_manifest(root / "Test-44347", {
+            "100": _mentry(filename="a.pdf", sha="same"),
+            "200": _mentry(filename="b.pdf", sha="same"),
+        })
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+        assert len(result["skipped"]) == 2
+        assert len(result["duplicates"]) == 2
+        assert result["skipped"][0]["path"] == "Mod/a.pdf"
+
+    def test_multi_json_unknown_types_warning_goes_to_stderr(self, tmp_path):
+        """Multi-course --json renders engine warnings on stderr; stdout stays pure JSON."""
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        cfg = tmp_path / "course-config.json"
+        cfg.write_text(json.dumps({"tracked_courses": {
+            "111": {"name": "Course A", "semester": "Sem I"}}}))
+        runner = CliRunner()
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg), _scoped_client():
+            result = runner.invoke(
+                cli, ["download", "--semester", "100", "-o", str(output_dir),
+                      "--types", "htm", "--json"])
+        data = json.loads(result.stdout)  # stdout parses as JSON only
+        assert data["summary"]["courses_checked"] == 1
+        assert any("Unknown content type" in w for w in result.stderr.splitlines())
+
+    def test_empty_course_human_exits_1_on_recorded_errors(self, runner, tmp_path):
+        """Empty branch follows the uniform policy: recorded errors → exit 1."""
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        course_dir = output_dir / "Course A-111"
+        course_dir.mkdir(parents=True)
+        (course_dir / MANIFEST_FILENAME).write_text("not valid json{")
+        with _scoped_client(toc=lambda cid: {"Modules": []}):
+            result = runner.invoke(cli, ["sync", "111", "-o", str(output_dir)])
+        assert result.exit_code == 1, result.output
+
+    def test_empty_course_single_sync_json_carries_errors(self, runner, tmp_path):
+        """The empty sync schema populates its existing errors key instead of []"""
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        course_dir = output_dir / "Course A-111"
+        course_dir.mkdir(parents=True)
+        (course_dir / MANIFEST_FILENAME).write_text("not valid json{")
+        with _scoped_client(toc=lambda cid: {"Modules": []}):
+            result = runner.invoke(cli, ["sync", "111", "-o", str(output_dir), "--json"])
+        data = json.loads(result.stdout)
+        assert result.exit_code == 1
+        assert data["errors"], "empty-course JSON must surface the manifest error"
+        assert set(data["errors"][0]) <= {"topic_id", "error"}
+
+    def test_empty_course_single_download_json_counts_errors(self, runner, tmp_path):
+        """The empty download schema's numeric errors reflects recorded errors."""
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        course_dir = output_dir / "Course A-111"
+        course_dir.mkdir(parents=True)
+        (course_dir / MANIFEST_FILENAME).write_text("not valid json{")
+        with _scoped_client(toc=lambda cid: {"Modules": []}):
+            result = runner.invoke(cli, ["download", "111", "-o", str(output_dir), "--json"])
+        data = json.loads(result.stdout)
+        assert result.exit_code == 1
+        assert data["errors"] == 1
 
 
 # ---------------------------------------------------------------------------

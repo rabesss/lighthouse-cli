@@ -66,8 +66,10 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
     if result["empty"]:
         if action == "sync":
             return {"course_id": result["org_id"], "course_name": result["course_name"],
-                    "downloaded": [], "skipped": [], "updated": [], "orphaned": [], "errors": []}
-        return {"course_id": result["org_id"], "files": [], "downloaded": 0, "errors": 0}
+                    "downloaded": [], "skipped": [], "updated": [], "orphaned": [],
+                    "errors": [_single_error(e) for e in result["errors"]]}
+        return {"course_id": result["org_id"], "files": [], "downloaded": 0,
+                "errors": len(result["errors"])}
 
     assignments = result["assignments"]
     data: dict[str, Any] = {"course_id": result["org_id"], "course_name": result["course_name"], "folder": str(result["dest"])}
@@ -126,7 +128,9 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
         return 0
     if result["empty"]:
         print("No downloadable files found.")
-        return 0
+        # Uniform policy: a recorded failure (e.g. corrupt manifest surfaced
+        # on an empty course) is an error-class exit even with no downloads.
+        return 1 if (result["errors"] or result["assignments"]["errors"]) else 0
 
     assignments = result["assignments"]
     failed = 1 if (result["errors"] or assignments["errors"]) else 0
@@ -209,6 +213,9 @@ def _run_and_render_multi(
     if json_output:
         courses = []
         for result in results:
+            # Engine warnings reach stderr in every mode — an unknown
+            # --types value must never change the downloaded set silently.
+            _print_warnings(result)
             if result["mode"] is Mode.PLAN:
                 courses.append({
                     "course_id": result["org_id"], "course_name": result["course_name"],

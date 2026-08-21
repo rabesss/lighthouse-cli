@@ -291,27 +291,48 @@ class TestNoSecretsInErrorsAndOutput:
     def test_cli_error_output_carries_no_secret_values(
         self, sealed_dir: Path, cli_runner: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failing auth login prints no sentinel to stdout or stderr."""
+        """A failing auth login prints no sentinel to stdout or stderr.
+
+        Hermetic: requests.Session is patched with an immediately failing
+        session so no real network I/O happens with sentinel credentials.
+        """
         from lighthouse_cli.cli import cli as root_cli
 
         monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
         monkeypatch.setenv("LIGHTHOUSE_PASSWORD", S_PASSWORD)
 
-        result = cli_runner.invoke(
-            root_cli,
-            ["auth", "login", "--totp", S_TOTP, "--json"],
-            catch_exceptions=False,
-        )
+        dead = ScriptedSession()
+        dead.enqueue(requests.ConnectionError("boom"))
+
+        with patch("requests.Session", return_value=dead):
+            result = cli_runner.invoke(
+                root_cli,
+                ["auth", "login", "--totp", S_TOTP, "--json"],
+                catch_exceptions=False,
+            )
 
         assert result.exit_code == 1
         combined = (result.stdout or "") + (result.stderr or "")
         for sentinel in ALL_SENTINELS:
             assert sentinel not in combined
 
+    def test_login_plan_repr_carries_no_totp_value(self) -> None:
+        """LoginPlan marks its secret-bearing field repr=False (P0 redaction)."""
+        from lighthouse_cli.auth import LoginPlan
+
+        plan = LoginPlan("fresh", S_TOTP, False, False)
+        rendered = repr(plan)
+        assert "LoginPlan" in rendered
+        for sentinel in ALL_SENTINELS:
+            assert sentinel not in rendered
+        assert str(plan) == rendered
+        # The value itself is still there — only its representation is masked.
+        assert plan.totp_code == S_TOTP
+
     def test_traceback_path_carries_no_secret_values(
-        self, sealed_dir: Path, capsys: pytest.CaptureFixture[str]
+        self, sealed_dir: Path
     ) -> None:
-        """Even the outer handler's traceback dump shows no sentinel values."""
+        """Even a raw traceback of the failing call shows no sentinel values."""
         # Create a pending checkpoint first (defer login), then break the network.
         session = ScriptedSession()
         session.enqueue(
@@ -333,13 +354,17 @@ class TestNoSecretsInErrorsAndOutput:
         with patch("requests.Session", return_value=dead):
             client2 = MicrosoftSSOClient()
             try:
-                with pytest.raises(requests.ConnectionError):
+                # exc_info MUST be captured inside the raises block — after
+                # it exits sys.exc_info() is cleared and format_exc() is
+                # vacuously "NoneType: None".
+                with pytest.raises(requests.ConnectionError) as exc_info:
                     client2.complete_mfa_pending(S_TOTP)
             finally:
                 client2.close()
 
         import traceback
 
-        tb = traceback.format_exc()
+        tb = "".join(traceback.format_exception(exc_info.value))
         for sentinel in ALL_SENTINELS:
             assert sentinel not in tb
+        assert tb != "NoneType: None\n"

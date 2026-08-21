@@ -10,15 +10,22 @@ from __future__ import annotations
 import os
 import sys
 
-from lighthouse_cli.ms_auth import MicrosoftSSOClient, MicrosoftSSOError, UserProof
+from lighthouse_cli.ms_auth import MicrosoftSSOClient, MicrosoftSSOError
+from lighthouse_cli.ms_mfa import MfaProbeResult
 
 
-def _print_proofs(proofs: list[UserProof]) -> None:
-    if not proofs:
-        print("No MFA page returned (account may not require 2FA on this login).")
-        print("  (no arrUserProofs — legacy form MFA page)")
+def _print_proofs(result: MfaProbeResult) -> None:
+    if result.page == "no_mfa":
+        print("No MFA required: sign-in completed without a verification page.")
         return
-    for p in proofs:
+    if result.page == "legacy_form":
+        print("Legacy form-based MFA page detected: 2FA IS required for this")
+        print("  account, but the page exposes no arrUserProofs method list.")
+        return
+    if not result.proofs:
+        print("ConvergedTFA page returned no registered methods (empty arrUserProofs).")
+        return
+    for p in result.proofs:
         default = " [default]" if p.is_default else ""
         print(f"  - {p.auth_method_id}: {p.display}{default}")
 
@@ -35,8 +42,8 @@ def main() -> int:
 
     client = MicrosoftSSOClient()
     try:
-        proofs = client.probe_mfa_methods(username, password)
-        _print_proofs(proofs)
+        result = client.probe_mfa_methods(username, password)
+        _print_proofs(result)
         return 0
     except MicrosoftSSOError as exc:
         print(exc, file=sys.stderr)

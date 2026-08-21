@@ -64,6 +64,7 @@ from lighthouse_cli.config import (
     missing_cookie_names,
 )
 from lighthouse_cli.ms_mfa import (  # noqa: F401
+    MfaProbeResult,
     UserProof,
     _parse_user_proofs,
     _prompt_user_proof_choice,
@@ -122,7 +123,7 @@ class Transition(NamedTuple):
 
     kind: str
     url: str = ""
-    data: dict[str, str] = {}
+    data: dict[str, str] | None = None
     saml_response: str | None = None
 
 
@@ -571,7 +572,9 @@ class MicrosoftSSOClient:
                 )
                 step_snap = self._advance_to_saml(
                     self._submit_kmsi(kmsi_snap),
-                    str(mfa_config.get("urlPost") or mfa_page_url),
+                    # Resolve a possibly tenant-relative urlPost against the
+                    # snapshot URL so the walk never bases on a relative URL.
+                    urljoin(kmsi_snap.url, str(mfa_config.get("urlPost") or mfa_page_url)),
                 )
             else:
                 skip_end_auth = bool(
@@ -704,14 +707,15 @@ class MicrosoftSSOClient:
                 recovery="Try again or check your account status.",
             )
         self._step_post_saml(saml_response, saml_html)
-
         # Step 6: Extract D2L cookies
         return self._extract_d2l_cookies()
 
-    def probe_mfa_methods(self, username: str, password: str) -> list[UserProof]:
+    def probe_mfa_methods(self, username: str, password: str) -> MfaProbeResult:
         """Run the flow up to the MFA page and report registered methods.
 
-        Stops before any code submission; never sends BeginAuth.
+        Stops before any code submission; never sends BeginAuth.  The result
+        distinguishes accounts that need no verification at all from tenants
+        serving the legacy form-based MFA page (no arrUserProofs).
         """
         ms_url = self._step_initiate_saml()
         config = self._step_get_ms_config(ms_url)
@@ -723,9 +727,9 @@ class MicrosoftSSOClient:
             if is_error_page(snap):
                 code, msg = _extract_error_code_and_msg(snap.html)
                 raise build_sso_error(code, msg, "POST credentials")
-            return []
+            return MfaProbeResult(page="no_mfa", proofs=[])
         cfg = _extract_config_json(snap.html) or {}
-        return _parse_user_proofs(cfg)
+        return MfaProbeResult(page="legacy_form", proofs=_parse_user_proofs(cfg))
 
     # -- step implementations ------------------------------------------------------
 
@@ -1394,7 +1398,7 @@ class MicrosoftSSOClient:
                 recovery="Request a new 2FA code and try again.",
             )
 
-        return self._advance_to_saml(snap, str(process_url))
+        return self._advance_to_saml(snap, urljoin(snap.url, str(process_url)))
 
     def _poll_end_auth(
         self,
@@ -1573,7 +1577,7 @@ class MicrosoftSSOClient:
     def _submit_kmsi(self, snapshot: ResponseSnapshot) -> ResponseSnapshot:
         """Execute a classified KMSI/CMSI interrupt submission."""
         t = kmsi_transition(snapshot, snapshot.url)
-        return self._snapshot(self._post(t.url, data=t.data))
+        return self._snapshot(self._post(t.url, data=t.data or {}))
 
     def _advance_to_saml(
         self, snapshot: ResponseSnapshot, base_url: str
@@ -1595,7 +1599,7 @@ class MicrosoftSSOClient:
                 continue
 
             if transition.kind == "hiddenform":
-                snapshot = self._snapshot(self._post(transition.url, data=transition.data))
+                snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
                 base_url = snapshot.url
                 continue
 
@@ -1603,7 +1607,7 @@ class MicrosoftSSOClient:
                 self._checkpoint_mfa_pending(
                     kmsi_checkpoint={"url": snapshot.url, "html": snapshot.html},
                 )
-                snapshot = self._snapshot(self._post(transition.url, data=transition.data))
+                snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
                 base_url = snapshot.url
                 continue
 

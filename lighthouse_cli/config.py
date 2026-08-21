@@ -44,9 +44,6 @@ COOKIE_NAMES = (
 
 # Paths (defaults; storage functions resolve LIGHTHOUSE_CONFIG_DIR per call)
 CONFIG_DIR = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
-COOKIE_FILE = CONFIG_DIR / "cookies.json"
-MFA_PENDING_FILE = CONFIG_DIR / "mfa_pending.json"
-MFA_PENDING_VERSION = FORMAT_VERSION
 DEFAULT_DOWNLOAD_DIR = Path("~/Downloads/lighthouse").expanduser()
 
 # Cookie age warning threshold (days)
@@ -54,12 +51,6 @@ _COOKIE_AGE_WARNING_DAYS = 4
 
 #: Plaintext metadata allowed beside the sealed payload in mfa_pending.json.
 _PENDING_METADATA_KEYS = frozenset({"created_at", "mfa_method"})
-
-
-def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
-    """Return required D2L cookie names that are absent or empty."""
-    return [name for name in COOKIE_NAMES if not cookies.get(name)]
-
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -81,9 +72,6 @@ def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
         if value is None or not str(value).strip():
             missing.append(name)
     return missing
-
-
-# ---------------------------------------------------------------------------
 
 
 def load_cookies() -> dict[str, str]:
@@ -119,20 +107,24 @@ def load_cookies() -> dict[str, str]:
 
     # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
     cookies = _cookies_from_legacy_doc(doc)
-    _try_upgrade_plaintext_cookies(store, cookies)
+    _try_upgrade_plaintext_cookies(store, cookies, extracted_at=doc.get("extracted_at"))
     return cookies
 
 
-def save_cookies(cookies: dict[str, str]) -> None:
+def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) -> None:
     """Persist cookies to disk atomically, sealed, with owner-only permissions.
 
     Wraps cookies with an ``extracted_at`` ISO-8601 timestamp (plaintext
-    metadata beside the sealed payload).
+    metadata beside the sealed payload).  ``extracted_at`` overrides the
+    fresh timestamp — used by the legacy auto-upgrade so migrated cookies
+    keep their original age.
     """
     store = CredentialStore()
     store.write_artifact(
         store.cookie_file,
-        metadata={"extracted_at": datetime.now(timezone.utc).isoformat()},
+        metadata={
+            "extracted_at": extracted_at or datetime.now(timezone.utc).isoformat()
+        },
         secret={"cookies": dict(cookies)},
     )
 
@@ -173,14 +165,23 @@ def _filter_cookie_names(source: dict) -> dict[str, str]:
     return {k: v for k, v in source.items() if k in COOKIE_NAMES}
 
 
-def _try_upgrade_plaintext_cookies(store: CredentialStore, cookies: dict[str, str]) -> None:
-    """Re-save legacy plaintext cookies sealed — only when a key source exists."""
+def _try_upgrade_plaintext_cookies(
+    store: CredentialStore,
+    cookies: dict[str, str],
+    *,
+    extracted_at: str | None = None,
+) -> None:
+    """Re-save legacy plaintext cookies sealed — only when a key source exists.
+
+    The original ``extracted_at`` timestamp rides along so the upgraded
+    document keeps the legacy cookies' age (staleness warnings stay honest).
+    """
     try:
         store.preflight()
     except CredentialStoreError:
         return
     try:
-        save_cookies(cookies)
+        save_cookies(cookies, extracted_at=extracted_at)
     except (CredentialStoreError, OSError):
         return
 

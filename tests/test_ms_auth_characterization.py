@@ -19,7 +19,6 @@ from unittest.mock import patch
 import pytest
 import requests
 
-import lighthouse_cli.config as config_mod
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
     MfaPendingError,
@@ -224,12 +223,9 @@ def scripted() -> ScriptedSession:
 
 @pytest.fixture
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point config storage at a temp dir (env + module globals for compat)."""
+    """Point config storage at a temp dir (LIGHTHOUSE_CONFIG_DIR env only)."""
     d = tmp_path / "config"
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(d))
-    monkeypatch.setattr(config_mod, "CONFIG_DIR", d)
-    monkeypatch.setattr(config_mod, "COOKIE_FILE", d / "cookies.json")
-    monkeypatch.setattr(config_mod, "MFA_PENDING_FILE", d / "mfa_pending.json")
     return d
 
 
@@ -328,8 +324,15 @@ class TestPasswordFlow:
 
 
 class TestUsernameBootstrap:
-    def test_http_bootstrap_when_playwright_missing(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+    def test_http_bootstrap_when_playwright_missing(
+        self, scripted: ScriptedSession, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Without Playwright the browser pre-password requests are mirrored over HTTP."""
+        # Force the ImportError gate in _step_prepare_username — otherwise an
+        # environment with playwright installed takes the browser branch.
+        monkeypatch.setitem(sys.modules, "playwright", None)
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
         scripted.enqueue(
             # Step 1-2
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),

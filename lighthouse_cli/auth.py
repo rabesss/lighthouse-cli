@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .api import LighthouseClient
@@ -77,7 +77,14 @@ def _clean_auth_command(fn: Callable[..., int]) -> Callable[..., int]:
         except KeyboardInterrupt:
             return _interrupted(json_output)
         except Exception as exc:  # deliberate last-resort guard
-            return _auth_error(str(exc) or exc.__class__.__name__, json_output)
+            # Never forward raw third-party exception text — str(exc) may
+            # embed URLs, tokens, or page content. Only the type is shown.
+            return _auth_error(
+                f"Unexpected error ({exc.__class__.__name__}). "
+                "Re-run the command; if it persists, check your connection "
+                "or report the issue with the steps to reproduce.",
+                json_output,
+            )
 
     return wrapper
 
@@ -181,7 +188,7 @@ class LoginPlan:
     """
 
     mode: str
-    totp_code: str | None
+    totp_code: str | None = field(repr=False)
     read_totp_after_challenge: bool
     defer_mfa_to_pending: bool
 
@@ -392,6 +399,15 @@ def cmd_auth_login(
     except ValueError as exc:
         return _auth_error(str(exc), json_output, 2)
 
+    # --- Preflight the encryption key source ---
+    # Login reads any pending checkpoint below and sends BeginAuth (a side
+    # effect); both require a usable key source — fail here with an
+    # actionable message BEFORE reading sealed state.
+    try:
+        CredentialStore().preflight()
+    except CredentialStoreError as exc:
+        return _auth_error(str(exc), json_output)
+
     # Resume the pending MFA session only when the provided code belongs to it.
     # An explicit --mfa-method that differs from the pending session (e.g. an
     # offline app TOTP after a stale SMS pending) starts a fresh flow instead.
@@ -404,7 +420,7 @@ def cmd_auth_login(
         interactive=interactive,
     )
     if plan.mode == "resume":
-        return cmd_auth_verify(plan.totp_code or "", json_output=json_output)
+        return cmd_auth_verify(plan.totp_code, json_output=json_output)
 
     def _on_password_accepted() -> None:
         if json_output or not interactive:
@@ -421,14 +437,6 @@ def cmd_auth_login(
             print("MFA preference: text message (--mfa-method sms).", flush=True)
         elif resolved_mfa_method == MFA_METHOD_CHOOSE:
             print("You will be asked to pick a verification method.", flush=True)
-
-    # --- Preflight the encryption key source ---
-    # Login sends BeginAuth (a side effect) and must seal cookies or the
-    # pending checkpoint afterwards; fail here with an actionable message.
-    try:
-        CredentialStore().preflight()
-    except CredentialStoreError as exc:
-        return _auth_error(str(exc), json_output)
 
     # --- Authenticate via HTTP ---
     sso_client = MicrosoftSSOClient()
