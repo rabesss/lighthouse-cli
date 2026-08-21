@@ -476,6 +476,9 @@ def cmd_auth_status(json_output: bool = False) -> int:
     client = LighthouseClient()
     cookies = client.cookies
     if not cookies:
+        if json_output:
+            _output_json({"valid": False, "error": "No cookies found. Run: lighthouse auth login"})
+            return 1
         return _error("No cookies found. Run: lighthouse auth login")
 
     valid = client.check_auth()
