@@ -836,3 +836,22 @@ class TestFlowRecorder:
         client = MicrosoftSSOClient()
         client._record_flow("GET", "https://x.test/a")
         assert not list(tmp_path.glob("*.jsonl"))  # nothing written anywhere
+
+
+class TestGctMalformedResponse:
+    """A 200/non-JSON GetCredentialType response must not crash the flow."""
+
+    def test_non_json_200_returns_config_unchanged(self, tmp_path):
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        client = MicrosoftSSOClient(flow_log=str(tmp_path / "flow.jsonl"))
+        client._session = ScriptedSession()
+        client._session.enqueue(FakeResponse(200, html="<html>not json</html>"))
+        config = {"sFT": "tok", "sCtx": "ctx", "urlPost": "/common/login",
+                  "urlGetCredentialType": "/common/GetCredentialType",
+                  "_ms_url": "https://login.microsoftonline.com/x"}
+        out = client._step_get_credential_type(config, "user@example.edu")
+        assert out == config  # unchanged, no UnboundLocalError
+        records = [json.loads(l) for l in (tmp_path / "flow.jsonl").read_text().splitlines()]
+        gct = [r for r in records if r["method"] == "GCT"]
+        assert gct and gct[0]["form_fields"] == ["(unparseable)"]

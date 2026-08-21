@@ -1151,6 +1151,7 @@ class MicrosoftSSOClient:
             timeout=self._timeout,
         )
         gct_keys: list[str] = []
+        data: dict[str, Any] | None = None
         if resp.status_code == 200:
             try:
                 data = resp.json()
@@ -1163,7 +1164,7 @@ class MicrosoftSSOClient:
             resp.status_code,
             field_names=gct_keys,
         )
-        if resp.status_code != 200:
+        if resp.status_code != 200 or not isinstance(data, dict):
             return config
 
         updated = dict(config)
