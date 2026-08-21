@@ -47,7 +47,7 @@ def print_table(columns: list[str], rows: list[list[str]], title: str = "") -> N
         return
 
     # Plain-text fallback: columnar alignment
-    widths = [max(len(c), *(len(row[i]) for row in rows)) for i, c in enumerate(columns)]
+    widths = [max([len(c), *(len(row[i]) for row in rows)]) for i, c in enumerate(columns)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     if title:
         print(f"\n{title}")

@@ -12,7 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.cli import cli
-from lighthouse_cli.ms_auth import MicrosoftSSOError, D2L_COOKIE_NAMES
+from lighthouse_cli.ms_auth import MicrosoftSSOError
 
 
 # ---------------------------------------------------------------------------

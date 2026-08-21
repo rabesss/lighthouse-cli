@@ -7,14 +7,7 @@ from __future__ import annotations
 # Constants
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://lighthouse.manipal.edu"
 LOGIN_PATH = "/d2l/lp/auth/saml/login"
-D2L_COOKIE_NAMES = (
-    "d2lSecureSessionVal",
-    "d2lSessionVal",
-    "d2lSameSiteCanaryA",
-    "d2lSameSiteCanaryB",
-)
 
 # CLI / env preference: auto | sms | app
 MFA_METHOD_AUTO = "auto"

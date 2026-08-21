@@ -14,7 +14,13 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://lighthouse.manipal.edu"
+# Canonical D2L origin: the exact host session cookies are set on and filtered for.
+COOKIE_SETTING_HOST = "lighthouse.manipal.edu"
+
+# Domain variants accepted when extracting fresh D2L cookies from a login session jar.
+COOKIE_EXTRACTION_DOMAINS = ("lighthouse.manipal.edu", ".manipal.edu", "manipal.edu")
+
+BASE_URL = f"https://{COOKIE_SETTING_HOST}"
 API_LE = f"{BASE_URL}/d2l/api/le/1.93"
 
 # Cookie names we care about

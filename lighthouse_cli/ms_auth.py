@@ -29,8 +29,6 @@ from bs4 import BeautifulSoup
 # Re-exports from sub-modules (preserve public API)
 # ---------------------------------------------------------------------------
 from lighthouse_cli.ms_errors import (  # noqa: F401
-    BASE_URL,
-    D2L_COOKIE_NAMES,
     LOGIN_PATH,
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
@@ -45,6 +43,12 @@ from lighthouse_cli.ms_errors import (  # noqa: F401
     MicrosoftSSOError,
     MS_ERROR_CODES,
     VALID_MFA_METHODS,
+)
+from lighthouse_cli.config import (
+    BASE_URL,
+    COOKIE_EXTRACTION_DOMAINS,
+    COOKIE_SETTING_HOST,
+    missing_cookie_names,
 )
 from lighthouse_cli.ms_mfa import (  # noqa: F401
     UserProof,
@@ -722,7 +726,7 @@ class MicrosoftSSOClient:
         # When already authenticated at MS level, follow the redirect
         if config.get("_redirect"):
             location = config.get("_location", "")
-            if "lighthouse.manipal.edu" in location or location.startswith("/d2l/"):
+            if COOKIE_SETTING_HOST in location or location.startswith("/d2l/"):
                 resolved = location if location.startswith("http") else f"{BASE_URL}{location}"
                 return self._get(resolved)
             resolved = location if location.startswith("http") else urljoin(
@@ -1495,7 +1499,7 @@ class MicrosoftSSOClient:
     def _extract_d2l_cookies(self) -> dict[str, str]:
         """Step 6: Extract D2L session cookies from the session cookie jar."""
         cookies: dict[str, str] = {}
-        d2l_domains = ("lighthouse.manipal.edu", ".manipal.edu", "manipal.edu")
+        d2l_domains = COOKIE_EXTRACTION_DOMAINS
 
         for cookie in self._session.cookies:
             if cookie.name.startswith("d2l") and any(
@@ -1504,10 +1508,7 @@ class MicrosoftSSOClient:
                 cookie_val = cookie.value if cookie.value is not None else ""
                 cookies[cookie.name] = cookie_val
 
-        missing = [
-            n for n in D2L_COOKIE_NAMES
-            if n not in cookies or not str(cookies.get(n, "")).strip()
-        ]
+        missing = missing_cookie_names(cookies)
         if missing:
             raise MicrosoftSSOError(
                 f"Missing required D2L cookies after SSO: {missing}",

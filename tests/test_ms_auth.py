@@ -20,10 +20,9 @@ from lighthouse_cli.ms_auth import (
     _extract_error_code_and_msg,
     _parse_user_proofs,
     _select_user_proof,
-    BASE_URL,
-    D2L_COOKIE_NAMES,
     MS_ERROR_CODES,
 )
+from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +455,7 @@ class TestFullLoginFlow:
         mock_session.cookies = requests.cookies.RequestsCookieJar()
 
         # Set up cookie jar simulation
-        for name in D2L_COOKIE_NAMES:
+        for name in COOKIE_NAMES:
             mock_session.cookies.set(
                 name, f"test-{name}",
                 domain="lighthouse.manipal.edu",
@@ -497,7 +496,7 @@ class TestFullLoginFlow:
             cookies = client.login("test@manipal.edu", "password123", "123456")
 
         assert len(cookies) == 4
-        for name in D2L_COOKIE_NAMES:
+        for name in COOKIE_NAMES:
             assert name in cookies
         client.close()
 
@@ -559,7 +558,7 @@ class TestFullLoginFlow:
         mock_session.headers = {}
         mock_session.cookies = requests.cookies.RequestsCookieJar()
 
-        for name in D2L_COOKIE_NAMES:
+        for name in COOKIE_NAMES:
             mock_session.cookies.set(name, f"val-{name}", domain="lighthouse.manipal.edu")
 
         resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})

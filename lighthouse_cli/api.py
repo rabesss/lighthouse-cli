@@ -15,7 +15,7 @@ from contextlib import suppress
 
 import requests
 
-from .config import API_LE, BASE_URL, COOKIE_NAMES, load_cookies, missing_cookie_names, save_cookies
+from .config import API_LE, BASE_URL, COOKIE_NAMES, COOKIE_SETTING_HOST, load_cookies, missing_cookie_names, save_cookies
 from .utils import _sanitize_filename
 
 # CDP port for browser-harness
@@ -92,7 +92,7 @@ class LighthouseClient:
             self._session.cookies.set(
                 name,
                 cookies.get(name, ""),
-                domain="lighthouse.manipal.edu",
+                domain=COOKIE_SETTING_HOST,
                 path="/",
             )
 
@@ -515,7 +515,7 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
     import subprocess
 
     result = subprocess.run(
-        ["browser-harness", "cookies", "--port", str(port), "--domain", "lighthouse.manipal.edu"],
+        ["browser-harness", "cookies", "--port", str(port), "--domain", COOKIE_SETTING_HOST],
         capture_output=True,
         text=True,
         timeout=15,
@@ -526,7 +526,7 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
     d2l_cookies = {
         c["name"]: c["value"]
         for c in json.loads(result.stdout)
-        if c["name"].startswith("d2l") and "lighthouse.manipal.edu" in c.get("domain", "")
+        if c["name"].startswith("d2l") and COOKIE_SETTING_HOST in c.get("domain", "")
     }
     if not d2l_cookies:
         raise RuntimeError("No d2l cookies found in browser. Is lighthouse.manipal.edu logged in?")
