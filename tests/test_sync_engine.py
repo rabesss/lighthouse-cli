@@ -17,7 +17,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
-from lighthouse_cli.manifest import MANIFEST_FILENAME
+from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest
 from lighthouse_cli.sync_engine import Mode, flatten_all_topics, run_course
 
 ORG_ID = 44347
@@ -682,7 +682,7 @@ class TestPathContainment:
         )
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
-        assert not Path("/tmp/pwn").exists()
+        assert not (root / "pwn").exists()
 
     def test_dotdot_topic_title_cannot_escape(self, root):
         client = FakeClient(
@@ -694,3 +694,37 @@ class TestPathContainment:
         assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
         for p in (root / "Test-44347").rglob("*"):
             assert p.resolve().is_relative_to((root / "Test-44347").resolve())
+
+    def test_clamp_branch_fires_on_preassembled_escape_path(self, root, tmp_path):
+        """Direct clamp coverage: a hostile *pre-assembled* topic path that
+        bypasses flatten-time sanitization is clamped and reported."""
+        from lighthouse_cli.sync_engine import download_and_persist_topic
+
+        course_root = root / "Test-44347"
+        outside = tmp_path / "outside-target"
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+        manifest = Manifest(course_root / MANIFEST_FILENAME)
+        warnings: list[str] = []
+        _, _, filepath = download_and_persist_topic(
+            client, ORG_ID,
+            {"topic_id": 100, "title": "innocent.pdf",
+             "path": f"../../{outside.name}/evil/f.pdf", "last_modified": LM_NEW},
+            course_root, manifest, warnings=warnings,
+        )
+        assert filepath.resolve().is_relative_to(course_root.resolve())
+        assert not outside.exists()
+        assert any("clamped to the course root" in w for w in warnings)
+
+    def test_windows_reserved_names_prefixed(self):
+        from lighthouse_cli.utils import _sanitize_filename as sanitize
+
+        assert sanitize("CON") == "_CON"
+        assert sanitize("con.pdf") == "_con.pdf"  # stem check, case-insensitive
+        assert sanitize("NUL") == "_NUL"
+        assert sanitize("COM1") == "_COM1"
+        assert sanitize("lpt4.txt") == "_lpt4.txt"
+        assert sanitize("constant.pdf") == "constant.pdf"  # prefix, not stem

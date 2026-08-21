@@ -61,14 +61,25 @@ def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> N
 
 _SANITIZE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Windows reserves these device names regardless of extension (CON.txt is
+# invalid too), so the stem is what must be checked.
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+     *(f"LPT{i}" for i in range(1, 10))}
+)
+
 
 def _sanitize_filename(name: str) -> str:
     """Remove filesystem-unsafe characters from a filename.
 
-    Also URL-decodes percent-encoded sequences and strips leading/trailing
-    dots and spaces (to avoid hidden files and accidental relative paths).
+    Also URL-decodes percent-encoded sequences, strips leading/trailing
+    dots and spaces (to avoid hidden files and accidental relative paths),
+    and prefixes Windows reserved device names (CON, NUL, COM1, ...).
     """
-    return _SANITIZE_RE.sub("_", urllib.parse.unquote(name)).strip(". ")
+    sanitized = _SANITIZE_RE.sub("_", urllib.parse.unquote(name)).strip(". ")
+    if sanitized.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        return f"_{sanitized}"
+    return sanitized
 
 
 

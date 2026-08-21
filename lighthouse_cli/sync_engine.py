@@ -57,8 +57,13 @@ def download_and_persist_topic(
     topic: dict,
     dest: Path,
     manifest: Manifest,
+    *,
+    warnings: list[str] | None = None,
 ) -> tuple[bytes, str, Path]:
-    """Download a topic, write to disk, update manifest. Returns (content, name, path)."""
+    """Download a topic, write to disk, update manifest. Returns (content, name, path).
+
+    When *warnings* is given, a path-containment clamp records an entry there.
+    """
     tid = topic.get("topic_id")
     if tid is None:
         raise ValueError(f"Topic missing 'topic_id': {topic.get('title', 'unknown')}")
@@ -73,6 +78,11 @@ def download_and_persist_topic(
     # flatten time, but never trust assembled paths — clamp anything that
     # resolves outside the course root.
     if not file_dest.resolve().is_relative_to(dest.resolve()):
+        if warnings is not None:
+            warnings.append(
+                f"Path for topic '{topic.get('title', tid)}' resolved outside "
+                f"the course root; clamped to the course root."
+            )
         file_dest = dest
     file_dest.mkdir(parents=True, exist_ok=True)
     filepath = file_dest / sanitized_name
@@ -221,7 +231,9 @@ def run_course(
             target_list = downloaded
 
         try:
-            content, sanitized_name, filepath = download_and_persist_topic(client, org_id, topic, dest, manifest)
+            content, sanitized_name, filepath = download_and_persist_topic(
+                client, org_id, topic, dest, manifest, warnings=result["warnings"],
+            )
             file_hash = compute_sha256(content)
             _track_duplicate(sha_hashes, file_hash, tid, sanitized_name)
             target_list.append(build_entry(tid, sanitized_name, str(filepath.relative_to(dest)), content, file_hash))
