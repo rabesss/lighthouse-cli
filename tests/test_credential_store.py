@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -108,24 +110,47 @@ def test_corrupted_credentials_fallback(
 # VAL-AUTH-023: Encryption key change
 # ---------------------------------------------------------------------------
 
-def test_encryption_key_change_graceful(
+def test_passphrase_sealed_survives_keyring_loss(
     config_dir: Path,
-    credentials_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decryption failure on different machine prompts for credentials (returns None)."""
+    """Decryption uses the RECORDED key source: a passphrase-sealed artifact
+    still opens when the system keyring disappears entirely."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    # First, save with a key
     store = CredentialStore()
     store.save("user@manipal.edu", "secret_password")
 
-    # Now simulate keyring being cleared (different machine scenario)
-    # by patching keyring to raise an exception
-    with patch("keyring.get_password", side_effect=Exception("Keyring unavailable")):
-        store2 = CredentialStore()
-        with pytest.raises(CredentialStoreError):
-            store2.load()
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "keyring", None)  # import becomes unavailable
+    store2 = CredentialStore()
+    assert store2.load() == ("user@manipal.edu", "secret_password")
+
+def test_keyring_sealed_fails_cleanly_on_wrong_key(
+    config_dir: Path,
+    credentials_path: Path,
+    fake_keyring: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A keyring-sealed artifact raises a clean error when the keyring entry
+    no longer matches (different machine scenario)."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    from cryptography.fernet import Fernet
+
+    fake_keyring.backend.set_password(
+        "lighthouse-cli", "credential-key", Fernet.generate_key().decode()
+    )
+    store = CredentialStore()
+    store.save("user@manipal.edu", "secret_password")
+    assert json.loads(credentials_path.read_text())["key_source"] == "keyring"
+
+    # Different machine: the keyring entry now holds an unrelated key.
+    fake_keyring.backend.set_password(
+        "lighthouse-cli", "credential-key", Fernet.generate_key().decode()
+    )
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
 
 
 # ---------------------------------------------------------------------------

@@ -83,8 +83,12 @@ graph TD
   Chrome DevTools Protocol — through `browser-harness`, Python websockets,
   or a Node.js fallback.
 - **API:** D2L REST API — LE v1.93, LP v1.59.
-- **Cookie storage:** `~/.config/lighthouse-cli/cookies.json` (permissions
-  `0600`). Override with `LIGHTHOUSE_CONFIG_DIR` env var.
+- **Secret storage:** All session secrets are encrypted at rest by
+  `CredentialStore` (Fernet): `cookies.json`, `mfa_pending.json`, and
+  `credentials.json` in `~/.config/lighthouse-cli/` (permissions `0600`;
+  override the directory with `LIGHTHOUSE_CONFIG_DIR`). Only non-secret
+  metadata (timestamps, MFA method) is stored unencrypted beside the
+  ciphertext. See "Encryption key sources" below.
 - **Download directory:** `~/Downloads/lighthouse/{course-name}/`. Downloads
   create course-name subdirectories. Override with `--output-dir` / `-o`.
 - **Manifest files:** `.lighthouse.json` files stored in download directories
@@ -161,8 +165,24 @@ lighthouse auth login
 2. Username step (Playwright if `[auth]` installed) → password POST
 3. `BeginAuth` sends SMS; may exit and save `mfa_pending.json`
 4. `lighthouse auth verify <code>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
-5. Saves cookies to `~/.config/lighthouse-cli/cookies.json`
-6. Optional `--save-credentials` (Fernet + system keyring)
+5. Saves cookies to `~/.config/lighthouse-cli/cookies.json` (encrypted)
+6. Optional `--save-credentials` (encrypted via CredentialStore)
+
+**Encryption key sources** (checked in order; a usable source is required
+before any login side effect):
+
+1. `LIGHTHOUSE_SECRETS_PASSPHRASE` env var — recommended for headless/cron
+   use. The passphrase is stretched (PBKDF2) with a per-artifact salt stored
+   beside the ciphertext.
+2. System keyring (`keyring` package), reusing the existing
+   `("lighthouse-cli", "credential-key")` entry.
+3. Neither → auth commands fail fast with an actionable message.
+
+Every sealed file records which source sealed it; decryption always uses the
+recorded source, so setting or clearing `LIGHTHOUSE_SECRETS_PASSPHRASE` later
+never orphans data sealed under the other source. Legacy plaintext
+`cookies.json` / raw-Fernet `credentials.json` files are upgraded to the
+sealed format automatically on first successful read.
 
 ### `lighthouse auth verify <CODE> [--json]`
 

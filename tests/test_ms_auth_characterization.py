@@ -1,0 +1,771 @@
+"""Black-box characterization tests for MicrosoftSSOClient.
+
+These tests pin down the CURRENT observable behavior of ``login()`` and
+``complete_mfa_pending()`` — scripted HTTP responses, HTML fixtures as plain
+strings, no internal method calls — so the state-machine rewrite preserves
+behavior.  Secrets are referenced by sentinel values and are never printed,
+repr'd, or asserted by value (key-presence assertions only).
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+import requests
+
+import lighthouse_cli.config as config_mod
+from lighthouse_cli.config import COOKIE_NAMES
+from lighthouse_cli.ms_auth import (
+    MfaPendingError,
+    MicrosoftSSOClient,
+    MicrosoftSSOError,
+)
+
+# ---------------------------------------------------------------------------
+# Sentinels (never asserted by value; used only as fixture payloads)
+# ---------------------------------------------------------------------------
+
+USERNAME = "sentinel.user@manipal.edu"
+PASSWORD = "sentinel-password-value"
+TOTP_CODE = "654321"
+SAML_TOKEN = "SENTINEL-SAMLRESPONSE-BASE64-VALUE"
+
+BASE = "https://lighthouse.manipal.edu"
+MS_BASE = "https://login.microsoftonline.com"
+LOGIN_INIT_URL = f"{BASE}/d2l/lp/auth/saml/login"
+MS_SSO_URL = f"{MS_BASE}/tenant-id/saml2?SAMLRequest=z"
+CREDS_POST_URL = f"{MS_BASE}/common/login"
+BEGIN_URL = f"{MS_BASE}/common/SAS/BeginAuth"
+END_URL = f"{MS_BASE}/common/SAS/EndAuth"
+PROCESS_URL = f"{MS_BASE}/common/SAS/ProcessAuth"
+ACS_URL = f"{BASE}/d2l/lp/auth/saml/consume"
+MFA_PAGE_URL = f"{MS_BASE}/common/SAS/ProcessAuth?session=1"
+
+
+# ---------------------------------------------------------------------------
+# HTML fixtures (plain strings)
+# ---------------------------------------------------------------------------
+
+
+def config_html(extra_fields: str = "", url_get_credential_type: bool = False) -> str:
+    fields = [
+        '"sFT": "FLOW-TOKEN-1"',
+        '"sCtx": "CTX-TOKEN-1"',
+        f'"urlPost": "{CREDS_POST_URL}"',
+        '"canary": "PAGE-CANARY-1"',
+        '"apiCanary": "API-CANARY-1"',
+        '"sessionId": "SESSION-ID-1"',
+        '"correlationId": "CORR-ID-1"',
+    ]
+    if url_get_credential_type:
+        fields.append(f'"urlGetCredentialType": "{MS_BASE}/common/GetCredentialType"')
+    if extra_fields:
+        fields.append(extra_fields)
+    return (
+        "<html><head><title>Sign in</title></head><body><script>\n"
+        "$Config = {\n" + ",\n".join(fields) + "\n};\n</script></body></html>"
+    )
+
+
+def mfa_html(auth_method_id: str = "PhoneAppOTP", display: str = "Android") -> str:
+    fields = [
+        '"pgid": "ConvergedTFA"',
+        '"sFT": "MFA-FLOW-TOKEN"',
+        '"sCtx": "MFA-CTX-TOKEN"',
+        '"canary": "MFA-CANARY"',
+        f'"urlBeginAuth": "{BEGIN_URL}"',
+        f'"urlEndAuth": "{END_URL}"',
+        f'"urlPost": "{PROCESS_URL}"',
+        '"sFTName": "flowToken"',
+        f'"sPOST_Username": "{USERNAME}"',
+        '"oPerAuthPollingInterval": {"PhoneAppOTP": 0.5, "PhoneAppNotification": 0.5, "OneWaySMS": 0.5}',
+        '"arrUserProofs": ['
+        + "{"
+        + f'"authMethodId": "{auth_method_id}", "display": "{display}", '
+        + '"data": "+91 ***1234", "isDefault": true}'
+        + "]",
+    ]
+    return (
+        "<html><head><title>Verify</title></head><body><script>\n"
+        "$Config = {\n" + ",\n".join(fields) + "\n};\n</script></body></html>"
+    )
+
+
+LEGACY_MFA_HTML = (
+    "<html><head><title>Verify</title></head><body>"
+    '<div id="idDiv_SAOTCC_Description">Enter code</div>'
+    f'<form action="{PROCESS_URL}">'
+    '<input type="hidden" name="sFT" value="LEGACY-FLOW-TOKEN">'
+    '<input type="hidden" name="sCtx" value="LEGACY-CTX">'
+    '<input type="text" name="otc">'
+    "</form></body></html>"
+)
+
+SAML_HTML = (
+    "<html><body>"
+    f'<form method="POST" action="{ACS_URL}">'
+    f'<input type="hidden" name="SAMLResponse" value="{SAML_TOKEN}">'
+    '<input type="hidden" name="RelayState" value="' + BASE + '/d2l/home">'
+    "</form></body></html>"
+)
+
+ERROR_HTML = (
+    "<html><head><title>Sign in error</title></head><body><script>\n"
+    "$Config = {\n"
+    '"pgid": "ConvergedError",\n'
+    '"serverError": "50126",\n'
+    '"sErrTxt": "Invalid username or password."\n'
+    "};\n</script></body></html>"
+)
+
+
+def kmsi_html(pgid: str = "KmsiInterrupt") -> str:
+    return (
+        "<html><head><title>Stay signed in?</title></head><body><script>\n"
+        "$Config = {\n"
+        f'"pgid": "{pgid}",\n'
+        '"sFT": "KMSI-FLOW-TOKEN",\n'
+        '"sCtx": "KMSI-CTX",\n'
+        '"canary": "KMSI-CANARY",\n'
+        f'"urlPost": "{MS_BASE}/common/login",\n'
+        f'"sPOST_Username": "{USERNAME}"\n'
+        "};\n</script></body></html>"
+    )
+
+
+HIDDENFORM_HTML = (
+    "<html><body>Working..."
+    f'<form name="hiddenform" action="{MS_BASE}/common/final">'
+    '<input type="hidden" name="code" value="HF-CODE">'
+    '<input type="hidden" name="state" value="HF-STATE">'
+    "</form></body></html>"
+)
+
+SAML_REQUEST_HTML = (
+    "<html><script>"
+    f"window.location='{ACS_URL}?SAMLRequest=REQ&RelayState=x';"
+    "</script></html>"
+)
+
+
+# ---------------------------------------------------------------------------
+# Scripted transport
+# ---------------------------------------------------------------------------
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        status_code: int = 200,
+        html: str = "",
+        url: str = "",
+        headers: dict[str, str] | None = None,
+        json_data: dict[str, Any] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.text = html
+        self.url = url
+        self.headers = headers or {}
+        self._json = json_data
+
+    def json(self) -> dict[str, Any]:
+        if self._json is None:
+            raise json.JSONDecodeError("Expecting value", "<html>", 0)
+        return self._json
+
+
+class ScriptedSession:
+    """Stands in for requests.Session: pops scripted items in order."""
+
+    def __init__(self) -> None:
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.headers: dict[str, str] = {}
+        self.calls: list[tuple[str, str]] = []
+        self._queue: list[Any] = []
+
+    def enqueue(self, *items: Any) -> None:
+        self._queue.extend(items)
+
+    def _next(self, method: str, url: str) -> Any:
+        self.calls.append((method, url))
+        if not self._queue:
+            raise AssertionError(f"Script exhausted at {method} {url}")
+        item = self._queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        return self._next("GET", url)
+
+    def post(self, url: str, **kwargs: Any) -> FakeResponse:
+        return self._next("POST", url)
+
+    def close(self) -> None:
+        pass
+
+
+def set_d2l_cookies(session: ScriptedSession) -> None:
+    """Simulate the D2L ACS redirect chain having set session cookies."""
+    for name in COOKIE_NAMES:
+        session.cookies.set(name, f"sentinel-{name}", domain="lighthouse.manipal.edu", path="/")
+
+
+@pytest.fixture
+def scripted() -> ScriptedSession:
+    return ScriptedSession()
+
+
+@pytest.fixture
+def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point config storage at a temp dir (env + module globals for compat)."""
+    d = tmp_path / "config"
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(d))
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", d)
+    monkeypatch.setattr(config_mod, "COOKIE_FILE", d / "cookies.json")
+    monkeypatch.setattr(config_mod, "MFA_PENDING_FILE", d / "mfa_pending.json")
+    return d
+
+
+def run_login(scripted_session: ScriptedSession, **kwargs: Any) -> dict[str, str]:
+    client = MicrosoftSSOClient()
+    with patch("requests.Session", return_value=scripted_session):
+        try:
+            return client.login(USERNAME, PASSWORD, kwargs.pop("totp_code", None), **kwargs)
+        finally:
+            client.close()
+
+
+def make_client(scripted_session: ScriptedSession) -> MicrosoftSSOClient:
+    with patch("requests.Session", return_value=scripted_session):
+        return MicrosoftSSOClient()
+
+
+def read_pending() -> dict[str, Any] | None:
+    """Read the pending checkpoint through its public loader (unseals)."""
+    from lighthouse_cli.config import load_mfa_pending
+
+    return load_mfa_pending()
+
+
+def begin_success() -> FakeResponse:
+    return FakeResponse(json_data={"Success": True, "SessionId": "SID-A", "FlowToken": "BEGIN-FT", "Ctx": "BEGIN-CTX"})
+
+
+def end_success() -> FakeResponse:
+    return FakeResponse(json_data={"Success": True, "FlowToken": "END-FT", "Ctx": "END-CTX"})
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap + password flow
+# ---------------------------------------------------------------------------
+
+
+class TestPasswordFlow:
+    def test_direct_saml_after_password(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Password POST returns the SAML form directly; ACS sets cookies."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=SAML_HTML, url=CREDS_POST_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        methods_urls = [(m, u) for m, u in scripted.calls]
+        assert ("GET", LOGIN_INIT_URL) in methods_urls
+        assert ("GET", MS_SSO_URL) in methods_urls
+        assert ("POST", CREDS_POST_URL) in methods_urls
+        assert ("POST", ACS_URL) in methods_urls
+
+    def test_wrong_password_error_page(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Microsoft error page becomes a clean MicrosoftSSOError."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=ERROR_HTML, url=CREDS_POST_URL),
+        )
+        with pytest.raises(MicrosoftSSOError, match="50126"):
+            run_login(scripted)
+
+    def test_redirect_chain_after_password(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """A 302 after the password POST is followed to the SAML page."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(302, url=CREDS_POST_URL, headers={"Location": "/saml/landing"}),
+            FakeResponse(200, html=SAML_HTML, url=f"{MS_BASE}/saml/landing"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("GET", f"{MS_BASE}/saml/landing") in scripted.calls
+
+    def test_acs_without_cookies_falls_back_to_home(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """When ACS sets no cookies the driver probes /d2l/home before failing."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=SAML_HTML, url=CREDS_POST_URL),
+            FakeResponse(200, html="<html>acs landing</html>", url=ACS_URL),
+            FakeResponse(200, html="<html>no cookies</html>", url=f"{BASE}/d2l/home"),
+        )
+        with pytest.raises(MicrosoftSSOError, match="cookies"):
+            run_login(scripted)
+        assert ("GET", f"{BASE}/d2l/home") in scripted.calls
+
+
+class TestUsernameBootstrap:
+    def test_http_bootstrap_when_playwright_missing(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Without Playwright the browser pre-password requests are mirrored over HTTP."""
+        scripted.enqueue(
+            # Step 1-2
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(url_get_credential_type=True), url=MS_SSO_URL),
+            # HTTP bootstrap: Me.htm, ssoprobe, dssostatus, GetCredentialType, ssoprobe, dssostatus
+            FakeResponse(200, html="{}", url="https://login.live.com/Me.htm?v=3"),
+            FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
+            FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
+            FakeResponse(200, json_data={"FlowToken": "FLOW-TOKEN-2", "apiCanary": "API-CANARY-2"},
+                         url=f"{MS_BASE}/common/GetCredentialType"),
+            FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
+            FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
+            # Password POST lands on SAML directly
+            FakeResponse(200, html=SAML_HTML, url=CREDS_POST_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        urls = [u for _, u in scripted.calls]
+        assert "https://login.live.com/Me.htm?v=3" in urls
+        assert any("autologon.microsoftazuread-sso.com" in u and "ssoprobe" in u for u in urls)
+        assert any(u.endswith("/dssostatus") for u in urls)
+        assert f"{MS_BASE}/common/GetCredentialType" in urls
+
+    def test_playwright_failure_wraps_cleanly(
+        self, scripted: ScriptedSession, isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Playwright runtime failure becomes a clean MicrosoftSSOError."""
+        fake_api = ModuleType("playwright.sync_api")
+        def boom(*a: Any, **k: Any) -> None:
+            raise RuntimeError("chromium executable missing")
+        fake_api.sync_playwright = boom  # type: ignore[attr-defined]
+        fake_root = ModuleType("playwright")
+        fake_root.sync_api = fake_api  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "playwright", fake_root)
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(url_get_credential_type=True), url=MS_SSO_URL),
+        )
+        with pytest.raises(MicrosoftSSOError, match="Playwright username bootstrap failed"):
+            run_login(scripted)
+
+
+# ---------------------------------------------------------------------------
+# Converged MFA (SAS API)
+# ---------------------------------------------------------------------------
+
+
+class TestConvergedMfa:
+    def _mfa_script_head(self, scripted: ScriptedSession, auth_method_id: str = "PhoneAppOTP") -> None:
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=mfa_html(auth_method_id=auth_method_id), url=MFA_PAGE_URL),
+        )
+
+    def test_app_otp_one_step(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Offline Authenticator code completes in one login call."""
+        self._mfa_script_head(scripted, "PhoneAppOTP")
+        scripted.enqueue(
+            begin_success(),
+            end_success(),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("POST", BEGIN_URL) in scripted.calls
+        assert ("POST", END_URL) in scripted.calls
+        assert ("POST", PROCESS_URL) in scripted.calls
+
+    def test_app_notification_polls_until_approval(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """PhoneAppNotification polls EndAuth while Retry=true, then finishes."""
+        self._mfa_script_head(scripted, "PhoneAppNotification")
+        scripted.enqueue(
+            begin_success(),
+            FakeResponse(json_data={"Retry": True, "Entropy": "42"}),
+            end_success(),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        end_posts = [u for m, u in scripted.calls if m == "POST" and u == END_URL]
+        assert len(end_posts) == 2
+
+    def test_method_mismatch_rejected(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """--mfa-method app on an SMS-only account fails before BeginAuth."""
+        self._mfa_script_head(scripted, "OneWaySMS")
+        with pytest.raises(MicrosoftSSOError, match="not available"):
+            run_login(scripted, totp_code=TOTP_CODE, mfa_method="app")
+        # No SAS API traffic happened.
+        assert ("POST", BEGIN_URL) not in scripted.calls
+
+    def test_begin_auth_failure_raises(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """BeginAuth rejection surfaces a clean error."""
+        self._mfa_script_head(scripted, "PhoneAppOTP")
+        scripted.enqueue(
+            FakeResponse(json_data={"Success": False, "Message": "code send failed"}),
+        )
+        with pytest.raises(MicrosoftSSOError, match="MFA setup failed"):
+            run_login(scripted, totp_code=TOTP_CODE)
+
+    def test_end_auth_invalid_json_raises_cleanly(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Non-JSON EndAuth response becomes a clean MicrosoftSSOError."""
+        self._mfa_script_head(scripted, "PhoneAppOTP")
+        scripted.enqueue(
+            begin_success(),
+            FakeResponse(200, html="<html>garbage</html>", url=END_URL),
+        )
+        with pytest.raises(MicrosoftSSOError, match="EndAuth"):
+            run_login(scripted, totp_code=TOTP_CODE)
+
+    def test_legacy_form_mfa_posts_otc_form(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Older MFA pages without arrUserProofs fall back to the otc form POST."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=LEGACY_MFA_HTML, url=MFA_PAGE_URL),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("POST", PROCESS_URL) in scripted.calls
+
+
+# ---------------------------------------------------------------------------
+# Post-MFA interstitials
+# ---------------------------------------------------------------------------
+
+
+class TestPostMfaInterstitials:
+    def _head(self, scripted: ScriptedSession) -> None:
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=mfa_html(auth_method_id="PhoneAppOTP"), url=MFA_PAGE_URL),
+            begin_success(),
+            end_success(),
+        )
+
+    def test_kmsi_interrupt_submitted(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """KmsiInterrupt page is auto-submitted ('Stay signed in')."""
+        self._head(scripted)
+        scripted.enqueue(
+            FakeResponse(200, html=kmsi_html("KmsiInterrupt"), url=PROCESS_URL),
+            FakeResponse(302, url=f"{MS_BASE}/common/login", headers={"Location": "/landing"}),
+            FakeResponse(200, html=SAML_HTML, url=f"{MS_BASE}/landing"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("POST", f"{MS_BASE}/common/login") in scripted.calls
+
+    def test_cmsi_interrupt_submitted(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """CmsiInterrupt page is auto-submitted like KMSI."""
+        self._head(scripted)
+        scripted.enqueue(
+            FakeResponse(200, html=kmsi_html("CmsiInterrupt"), url=PROCESS_URL),
+            FakeResponse(302, url=f"{MS_BASE}/common/login", headers={"Location": "/landing"}),
+            FakeResponse(200, html=SAML_HTML, url=f"{MS_BASE}/landing"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+
+    def test_hiddenform_interstitial_auto_submitted(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """Microsoft auto-submit hiddenform pages are POSTed with their fields."""
+        self._head(scripted)
+        scripted.enqueue(
+            FakeResponse(200, html=HIDDENFORM_HTML, url=PROCESS_URL),
+            FakeResponse(200, html=SAML_HTML, url=f"{MS_BASE}/common/final"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("POST", f"{MS_BASE}/common/final") in scripted.calls
+
+    def test_saml_request_walker_follows_js_redirect(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """A JS window.location carrying SAMLRequest is fetched (no SAMLResponse yet)."""
+        self._head(scripted)
+        scripted.enqueue(
+            FakeResponse(200, html=SAML_REQUEST_HTML, url=PROCESS_URL),
+            FakeResponse(200, html=SAML_HTML, url=f"{ACS_URL}?SAMLRequest=REQ"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("GET", f"{ACS_URL}?SAMLRequest=REQ&RelayState=x") in scripted.calls
+
+    def test_processauth_redirect_chain(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """ProcessAuth 302 chains are followed until SAML appears."""
+        self._head(scripted)
+        scripted.enqueue(
+            FakeResponse(302, url=PROCESS_URL, headers={"Location": "/hop1"}),
+            FakeResponse(302, url=f"{MS_BASE}/hop1", headers={"Location": "https://lighthouse.manipal.edu/hop2"}),
+            FakeResponse(200, html=SAML_HTML, url=f"{BASE}/hop2"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted, totp_code=TOTP_CODE)
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# Deferred MFA + checkpoint resume phases
+# ---------------------------------------------------------------------------
+
+
+class TestDeferAndResume:
+    def _defer_login(self, scripted: ScriptedSession) -> None:
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=mfa_html(auth_method_id="OneWaySMS", display="SMS"), url=MFA_PAGE_URL),
+            begin_success(),
+        )
+        with pytest.raises(MfaPendingError):
+            run_login(scripted, defer_mfa_to_pending=True)
+
+    def test_sms_defer_saves_pending_then_verify_completes(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """auth login (defer) checkpoints BeginAuth; auth verify resumes and clears."""
+        self._defer_login(scripted)
+
+        pending = read_pending()
+        assert pending is not None
+        assert pending.get("version") == 2
+        assert "mfa_page_url" in pending
+        assert "mfa_config" in pending
+        assert "begin" in pending
+        assert "selected_proof" in pending
+        assert "cookies" in pending
+        # The checkpoint is sealed: the raw file carries only envelope + metadata.
+        raw = (isolated_config / "mfa_pending.json").read_text()
+        assert SAML_TOKEN not in raw
+        assert TOTP_CODE not in raw
+
+        # --- verify ---
+        scripted.enqueue(
+            end_success(),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert ("POST", END_URL) in scripted.calls
+        assert read_pending() is None
+
+    def test_verify_without_pending_fails_cleanly(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="No pending MFA session"):
+                client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+    def test_endauth_success_checkpoint_resumable(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """After EndAuth success the flow tokens are checkpointed; a second verify
+        skips straight to ProcessAuth (resumable phase ms_auth EndAuth-success)."""
+        self._defer_login(scripted)
+
+        # Verify attempt #1: EndAuth succeeds, ProcessAuth dies on the network.
+        scripted.enqueue(
+            end_success(),
+            requests.ConnectionError("connection reset mid-flow"),
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(requests.ConnectionError):
+                client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        pending = read_pending()
+        assert pending is not None
+        assert "end_auth_flow" in pending
+        assert "end_auth_ctx" in pending
+
+        # Verify attempt #2: skips EndAuth entirely, posts ProcessAuth only.
+        scripted.enqueue(
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert [c for c in scripted.calls[3:] if c == ("POST", END_URL)].count(("POST", END_URL)) == 1
+        assert read_pending() is None
+
+    def test_kmsi_checkpoint_resumable(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """A KMSI page reached during verify is checkpointed; a second verify
+        resumes by submitting the saved KMSI page directly."""
+        self._defer_login(scripted)
+
+        # Verify attempt #1: EndAuth ok, ProcessAuth shows KMSI, KMSI submit dies.
+        scripted.enqueue(
+            end_success(),
+            FakeResponse(200, html=kmsi_html("KmsiInterrupt"), url=PROCESS_URL),
+            requests.ConnectionError("connection reset at kmsi"),
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(requests.ConnectionError):
+                client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        pending = read_pending()
+        assert pending is not None
+        assert "kmsi_checkpoint" in pending
+
+        # Verify attempt #2: submits the saved KMSI page; no EndAuth/ProcessAuth.
+        scripted.enqueue(
+            FakeResponse(302, url=f"{MS_BASE}/common/login", headers={"Location": "/landing"}),
+            FakeResponse(200, html=SAML_HTML, url=f"{MS_BASE}/landing"),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        remaining = [u for m, u in scripted.calls[3:] if m == "POST"]
+        assert remaining.count(END_URL) == 1  # verify #1 only
+        assert remaining.count(PROCESS_URL) == 1  # verify #1 only; verify #2 resumes at KMSI
+        assert read_pending() is None
+
+    def test_wrong_code_clears_pending(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """A rejected code clears the checkpoint (must request a fresh one)."""
+        self._defer_login(scripted)
+
+        scripted.enqueue(
+            FakeResponse(json_data={"Success": False, "Retry": False, "ResultValue": "WrongCode"}),
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
+                client.complete_mfa_pending("000000")
+        finally:
+            client.close()
+
+        assert read_pending() is None
+
+    def test_network_failure_leaves_pending_retryable(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """A network drop during verify keeps the checkpoint intact for retry."""
+        self._defer_login(scripted)
+
+        scripted.enqueue(requests.ConnectionError("dns failure"))
+        client = make_client(scripted)
+        try:
+            with pytest.raises(requests.ConnectionError):
+                client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        assert read_pending() is not None
+
+        # Retry with a working network completes the login.
+        scripted.enqueue(
+            end_success(),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+
+    def test_already_completed_code_reports_cleanly(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """AuthenticationPreviouslyCompleted without a saved EndAuth checkpoint
+        asks the user to start a new login."""
+        self._defer_login(scripted)
+
+        scripted.enqueue(
+            FakeResponse(json_data={
+                "Success": False, "Retry": False,
+                "ResultValue": "AuthenticationPreviouslyCompleted",
+            }),
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="already accepted"):
+                client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        assert read_pending() is None

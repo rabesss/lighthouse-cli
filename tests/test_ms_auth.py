@@ -11,11 +11,17 @@ from lighthouse_cli.ms_auth import (
     MFA_METHOD_APP,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_SMS,
+    ResponseSnapshot,
     _prompt_user_proof_choice,
     MicrosoftSSOClient,
     MicrosoftSSOError,
     UserProof,
     _absolute_url,
+    build_sso_error,
+    extract_saml_response,
+    is_error_page,
+    is_mfa_page,
+    kmsi_page_detected,
     _extract_config_json,
     _extract_error_code_and_msg,
     _parse_user_proofs,
@@ -258,71 +264,45 @@ class TestMicrosoftSSOClientInit:
         client.close()
 
 
-class TestMicrosoftSSOClientIsErrorPage:
+class TestIsErrorPage:
+    def _snap(self, status_code: int = 200, html: str = "") -> ResponseSnapshot:
+        return ResponseSnapshot(url="https://x", status_code=status_code, location="", html=html)
+
     def test_detects_400_status(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(400, "")
-        assert client._is_error_page(resp) is True
-        client.close()
+        assert is_error_page(self._snap(400, "")) is True
 
     def test_detects_servererror_in_body(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, "serverError: 50126")
-        assert client._is_error_page(resp) is True
-        client.close()
+        assert is_error_page(self._snap(200, "serverError: 50126")) is True
 
     def test_ok_page_not_error(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, "<html>Login page</html>")
-        assert client._is_error_page(resp) is False
-        client.close()
+        assert is_error_page(self._snap(200, "<html>Login page</html>")) is False
 
 
-class TestMicrosoftSSOClientIsMfaPage:
+class TestIsMfaPage:
     def test_detects_converged_tfa(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, "ConvergedTFA page content")
-        assert client._is_mfa_page(resp) is True
-        client.close()
+        assert is_mfa_page("ConvergedTFA page content") is True
 
     def test_detects_otc_input(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, SAMPLE_MFA_HTML)
-        assert client._is_mfa_page(resp) is True
-        client.close()
+        assert is_mfa_page(SAMPLE_MFA_HTML) is True
 
     def test_enter_code_text(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, '<div>Enter code</div>')
-        assert client._is_mfa_page(resp) is True
-        client.close()
+        assert is_mfa_page('<div>Enter code</div>') is True
 
     def test_saml_page_not_mfa(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, SAMPLE_SAML_HTML)
-        assert client._is_mfa_page(resp) is False
-        client.close()
+        assert is_mfa_page(SAMPLE_SAML_HTML) is False
 
 
-class TestMicrosoftSSOClientExtractSamlResponse:
+class TestExtractSamlResponse:
     def test_extracts_from_hidden_input(self) -> None:
-        client = MicrosoftSSOClient()
-        result = client._extract_saml_response(SAMPLE_SAML_HTML)
+        result = extract_saml_response(SAMPLE_SAML_HTML)
         assert result == "PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPS...long-base64-string..."
-        client.close()
 
     def test_returns_none_when_not_present(self) -> None:
-        client = MicrosoftSSOClient()
-        result = client._extract_saml_response("<html>No SAML here</html>")
-        assert result is None
-        client.close()
+        assert extract_saml_response("<html>No SAML here</html>") is None
 
     def test_extracts_from_name_value_pattern(self) -> None:
         html = '<input name="SAMLResponse" value="BASE64SAMLTOKEN">'
-        client = MicrosoftSSOClient()
-        result = client._extract_saml_response(html)
-        assert result == "BASE64SAMLTOKEN"
-        client.close()
+        assert extract_saml_response(html) == "BASE64SAMLTOKEN"
 
 
 class TestMicrosoftSSOClientExtractD2lCookies:
@@ -622,28 +602,19 @@ class TestMSErrorCodes:
         assert 50053 in MS_ERROR_CODES
 
 
-class TestBuildError:
+class TestBuildSsoError:
     def test_known_error_code(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200)
-        err = client._build_error(resp, 50126, None, "POST credentials")
+        err = build_sso_error(50126, None, "POST credentials")
         assert "50126" in str(err)
         assert "Invalid username" in str(err)
-        client.close()
 
     def test_unknown_error_code(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200)
-        err = client._build_error(resp, 99999, "Custom error text", "some step")
+        err = build_sso_error(99999, "Custom error text", "some step")
         assert "[99999]" in str(err)
-        client.close()
 
     def test_error_with_msg_fallback(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(400)
-        err = client._build_error(resp, None, "Password is incorrect", "POST credentials")
+        err = build_sso_error(None, "Password is incorrect", "POST credentials")
         assert "Password is incorrect" in str(err)
-        client.close()
 
 
 class TestClose:
@@ -672,14 +643,10 @@ class TestConfigExtractionEdgeCases:
         assert config is None  # Invalid JSON
 
 
-class TestMicrosoftSSOClientStaySignedIn:
-    def test_kmsi_page_handling_disabled(self) -> None:
-        """KMSI page detection should not crash."""
+class TestStaySignedInDetection:
+    def test_kmsi_page_is_not_mfa_and_is_detected(self) -> None:
+        """KMSI pages are not MFA pages but are detected for auto-submit."""
         html = '<form><input name="LoginOptions" value="1"></form>KmsiInterrupt'
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, text=html)
-        # Just verify is_mfa_page doesn't crash on KMSI
-        is_mfa = client._is_mfa_page(resp)
-        # KMSI is not an MFA page
-        assert is_mfa is False
-        client.close()
+        assert is_mfa_page(html) is False
+        snap = ResponseSnapshot(url="https://x", status_code=200, location="", html=html)
+        assert kmsi_page_detected(snap) is True

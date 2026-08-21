@@ -16,7 +16,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from .config import CONFIG_DIR, ensure_config_dir, load_mfa_pending, save_cookies
+from .config import ensure_config_dir, load_mfa_pending, save_cookies
 from .api import LighthouseClient
 from .ms_auth import (
     MFA_METHOD_APP,
@@ -28,6 +28,7 @@ from .ms_auth import (
     MicrosoftSSOError,
     VALID_MFA_METHODS,
 )
+from .credential_store import CredentialStore, CredentialStoreError  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -37,121 +38,6 @@ from .ms_auth import (
 class AuthenticationError(Exception):
     """Raised when authentication fails (wrong credentials, 2FA, etc.)."""
 
-
-class CredentialStoreError(Exception):
-    """Raised when credential storage/retrieval fails."""
-
-
-# ---------------------------------------------------------------------------
-# Credential Store (encrypted storage)
-# ---------------------------------------------------------------------------
-
-class CredentialStore:
-    """Encrypted credential storage using Fernet + system keyring.
-
-    Stores credentials in ``~/.config/lighthouse-cli/credentials.json`` with
-    encryption key stored in the system keyring.
-
-    ``keyring`` and ``cryptography`` are optional dependencies.  Without them,
-    credentials cannot be stored or loaded.
-    """
-
-    SERVICE_NAME = "lighthouse-cli"
-    KEY_NAME = "credential-key"
-
-    def __init__(self) -> None:
-        self.config_dir = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", str(CONFIG_DIR))).expanduser()
-        self.credentials_file = self.config_dir / "credentials.json"
-
-    def _get_encryption_key(self) -> bytes:
-        """Get or create the encryption key from system keyring."""
-        import keyring
-
-        if key_str := keyring.get_password(self.SERVICE_NAME, self.KEY_NAME):
-            return key_str.encode("utf-8")
-
-        from cryptography.fernet import Fernet
-        key = Fernet.generate_key()
-        keyring.set_password(self.SERVICE_NAME, self.KEY_NAME, key.decode("utf-8"))
-        return key
-
-    def _get_fernet(self) -> Any:
-        """Get a Fernet instance for encryption/decryption."""
-        from cryptography.fernet import Fernet
-        return Fernet(self._get_encryption_key())
-
-    def _check_deps(self) -> None:
-        """Check that keyring+cryptography are installed."""
-        try:
-            import keyring  # noqa: F401
-            import cryptography  # noqa: F401
-        except ImportError as e:
-            raise CredentialStoreError(
-                "Credential storage requires optional dependencies. "
-                "Install with: pip install lighthouse-cli[credentials]"
-            ) from e
-
-    def save(self, username: str, password: str) -> None:
-        """Encrypt and save credentials to disk.
-
-        Args:
-            username: The username (email)
-            password: The password
-
-        Raises:
-            CredentialStoreError: If credentials are empty, dependencies
-                missing, or storage fails.
-        """
-        if not username or not username.strip():
-            raise CredentialStoreError("Username cannot be empty")
-        if not password or not password.strip():
-            raise CredentialStoreError("Password cannot be empty")
-
-        self._check_deps()
-
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_dir.chmod(0o700)
-
-        tmp_file = self.credentials_file.with_suffix(".tmp")
-        encrypted = self._get_fernet().encrypt(
-            json.dumps({"username": username, "password": password}).encode("utf-8")
-        )
-        tmp_file.write_bytes(encrypted)
-        tmp_file.chmod(0o600)
-        tmp_file.replace(self.credentials_file)
-        self.credentials_file.chmod(0o600)
-
-    def load(self) -> tuple[str, str] | None:
-        """Load and decrypt stored credentials.
-
-        Returns:
-            Tuple of (username, password) if credentials exist and decrypt
-            successfully.  None if credentials file doesn't exist.
-
-        Raises:
-            CredentialStoreError: If the file exists but is corrupted or
-                keyring is unavailable.
-        """
-        if not self.credentials_file.exists():
-            return None
-
-        self._check_deps()
-
-        try:
-            data = json.loads(
-                self._get_fernet().decrypt(
-                    self.credentials_file.read_bytes()
-                ).decode("utf-8")
-            )
-            return data.get("username", ""), data.get("password", "")
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise CredentialStoreError(f"Credentials file is corrupted: {exc}") from exc
-        except Exception as exc:
-            raise CredentialStoreError(f"Failed to load credentials: {exc}") from exc
-
-    def exists(self) -> bool:
-        """Check if stored credentials exist."""
-        return self.credentials_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +80,18 @@ def cmd_auth_verify(
     if not totp_code or not totp_code.strip():
         return _auth_error("2FA code cannot be empty", json_output, 2)
 
-    if not load_mfa_pending():
+    # Preflight the encryption key source BEFORE any auth side effects: verify
+    # submits the code and then must seal cookies.  Fail here, not mid-flow.
+    try:
+        CredentialStore().preflight()
+    except CredentialStoreError as exc:
+        return _auth_error(str(exc), json_output)
+
+    try:
+        pending_present = load_mfa_pending() is not None
+    except CredentialStoreError as exc:
+        return _auth_error(str(exc), json_output)
+    if not pending_present:
         return _auth_error(
             "No pending MFA session. Run: lighthouse auth login --mfa-method sms",
             json_output,
@@ -204,6 +101,8 @@ def cmd_auth_verify(
     try:
         cookies = sso_client.complete_mfa_pending(totp_code.strip())
     except MicrosoftSSOError as exc:
+        return _auth_error(str(exc), json_output)
+    except CredentialStoreError as exc:
         return _auth_error(str(exc), json_output)
     except (KeyError, TypeError, ValueError) as exc:
         return _auth_error(
@@ -360,6 +259,14 @@ def cmd_auth_login(
             elif resolved_mfa_method == MFA_METHOD_CHOOSE:
                 print("You will be asked to pick a verification method.", flush=True)
 
+        # --- Preflight the encryption key source ---
+        # Login sends BeginAuth (a side effect) and must seal cookies or the
+        # pending checkpoint afterwards; fail here with an actionable message.
+        try:
+            CredentialStore().preflight()
+        except CredentialStoreError as exc:
+            return _auth_error(str(exc), json_output)
+
         # --- Authenticate via HTTP ---
         sso_client = MicrosoftSSOClient()
         try:
@@ -384,6 +291,8 @@ def cmd_auth_login(
                 print(str(exc), flush=True)
             return 0
         except MicrosoftSSOError as exc:
+            return _auth_error(str(exc), json_output)
+        except CredentialStoreError as exc:
             return _auth_error(str(exc), json_output)
         finally:
             sso_client.close()

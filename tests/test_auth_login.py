@@ -281,15 +281,10 @@ def test_cookies_saved_to_file(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """cookies.json written with correct format and 0600 permissions."""
+    """cookies.json written sealed (v2 envelope) with 0600 permissions."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-
-    # Also patch the config module globals since they're computed at import time
-    import lighthouse_cli.config as config_mod
-    monkeypatch.setattr(config_mod, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(config_mod, "COOKIE_FILE", config_dir / "cookies.json")
 
     cookies = _make_d2l_cookies()
 
@@ -310,11 +305,19 @@ def test_cookies_saved_to_file(
     assert result.exit_code == 0
     cookies_path = config_dir / "cookies.json"
     assert cookies_path.exists()
-    data = json.loads(cookies_path.read_text())
-    assert "cookies" in data
+    raw = cookies_path.read_text()
+    data = json.loads(raw)
+    # Sealed v2 envelope: only metadata in the clear, payload encrypted.
+    assert data["v"] == 2
+    assert data["key_source"] == "passphrase"
+    assert "kdf_salt" in data
+    assert "ciphertext" in data
     assert "extracted_at" in data
-    assert "d2lSecureSessionVal" in data["cookies"]
-    assert data["cookies"]["d2lSecureSessionVal"] == "sec123"
+    assert "cookies" not in data
+    assert "sec123" not in raw
+    # Round-trips through the public loader.
+    from lighthouse_cli.config import load_cookies
+    assert load_cookies() == cookies
     mode = cookies_path.stat().st_mode & 0o777
     assert mode == 0o600
 
@@ -897,9 +900,13 @@ def test_concurrent_auth_no_corruption(
     cookies_path = config_dir / "cookies.json"
     assert cookies_path.exists()
     data = json.loads(cookies_path.read_text())
-    assert "cookies" in data
-    assert len(data["cookies"]) >= 4
-    assert "d2lSecureSessionVal" in data["cookies"]
+    assert data["v"] == 2
+    assert "ciphertext" in data
+    # Atomic replace means the file always holds one complete sealed write.
+    from lighthouse_cli.config import load_cookies
+    loaded = load_cookies()
+    assert len(loaded) >= 4
+    assert "d2lSecureSessionVal" in loaded
 
 
 # ---------------------------------------------------------------------------

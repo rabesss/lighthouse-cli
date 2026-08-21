@@ -13,6 +13,7 @@ dependencies = [
     "click>=8.1",
     "requests>=2.31",
     "beautifulsoup4>=4.12",
+    "cryptography>=41.0",
 ]
 
 [project.optional-dependencies]
