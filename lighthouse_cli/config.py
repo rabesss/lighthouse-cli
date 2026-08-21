@@ -60,7 +60,10 @@ def ensure_config_dir() -> Path:
     """Create the config directory if it doesn't exist with 0700 permissions."""
     config_dir = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", str(CONFIG_DIR))).expanduser()
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.chmod(0o700)
+    with suppress(OSError):
+        # Best effort: some filesystems (network mounts, certain tmpfs) reject
+        # chmod; auth must not hard-fail because of that.
+        config_dir.chmod(0o700)
     return config_dir
 
 

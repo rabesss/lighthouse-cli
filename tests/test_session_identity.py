@@ -110,3 +110,15 @@ class TestMissingCookieNames:
             COOKIE_NAMES[0],
             COOKIE_NAMES[1],
         ]
+
+
+def test_ensure_config_dir_tolerates_chmod_failure(tmp_path, monkeypatch):
+    """chmod-hostile filesystems (network mounts) must not break auth."""
+    from pathlib import Path as _P
+    import lighthouse_cli.config as cfg
+
+    target = tmp_path / "cfg"
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
+    monkeypatch.setattr(_P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("read-only")))
+    out = cfg.ensure_config_dir()
+    assert out == target and out.is_dir()
