@@ -707,7 +707,8 @@ class TestPathContainment:
             names={ORG_ID: "Test"},
             files={100: (b"content", "f.pdf")},
         )
-        manifest = Manifest(course_root / MANIFEST_FILENAME)
+        manifest = Manifest()
+        manifest.path = course_root / MANIFEST_FILENAME
         warnings: list[str] = []
         _, _, filepath = download_and_persist_topic(
             client, ORG_ID,
