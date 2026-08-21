@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 from contextlib import suppress
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .utils import atomic_write
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ def load_cookies() -> dict[str, str]:
 
 
 def save_cookies(cookies: dict[str, str]) -> None:
-    """Persist cookies to disk atomically (temp file + rename).
+    """Persist cookies to disk atomically with owner-only permissions.
 
     Wraps cookies with an ``extracted_at`` ISO-8601 timestamp.
     """
@@ -91,16 +92,7 @@ def save_cookies(cookies: dict[str, str]) -> None:
         "cookies": cookies,
         "extracted_at": datetime.now(timezone.utc).isoformat(),
     }
-    tmp_file = COOKIE_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        with suppress(OSError):
-            tmp_file.chmod(0o600)
-        tmp_file.replace(COOKIE_FILE)
-    except OSError:
-        if tmp_file.exists():
-            tmp_file.unlink()
-        raise
+    atomic_write(COOKIE_FILE, json.dumps(payload, indent=2), mode=0o600)
 
 
 def get_cookie_age_days() -> float | None:
@@ -124,18 +116,7 @@ def save_mfa_pending(payload: dict) -> None:
     """Persist in-progress MFA state between ``auth login`` and ``auth verify``."""
     ensure_config_dir()
     data = {"version": MFA_PENDING_VERSION, **payload}
-    tmp = MFA_PENDING_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        with suppress(OSError):
-            tmp.chmod(0o600)
-        tmp.replace(MFA_PENDING_FILE)
-    except OSError:
-        if tmp.exists():
-            tmp.unlink()
-        raise
-    with suppress(OSError):
-        MFA_PENDING_FILE.chmod(0o600)
+    atomic_write(MFA_PENDING_FILE, json.dumps(data, indent=2), mode=0o600)
 
 
 def load_mfa_pending() -> dict | None:

@@ -7,11 +7,11 @@ Manages the course-config.json file that maps org-unit-ids to
 from __future__ import annotations
 
 import json
-from contextlib import suppress
 
 from .api import LighthouseClient
 from .config import CONFIG_DIR
 from .display import error as _error, output_json as _output_json, print_table as _print_table, short as _short
+from .utils import atomic_write
 
 COURSE_CONFIG_FILE = CONFIG_DIR / "course-config.json"
 
@@ -29,17 +29,10 @@ def load() -> dict[str, dict[str, str]]:
 def save(config: dict[str, dict[str, str]]) -> None:
     """Save course config to disk atomically."""
     COURSE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = COURSE_CONFIG_FILE.with_suffix(".json.tmp")
-    try:
-        tmp.write_text(
-            json.dumps({"tracked_courses": config}, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(COURSE_CONFIG_FILE)
-    except OSError:
-        with suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
+    atomic_write(
+        COURSE_CONFIG_FILE,
+        json.dumps({"tracked_courses": config}, indent=2, ensure_ascii=False),
+    )
 
 
 def cmd_config_courses(

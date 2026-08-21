@@ -2,8 +2,48 @@
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 import urllib.parse
+from contextlib import suppress
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Atomic file writing
+# ---------------------------------------------------------------------------
+
+def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> None:
+    """Write ``data`` to ``path`` atomically: unique temp file in the target
+    directory, then ``os.replace()``.
+
+    A crash mid-write leaves the previous target intact and never leaves a
+    partially-written file behind; on failure the temp file is removed.
+    ``mode=None`` keeps the umask default (like ``open()``); an explicit mode
+    is applied to the temp file before replacement.
+    """
+    tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        if mode is not None:
+            # Create the temp with its final permissions from the start:
+            # chmod-after-write would leave a window where a 0600-intended
+            # file is readable by others. (0o600 is umask-immune since a
+            # umask can only clear group/other bits.)
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w", **({} if isinstance(data, bytes) else {"encoding": "utf-8"})) as fh:
+                fh.write(data)
+        elif isinstance(data, str):
+            with open(tmp_path, "x", encoding="utf-8") as fh:
+                fh.write(data)
+        else:
+            with open(tmp_path, "xb") as fh:
+                fh.write(data)
+        os.replace(tmp_path, path)
+    except Exception:
+        with suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 # ---------------------------------------------------------------------------
 # Filesystem sanitization
