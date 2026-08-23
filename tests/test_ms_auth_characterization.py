@@ -322,6 +322,34 @@ class TestPasswordFlow:
             run_login(scripted)
         assert ("GET", f"{BASE}/d2l/home") in scripted.calls
 
+    def test_unexpected_response_error_carries_page_shape(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        """The neither-MFA-nor-error-nor-SAML branch enriches its error with the
+        sanitized page-shape summary (status/url/pgid/markers)."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            # KMSI-shaped page: not MFA, not an error page, no SAMLResponse.
+            FakeResponse(200, html=kmsi_html(), url=CREDS_POST_URL),
+        )
+        with pytest.raises(MicrosoftSSOError, match=r"Unexpected response — page:"):
+            run_login(scripted)
+
+    def test_probe_reports_no_mfa_shape_on_stderr(self, scripted: ScriptedSession, isolated_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """probe_mfa_methods reports an unrecognized post-credentials page as
+        no_mfa with the sanitized shape on stderr (never stdout)."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=kmsi_html(), url=CREDS_POST_URL),
+        )
+        client = make_client(scripted)
+        result = client.probe_mfa_methods(USERNAME, PASSWORD)
+        assert result.page == "no_mfa"
+        assert result.proofs == []
+        err = capsys.readouterr().err
+        assert "no_mfa — unrecognized post-credentials page: page:" in err
+        assert capsys.readouterr().out == ""
+
 
 class TestUsernameBootstrap:
     def test_http_bootstrap_when_playwright_missing(
