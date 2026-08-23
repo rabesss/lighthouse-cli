@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Probe Microsoft MFA methods after password (no code submission).
 
-Requires LIGHTHOUSE_USERNAME and LIGHTHOUSE_PASSWORD in the environment.
-Prints registered arrUserProofs from ConvergedTFA — does not print secrets.
+Superseded by the CLI command ``lighthouse auth mfa-methods``; kept as a
+thin diagnostic. Requires LIGHTHOUSE_USERNAME and LIGHTHOUSE_PASSWORD in the
+environment. Prints registered arrUserProofs from ConvergedTFA — does not
+print secrets.
 """
 
 from __future__ import annotations

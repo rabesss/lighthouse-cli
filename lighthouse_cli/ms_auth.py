@@ -43,6 +43,7 @@ from bs4 import BeautifulSoup
 # Re-exports from sub-modules (preserve public API)
 # ---------------------------------------------------------------------------
 from lighthouse_cli.ms_errors import (  # noqa: F401
+    CODE_SUBMITTING_AUTH_IDS,
     LOGIN_PATH,
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
@@ -50,12 +51,15 @@ from lighthouse_cli.ms_errors import (  # noqa: F401
     MFA_METHOD_APP,
     MFA_METHOD_AUTH_IDS,
     MFA_METHOD_AUTO,
+    MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_INSTRUCTIONS,
+    MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
     MfaPendingError,
     MicrosoftSSOError,
     MS_ERROR_CODES,
+    SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
 )
 from lighthouse_cli.config import (
@@ -325,7 +329,7 @@ def build_end_payload(
         "flowToken": end_flow,
         "SessionId": str(begin_data.get("SessionId") or ""),
     }
-    if proof.auth_method_id in (MFA_AUTH_SMS, MFA_AUTH_APP_OTP) and totp_code:
+    if proof.auth_method_id in CODE_SUBMITTING_AUTH_IDS and totp_code:
         payload["AdditionalAuthData"] = totp_code
     return payload
 
@@ -873,6 +877,9 @@ class MicrosoftSSOClient:
             if is_error_page(snap):
                 code, msg = _extract_error_code_and_msg(snap.html)
                 raise build_sso_error(code, msg, "POST credentials")
+            if extract_saml_response(snap.html):
+                # Password accepted, no second factor requested.
+                return MfaProbeResult(page="no_mfa", proofs=[])
             print(
                 f"no_mfa — unrecognized post-credentials page: "
                 f"{describe_page_shape(snap)}",
@@ -1333,7 +1340,7 @@ class MicrosoftSSOClient:
         proofs: list[UserProof],
         selected: UserProof,
         *,
-        sms_triggered: bool,
+        code_sent_on_begin: bool,
     ) -> None:
         if not sys.stdin.isatty():
             return
@@ -1346,14 +1353,15 @@ class MicrosoftSSOClient:
             selected.auth_method_id,
             "Enter the verification code from the method shown above.",
         )
-        if selected.auth_method_id == MFA_AUTH_SMS and sms_triggered:
+        if selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS and code_sent_on_begin:
             phone = _mask_phone_hint(selected.data)
-            print(f"\nA code was requested for {phone}.", flush=True, file=sys.stderr)
-            print(
-                "Delivery (SMS vs WhatsApp) is chosen by Microsoft; the CLI cannot force a channel.",
-                flush=True,
-                file=sys.stderr,
-            )
+            print(f"\nA verification code was just sent to {phone}.", flush=True, file=sys.stderr)
+            if selected.auth_method_id == MFA_AUTH_SMS:
+                print(
+                    "Delivery (SMS vs WhatsApp) is chosen by Microsoft; the CLI cannot force a channel.",
+                    flush=True,
+                    file=sys.stderr,
+                )
         print(f"\n{hint}", flush=True, file=sys.stderr)
 
     def _prompt_mfa_code(self, selected: UserProof) -> str:
@@ -1372,14 +1380,15 @@ class MicrosoftSSOClient:
         totp_code: str | None,
         *,
         read_totp_after_challenge: bool,
-        sms_triggered: bool,
+        code_sent_on_begin: bool,
     ) -> str:
         """Collect OTP after BeginAuth.
 
-        Only SMS issues a fresh server-sent code on BeginAuth; PhoneAppOTP is an
-        offline TOTP generated on the user's device, so a pre-provided code stays valid.
+        Server-sent code methods (SMS/WhatsApp text, TwoWayVoice* phone calls)
+        issue a fresh code on BeginAuth; PhoneAppOTP is an offline TOTP
+        generated on the user's device, so a pre-provided code stays valid.
         """
-        needs_fresh_code = selected.auth_method_id == MFA_AUTH_SMS
+        needs_fresh_code = selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS
         if needs_fresh_code and totp_code and not read_totp_after_challenge:
             totp_code = None
 
@@ -1401,7 +1410,7 @@ class MicrosoftSSOClient:
 
         if totp_code is None or (needs_fresh_code and not totp_code):
             if sys.stdin.isatty():
-                if needs_fresh_code and sms_triggered:
+                if needs_fresh_code and code_sent_on_begin:
                     print(
                         "A verification code was just sent. "
                         "Enter the code from this message (not an older one):",
@@ -1487,8 +1496,8 @@ class MicrosoftSSOClient:
                 recovery="Try a different --mfa-method or check your Microsoft security settings.",
             )
 
-        sms_triggered = selected.auth_method_id == MFA_AUTH_SMS
-        self._print_mfa_phase_banner(proofs, selected, sms_triggered=sms_triggered)
+        code_sent_on_begin = selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS
+        self._print_mfa_phase_banner(proofs, selected, code_sent_on_begin=code_sent_on_begin)
 
         if defer_mfa_to_pending:
             from lighthouse_cli.config import save_mfa_pending
@@ -1514,6 +1523,12 @@ class MicrosoftSSOClient:
                 },
                 "cookies": _export_session_cookies(self._session),
             })
+            if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
+                raise MfaPendingError(
+                    "Approval requested — approve the sign-in on your registered device.",
+                    step="MFA",
+                    recovery="Run: lighthouse auth verify ok  (after approving the request)",
+                )
             raise MfaPendingError(
                 "Verification code sent.",
                 step="MFA",
@@ -1528,7 +1543,7 @@ class MicrosoftSSOClient:
                 selected,
                 totp_code,
                 read_totp_after_challenge=read_totp_after_challenge,
-                sms_triggered=sms_triggered,
+                code_sent_on_begin=code_sent_on_begin,
             )
 
         if selected.auth_method_id != MFA_AUTH_APP_NOTIFY:

@@ -28,6 +28,7 @@ from .config import ensure_config_dir, load_mfa_pending, save_cookies
 from .credential_store import CredentialStore, CredentialStoreError  # noqa: F401
 from .ms_auth import (
     MFA_METHOD_AUTO,
+    MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_SMS,
     MfaPendingError,
@@ -175,7 +176,11 @@ def normalize_totp(
     """
     if totp_stdin:
         return None, True
-    if totp_code is not None and mfa_method in (MFA_METHOD_SMS, MFA_METHOD_CHOOSE):
+    if totp_code is not None and mfa_method in (
+        MFA_METHOD_SMS,
+        MFA_METHOD_CALL,
+        MFA_METHOD_CHOOSE,
+    ):
         totp_code = None
     if totp_code is not None and not totp_code.strip():
         raise ValueError("2FA code cannot be empty")
@@ -314,6 +319,93 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
 
     # No save_credentials_pair by construction: verify never stores secrets.
     return _persist_check_report(cookies, json_output=json_output)
+
+
+@_clean_auth_command
+def cmd_auth_mfa_methods(
+    username: str | None = None,
+    password: str | None = None,
+    *,
+    json_output: bool = False,
+) -> int:
+    """Discover the MFA methods registered on the account (no code is sent).
+
+    Runs the SSO flow up to (but not including) BeginAuth and reports the
+    ``arrUserProofs`` list Microsoft serves.  Use it to decide which
+    ``--mfa-method`` value ``auth login`` supports: sms (OneWaySMS text),
+    call (TwoWayVoice* phone call), app (Authenticator OTP), or push
+    (Authenticator approval).
+    """
+    ensure_config_dir()
+
+    interactive = _is_interactive()
+    stored: tuple[str, str] | None = None
+    if not username or not password:
+        with suppress(CredentialStoreError):
+            stored = CredentialStore().load()
+
+    def _prompt(field: str) -> str:
+        if not interactive:
+            raise _PromptUnavailable(field)
+        if field == "username":
+            return _prompt_username(json_output)
+        return _prompt_password()
+
+    try:
+        username, password = resolve_credentials(
+            username,
+            password,
+            os.getenv("LIGHTHOUSE_USERNAME", "").strip(),
+            os.getenv("LIGHTHOUSE_PASSWORD", "").strip(),
+            stored,
+            _prompt,
+        )
+    except _PromptUnavailable:
+        return _auth_error(
+            "Credentials required. Provide --user/--pass, "
+            "LIGHTHOUSE_USERNAME/LIGHTHOUSE_PASSWORD env vars, "
+            "or run interactively.",
+            json_output,
+        )
+    if not username or not password:
+        return _auth_error("Username and password are required", json_output)
+
+    sso_client = MicrosoftSSOClient()
+    try:
+        result = sso_client.probe_mfa_methods(username or "", password or "")
+    except MicrosoftSSOError as exc:
+        return _auth_error(str(exc), json_output)
+    finally:
+        sso_client.close()
+
+    # Report ids + the masked display strings only; `proof.data` can carry
+    # raw phone numbers and never leaves the probe.
+    methods = [
+        {
+            "id": proof.auth_method_id,
+            "display": proof.display,
+            "is_default": proof.is_default,
+        }
+        for proof in result.proofs
+    ]
+    if json_output:
+        print(json.dumps({"success": True, "page": result.page, "methods": methods}))
+        return 0
+
+    if result.page == "no_mfa":
+        print("This account signed in without a second factor.")
+        return 0
+    if not methods:
+        print(
+            "A second factor is required, but this tenant serves a legacy "
+            "form page without a method list. Use: lighthouse auth login"
+        )
+        return 0
+    print("MFA methods registered on this account:")
+    for proof in result.proofs:
+        marker = " (Microsoft default)" if proof.is_default else ""
+        print(f"  • {proof.display} — {proof.auth_method_id}{marker}")
+    return 0
 
 
 @_clean_auth_command

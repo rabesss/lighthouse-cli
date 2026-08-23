@@ -1153,3 +1153,137 @@ class TestUnreadablePendingCheckpoint:
         assert sso.login.called  # the flow itself completed
         assert "sealed-hint-sentinel" in result.output
         assert "Unexpected error" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# auth mfa-methods: discover registered 2FA methods without sending a code
+# ---------------------------------------------------------------------------
+
+def _probe_result(page: str = "converged", proofs: list[Any] | None = None):
+    from lighthouse_cli.ms_mfa import MfaProbeResult, UserProof
+
+    return MfaProbeResult(
+        page=page,
+        proofs=proofs
+        if proofs is not None
+        else [
+            UserProof("OneWaySMS", "Text +91 ***1234", "+919876541234", False),
+            UserProof("TwoWayVoiceMobile", "Call +91 ***1234", "+919876541234", True),
+            UserProof("PhoneAppOTP", "Authenticator app", "", False),
+        ],
+    )
+
+
+class TestAuthMfaMethodsCommand:
+    def _invoke(self, runner: CliRunner, args: list[str]) -> Any:
+        return runner.invoke(cli, ["auth", "mfa-methods", *args], catch_exceptions=False)
+
+    def test_registered_in_auth_help(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(cli, ["auth", "--help"])
+        assert result.exit_code == 0
+        assert "mfa-methods" in result.output
+
+    def test_json_output_lists_methods_and_keeps_stdout_pure(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        probe = MagicMock(return_value=_probe_result())
+        with patch.object(auth_mod.MicrosoftSSOClient, "probe_mfa_methods", probe):
+            result = self._invoke(cli_runner, ["--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["success"] is True
+        assert payload["page"] == "converged"
+        ids = [m["id"] for m in payload["methods"]]
+        assert ids == ["OneWaySMS", "TwoWayVoiceMobile", "PhoneAppOTP"]
+        assert payload["methods"][1]["is_default"] is True
+        # The raw phone number (proof.data) must never reach the output.
+        assert "+919876541234" not in result.stdout
+
+    def test_human_output_lists_methods(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        with patch.object(
+            auth_mod.MicrosoftSSOClient, "probe_mfa_methods",
+            MagicMock(return_value=_probe_result()),
+        ):
+            result = self._invoke(cli_runner, [])
+
+        assert result.exit_code == 0
+        assert "TwoWayVoiceMobile" in result.output
+        assert "Microsoft default" in result.output
+        assert "+919876541234" not in result.output
+
+    def test_no_mfa_account_reports_cleanly(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        with patch.object(
+            auth_mod.MicrosoftSSOClient, "probe_mfa_methods",
+            MagicMock(return_value=_probe_result(page="no_mfa", proofs=[])),
+        ):
+            result = self._invoke(cli_runner, ["--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == {
+            "success": True, "page": "no_mfa", "methods": [],
+        }
+
+    def test_sso_error_becomes_clean_json_error(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        boom = MagicMock(side_effect=MicrosoftSSOError("[50126] wrong password"))
+        with patch.object(auth_mod.MicrosoftSSOClient, "probe_mfa_methods", boom):
+            result = self._invoke(cli_runner, ["--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["success"] is False
+
+    def test_missing_credentials_error(
+        self, cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("LIGHTHOUSE_USERNAME", raising=False)
+        monkeypatch.delenv("LIGHTHOUSE_PASSWORD", raising=False)
+        with patch.object(auth_mod, "CredentialStore") as store:
+            store.return_value.load.return_value = None
+            result = self._invoke(cli_runner, ["--json"])
+
+        assert result.exit_code == 1
+        assert "Credentials required" in json.loads(result.stdout)["error"]
+
+
+class TestMfaMethodVocabulary:
+    def test_call_discards_literal_totp(self) -> None:
+        """Voice codes are spoken after BeginAuth: a literal --totp cannot match."""
+        code, read_after = normalize_totp(
+            "123456", totp_stdin=False, mfa_method="call"
+        )
+        assert code is None
+        assert read_after is False
+
+    def test_push_accepts_stdin_deferral(self) -> None:
+        code, read_after = normalize_totp(
+            None, totp_stdin=True, mfa_method="push"
+        )
+        assert code is None
+        assert read_after is True
+
+    def test_login_accepts_call_and_push_choices(self, cli_runner: CliRunner) -> None:
+        """--mfa-method call/push parse at the CLI layer."""
+        for method in ("call", "push"):
+            result = cli_runner.invoke(
+                cli, ["auth", "login", "--mfa-method", method, "--help"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0

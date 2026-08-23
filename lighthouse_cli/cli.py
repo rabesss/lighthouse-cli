@@ -65,9 +65,9 @@ def auth_status(json_output: bool) -> None:
 @click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option(
     "--mfa-method",
-    type=click.Choice(["auto", "sms", "app", "choose"]),
+    type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
     default=None,
-    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+    help="MFA: auto (tenant default), sms, call (voice), app (TOTP), push (approve), or choose.",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
 def auth_refresh(
@@ -98,9 +98,9 @@ def auth_refresh(
 @click.option("--totp", "totp", default=None, help="2FA code. Omit for two-phase interactive login.")
 @click.option(
     "--mfa-method",
-    type=click.Choice(["auto", "sms", "app", "choose"]),
+    type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
     default=None,
-    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+    help="MFA: auto (tenant default), sms, call (voice), app (TOTP), push (approve), or choose.",
 )
 @click.option(
     "--save-credentials",
@@ -128,9 +128,12 @@ def auth_login(
     Two-phase interactive login (TTY): username/password first, then verification
     code after Microsoft accepts your password.
 
-    MFA: --mfa-method auto (default), sms, app, or choose (pick from a list).
-    Text codes may arrive via SMS or WhatsApp depending on Microsoft; the CLI
-    cannot select the delivery channel.
+    MFA: --mfa-method auto (default), sms, call, app, push, or choose (pick from
+    a list). Text codes may arrive via SMS or WhatsApp depending on Microsoft;
+    the CLI cannot select the delivery channel. Voice codes (call) are spoken
+    during the phone call; push is approved in Microsoft Authenticator.
+
+    Discover what the account supports first: lighthouse auth mfa-methods
 
     Session cookies typically expire after ~5 days (MAHE tenant policy); re-run
     login when auth status fails. --save-credentials stores email/password only.
@@ -173,6 +176,30 @@ def auth_verify(code: str, json_output: bool) -> None:
     from lighthouse_cli.auth import cmd_auth_verify
 
     raise SystemExit(cmd_auth_verify(code, json_output=json_output))
+
+
+@auth.command("mfa-methods")
+@click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
+@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON.")
+def auth_mfa_methods(
+    username: str | None,
+    password: str | None,
+    json_output: bool,
+) -> None:
+    """List the MFA methods registered on the account (no code is sent).
+
+    Runs the SSO flow up to — but not including — the verification step and
+    reports the methods Microsoft offers: OneWaySMS (sms), TwoWayVoice*
+    (call), PhoneAppOTP (app), PhoneAppNotification (push).
+    """
+    from lighthouse_cli.auth import cmd_auth_mfa_methods
+
+    raise SystemExit(cmd_auth_mfa_methods(
+        username=username,
+        password=password,
+        json_output=json_output,
+    ))
 
 
 

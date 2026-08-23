@@ -9,8 +9,11 @@ import requests
 
 from lighthouse_cli.ms_auth import (
     MFA_METHOD_APP,
+    MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
+    MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    VALID_MFA_METHODS,
     ResponseSnapshot,
     _prompt_user_proof_choice,
     MicrosoftSSOClient,
@@ -172,7 +175,7 @@ class TestCollectTotpAfterChallenge:
         client = MicrosoftSSOClient()
         selected = UserProof("PhoneAppOTP", "Authenticator app", "", True)
         code = client._collect_totp_after_challenge(
-            selected, "123456", read_totp_after_challenge=False, sms_triggered=False
+            selected, "123456", read_totp_after_challenge=False, code_sent_on_begin=False
         )
         assert code == "123456"
         client.close()
@@ -648,3 +651,90 @@ class TestStaySignedInDetection:
         assert is_mfa_page(html) is False
         snap = ResponseSnapshot(url="https://x", status_code=200, location="", html=html)
         assert kmsi_page_detected(snap) is True
+
+
+# ---------------------------------------------------------------------------
+# Voice-call and push MFA vocabulary (TwoWayVoice*, PhoneAppNotification)
+# ---------------------------------------------------------------------------
+
+VOICE_PROOFS_HTML = """<html><body>ConvergedTFA
+<script>
+$Config = {
+    "sFT": "mfa-flow",
+    "sCtx": "mfa-ctx",
+    "arrUserProofs": [
+        {"authMethodId": "TwoWayVoiceMobile", "display": "Call +91 ***1234", "data": "+919876541234", "isDefault": false},
+        {"authMethodId": "TwoWayVoiceAlternateMobile", "display": "Call +91 ***5678", "data": "+919876545678", "isDefault": false},
+        {"authMethodId": "TwoWayVoiceOffice", "display": "Call office", "data": "+918012345678", "isDefault": false},
+        {"authMethodId": "PhoneAppNotification", "display": "Approve in app", "data": "", "isDefault": true},
+        {"authMethodId": "PhoneAppOTP", "display": "Authenticator code", "data": "", "isDefault": false}
+    ]
+};
+</script>
+</body></html>"""
+
+
+class TestVoiceAndPushMethods:
+    def _voice_proofs(self):
+        return _parse_user_proofs(_extract_config_json(VOICE_PROOFS_HTML) or {})
+
+    def test_call_selects_mobile_voice_first(self) -> None:
+        selected = _select_user_proof(self._voice_proofs(), MFA_METHOD_CALL)
+        assert selected.auth_method_id == "TwoWayVoiceMobile"
+
+    def test_call_without_voice_methods_errors_with_options(self) -> None:
+        proofs = [
+            UserProof("PhoneAppOTP", "Authenticator app", "", True),
+        ]
+        with pytest.raises(MicrosoftSSOError, match="not available"):
+            _select_user_proof(proofs, MFA_METHOD_CALL)
+
+    def test_push_selects_notification_only(self) -> None:
+        selected = _select_user_proof(self._voice_proofs(), MFA_METHOD_PUSH)
+        assert selected.auth_method_id == "PhoneAppNotification"
+
+    def test_call_is_a_valid_method(self) -> None:
+        assert MFA_METHOD_CALL in VALID_MFA_METHODS
+        assert MFA_METHOD_PUSH in VALID_MFA_METHODS
+
+    def test_voice_codes_are_server_sent(self) -> None:
+        """A pre-provided --totp cannot match a spoken code: discarded."""
+        from lighthouse_cli.ms_errors import SERVER_SENT_CODE_AUTH_IDS
+
+        client = MicrosoftSSOClient()
+        try:
+            selected = UserProof("TwoWayVoiceMobile", "Call +91 ***1234", "", False)
+            assert selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS
+            # Non-interactive + no stdin deferral -> clean error, never a
+            # silent reuse of a stale literal code.
+            import io
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("sys.stdin", io.StringIO(""))
+                with pytest.raises(MicrosoftSSOError):
+                    client._collect_totp_after_challenge(
+                        selected,
+                        "123456",
+                        read_totp_after_challenge=False,
+                        code_sent_on_begin=True,
+                    )
+        finally:
+            client.close()
+
+    def test_end_payload_carries_code_for_voice(self) -> None:
+        from lighthouse_cli.ms_auth import build_end_payload
+
+        proof = UserProof("TwoWayVoiceOffice", "Call office", "", False)
+        payload = build_end_payload(
+            proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
+        )
+        assert payload["AdditionalAuthData"] == "998877"
+
+    def test_end_payload_never_carries_code_for_push(self) -> None:
+        from lighthouse_cli.ms_auth import build_end_payload
+
+        proof = UserProof("PhoneAppNotification", "Approve in app", "", True)
+        payload = build_end_payload(
+            proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
+        )
+        assert "AdditionalAuthData" not in payload

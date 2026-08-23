@@ -9,27 +9,64 @@ from __future__ import annotations
 
 LOGIN_PATH = "/d2l/lp/auth/saml/login"
 
-# CLI / env preference: auto | sms | app
+# CLI / env preference: auto | sms | app | call | push | choose
 MFA_METHOD_AUTO = "auto"
 MFA_METHOD_SMS = "sms"
 MFA_METHOD_APP = "app"
+MFA_METHOD_CALL = "call"
+MFA_METHOD_PUSH = "push"
 MFA_METHOD_CHOOSE = "choose"
-VALID_MFA_METHODS = (MFA_METHOD_AUTO, MFA_METHOD_SMS, MFA_METHOD_APP, MFA_METHOD_CHOOSE)
+VALID_MFA_METHODS = (
+    MFA_METHOD_AUTO,
+    MFA_METHOD_SMS,
+    MFA_METHOD_APP,
+    MFA_METHOD_CALL,
+    MFA_METHOD_PUSH,
+    MFA_METHOD_CHOOSE,
+)
 
-# Microsoft SAS AuthMethodId values (see saml2aws AzureAD provider)
+# Microsoft SAS AuthMethodId values (see saml2aws AzureAD provider and the
+# StrongAuthenticationMethod names in Microsoft Entra)
 MFA_AUTH_SMS = "OneWaySMS"
 MFA_AUTH_APP_OTP = "PhoneAppOTP"
 MFA_AUTH_APP_NOTIFY = "PhoneAppNotification"
+MFA_AUTH_VOICE_MOBILE = "TwoWayVoiceMobile"
+MFA_AUTH_VOICE_ALT_MOBILE = "TwoWayVoiceAlternateMobile"
+MFA_AUTH_VOICE_OFFICE = "TwoWayVoiceOffice"
+
+# Methods whose verification code is generated server-side and delivered on
+# BeginAuth (SMS/WhatsApp text, or spoken during a phone call): a literal
+# pre-provided code cannot match — always collect after the challenge.
+SERVER_SENT_CODE_AUTH_IDS = frozenset({
+    MFA_AUTH_SMS,
+    MFA_AUTH_VOICE_MOBILE,
+    MFA_AUTH_VOICE_ALT_MOBILE,
+    MFA_AUTH_VOICE_OFFICE,
+})
+
+# Methods that submit a code through EndAuth's AdditionalAuthData: offline
+# authenticator TOTP plus every server-sent code method. Codeless methods
+# (push notification approval) never send one.
+CODE_SUBMITTING_AUTH_IDS = frozenset({MFA_AUTH_APP_OTP}) | SERVER_SENT_CODE_AUTH_IDS
 
 MFA_METHOD_AUTH_IDS: dict[str, tuple[str, ...]] = {
     MFA_METHOD_SMS: (MFA_AUTH_SMS,),
     MFA_METHOD_APP: (MFA_AUTH_APP_OTP, MFA_AUTH_APP_NOTIFY),
+    MFA_METHOD_CALL: (
+        MFA_AUTH_VOICE_MOBILE,
+        MFA_AUTH_VOICE_ALT_MOBILE,
+        MFA_AUTH_VOICE_OFFICE,
+    ),
+    MFA_METHOD_PUSH: (MFA_AUTH_APP_NOTIFY,),
 }
 
 MFA_METHOD_INSTRUCTIONS: dict[str, str] = {
     MFA_AUTH_SMS: "Check the SMS text message on your registered phone.",
     MFA_AUTH_APP_OTP: "Open Microsoft Authenticator and enter the 6-digit code.",
     MFA_AUTH_APP_NOTIFY: "Approve the sign-in request in Microsoft Authenticator.",
+    MFA_AUTH_VOICE_MOBILE: "Answer the phone call and enter the code it reads out.",
+    MFA_AUTH_VOICE_ALT_MOBILE: "Answer the phone call and enter the code it reads out.",
+    MFA_AUTH_VOICE_OFFICE: "Answer the office phone call and enter the code it reads out.",
 }
 
 # Microsoft error codes and their meanings
