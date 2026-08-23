@@ -17,7 +17,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[auth,credentials]'
 playwright install chromium   # once — username step on MAHE tenant
 
-# Authenticate (HTTP SSO + SMS MFA)
+# Authenticate (HTTP SSO + MFA)
+lighthouse auth mfa-methods          # discover available 2FA methods (sends no code)
 lighthouse auth login --mfa-method sms
 lighthouse auth verify 123456   # code from the SMS/WhatsApp you just received
 
@@ -72,11 +73,13 @@ graph TD
 
 - **Auth (SSO — primary):** Pure-HTTP Microsoft Entra (Azure AD) SSO
   (`ms_auth.py`, split across `ms_parse`/`ms_session`/`ms_mfa`/`ms_errors`),
-  with optional Playwright for the username "Next" step only. SMS MFA uses
-  `auth login` then `auth verify` so the OTP matches the same `BeginAuth`
-  session; offline Authenticator TOTP completes in one step with
-  `--mfa-method app --totp <code>`. See
-  [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
+  with optional Playwright for the username "Next" step only (falls back to
+  the mirrored HTTP sequence when the browser cannot launch). SMS and
+  voice-call MFA use `auth login` then `auth verify` so the code matches the
+  same `BeginAuth` session; offline Authenticator TOTP completes in one step
+  with `--mfa-method app --totp <code>`; push approval is codeless
+  (`--mfa-method push`). `auth mfa-methods` lists what the account supports.
+  See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 - **Auth (CDP — `auth refresh` only):** Session cookies
   (`d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
   `d2lSameSiteCanaryB`) can also be extracted from a running browser via
@@ -128,12 +131,12 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ---
 
-### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|choose] [--save-credentials] [--json]`
+### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|call|push|choose] [--save-credentials] [--json]`
 
 Microsoft SSO login (HTTP + optional Playwright for the username step). For
-SMS/WhatsApp, agents should use **`auth verify`** after login sends a code — see
-[docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md). Session cookies
-usually expire after ~5 days; re-run login when `auth status` fails.
+SMS/WhatsApp and voice-call codes, agents should use **`auth verify`** after
+login sends the code — see [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
+Session cookies usually expire after ~5 days; re-run login when `auth status` fails.
 
 **Credentials (pick one; do not commit secrets):**
 
@@ -155,7 +158,7 @@ lighthouse auth login
 | `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
 | `--pass` | — | Password for Microsoft SSO (or `LIGHTHOUSE_PASSWORD` env var) |
 | `--totp` | — | 2FA code. Omit for two-phase interactive prompt |
-| `--mfa-method` | `auto` | `auto`, `sms`, `app`, or `choose` (interactive list) |
+| `--mfa-method` | `auto` | `auto`, `sms`, `app`, `call` (voice), `push` (approve), or `choose` (interactive list) |
 | `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days |
 | `--json` | — | Machine-readable output |
 
@@ -163,10 +166,11 @@ lighthouse auth login
 
 1. GET D2L SAML login → Microsoft
 2. Username step (Playwright if `[auth]` installed) → password POST
-3. `BeginAuth` sends SMS; may exit and save `mfa_pending.json`
-4. `lighthouse auth verify <code>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
-5. Saves cookies to `~/.config/lighthouse-cli/cookies.json` (encrypted)
-6. Optional `--save-credentials` (encrypted via CredentialStore)
+3. Session-pull interstitial hop (re-POST echoed params, bounded — Aug 2026 upstream change)
+4. `BeginAuth` sends the code (or the approval prompt for `push`); may exit and save `mfa_pending.json`
+5. `lighthouse auth verify <code>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
+6. Saves cookies to `~/.config/lighthouse-cli/cookies.json` (encrypted)
+7. Optional `--save-credentials` (encrypted via CredentialStore)
 
 **Encryption key sources** (checked in order; a usable source is required
 before any login side effect):
@@ -188,6 +192,13 @@ sealed format automatically on first successful read.
 
 Complete MFA using the pending session from `auth login` (same `BeginAuth` —
 do not run `login` again before verifying). Required for non-TTY / agent workflows.
+
+### `lighthouse auth mfa-methods [--user EMAIL] [--pass PASSWORD] [--json]`
+
+Discover the MFA methods registered on the account without sending any code.
+Runs the SSO flow up to (not including) the verification step and reports
+each method's `authMethodId` (OneWaySMS, TwoWayVoice*, PhoneAppOTP,
+PhoneAppNotification) with the `--mfa-method` spelling that selects it.
 
 **Human output:**
 ```
