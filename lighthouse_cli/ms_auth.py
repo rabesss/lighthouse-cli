@@ -1173,7 +1173,22 @@ class MicrosoftSSOClient:
             from playwright.sync_api import sync_playwright  # noqa: F401
         except ImportError:
             return self._step_prepare_username_http(config, username)
-        return self._bootstrap_username_via_playwright(config, username)
+        try:
+            return self._bootstrap_username_via_playwright(config, username)
+        except MicrosoftSSOError as exc:
+            # Playwright imports but cannot actually run (Chromium not
+            # installed, sandbox denied, driver/OS mismatch). The browser
+            # bootstrap is an optimization over the mirrored HTTP sequence,
+            # not a requirement — degrade with a warning instead of failing
+            # the login; the HTTP path raises if it also fails. The error
+            # text carries no credentials (it wraps a launcher failure).
+            print(
+                f"Playwright username bootstrap unavailable ({exc}); "
+                "using the pure-HTTP flow.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return self._step_prepare_username_http(config, username)
 
     def _step_get_credential_type(
         self, config: dict[str, Any], username: str

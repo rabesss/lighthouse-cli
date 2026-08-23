@@ -451,10 +451,12 @@ class TestUsernameBootstrap:
         assert any(u.endswith("/dssostatus") for u in urls)
         assert f"{MS_BASE}/common/GetCredentialType" in urls
 
-    def test_playwright_failure_wraps_cleanly(
-        self, scripted: ScriptedSession, isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+    def test_playwright_launch_failure_falls_back_to_http(
+        self, scripted: ScriptedSession, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A Playwright runtime failure becomes a clean MicrosoftSSOError."""
+        """Playwright importable but Chromium missing: warn on stderr and
+        continue via the mirrored HTTP sequence instead of failing login."""
         fake_api = ModuleType("playwright.sync_api")
         def boom(*a: Any, **k: Any) -> None:
             raise RuntimeError("chromium executable missing")
@@ -467,8 +469,56 @@ class TestUsernameBootstrap:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(url_get_credential_type=True), url=MS_SSO_URL),
+            # HTTP bootstrap: Me.htm, ssoprobe, dssostatus, GCT, ssoprobe, dssostatus
+            FakeResponse(200, html="{}", url="https://login.live.com/Me.htm?v=3"),
+            FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
+            FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
+            FakeResponse(200, json_data={"FlowToken": "FLOW-TOKEN-2"},
+                         url=f"{MS_BASE}/common/GetCredentialType"),
+            FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
+            FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
+            FakeResponse(200, html=SAML_HTML, url=CREDS_POST_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
         )
-        with pytest.raises(MicrosoftSSOError, match="Playwright username bootstrap failed"):
+        set_d2l_cookies(scripted)
+
+        cookies = run_login(scripted)
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert f"{MS_BASE}/common/GetCredentialType" in [u for _, u in scripted.calls]
+        captured = capsys.readouterr()
+        assert "falling back" in captured.err or "pure-HTTP flow" in captured.err
+        assert PASSWORD not in captured.err
+        assert captured.out == ""
+
+    def test_playwright_failure_surfaces_when_http_also_fails(
+        self, scripted: ScriptedSession, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both paths unusable: the login fails (here via the HTTP path's own
+        transport error) rather than swallowing it after the Playwright
+        warning; the CLI-level wrapper renders it without a raw traceback."""
+        fake_api = ModuleType("playwright.sync_api")
+        def boom(*a: Any, **k: Any) -> None:
+            raise RuntimeError("chromium executable missing")
+        fake_api.sync_playwright = boom  # type: ignore[attr-defined]
+        fake_root = ModuleType("playwright")
+        fake_root.sync_api = fake_api  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "playwright", fake_root)
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+        monkeypatch.setattr(
+            MicrosoftSSOClient,
+            "_step_prepare_username_http",
+            lambda self, config, username: (_ for _ in ()).throw(
+                requests.ConnectionError("network unreachable")
+            ),
+        )
+
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(url_get_credential_type=True), url=MS_SSO_URL),
+        )
+        with pytest.raises(requests.ConnectionError):
             run_login(scripted)
 
 
