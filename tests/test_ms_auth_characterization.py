@@ -165,7 +165,7 @@ class FakeResponse:
         html: str = "",
         url: str = "",
         headers: dict[str, str] | None = None,
-        json_data: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | list[Any] | str | None = None,
     ) -> None:
         self.status_code = status_code
         self.text = html
@@ -173,7 +173,7 @@ class FakeResponse:
         self.headers = headers or {}
         self._json = json_data
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> Any:
         if self._json is None:
             raise json.JSONDecodeError("Expecting value", "<html>", 0)
         return self._json
@@ -822,20 +822,68 @@ class TestFlowRecorder:
         resp = type("R", (), {"status_code": 200, "text": "ok", "url": "https://x.test/a?token=SECRET", "headers": {}})()
         with patch.object(client._session, "get", return_value=resp):
             client._get("https://x.test/a?token=SECRET")
-        client._record_flow("POST", "https://login.microsoftonline.com/common/login",
-                            field_names=["login", "passwd", "ctx"])
-        lines = [json.loads(l) for l in log.read_text().splitlines()]
+        # POST records via a mocked transport: field NAMES only, never values.
+        post_resp = type("R", (), {"status_code": 200, "text": "ok", "url": "https://x.test/login", "headers": {}})()
+        with patch.object(client._session, "post", return_value=post_resp):
+            client._post("https://x.test/login", data={"passwd": "SECRETVALUE", "login": "user"})
+        log_text = log.read_text()
+        lines = [json.loads(line) for line in log_text.splitlines()]
         assert lines[0] == {"method": "GET", "url": "x.test/a", "status": 200}
-        assert "SECRET" not in log.read_text()
-        assert set(lines[1]["form_fields"]) == {"login", "passwd", "ctx"}
-        assert "passwd" not in json.dumps(lines[1].get("page", ""))
+        assert "SECRET" not in log_text
+        assert "SECRETVALUE" not in log_text
+        # "passwd" appears only as a field NAME inside a form_fields record.
+        for record in lines:
+            if "passwd" in json.dumps(record):
+                assert record["method"] == "POST"
+                assert "passwd" in record["form_fields"]
 
-    def test_disabled_by_default(self, tmp_path):
+    def test_disabled_by_default(self, tmp_path, monkeypatch):
         from lighthouse_cli.ms_auth import MicrosoftSSOClient
 
+        monkeypatch.delenv("LIGHTHOUSE_DEBUG_FLOW", raising=False)
         client = MicrosoftSSOClient()
         client._record_flow("GET", "https://x.test/a")
         assert not list(tmp_path.glob("*.jsonl"))  # nothing written anywhere
+
+        # Prove the assertion above is meaningful: the same recorder with the
+        # env var set DOES write the record.
+        on = tmp_path / "on.jsonl"
+        monkeypatch.setenv("LIGHTHOUSE_DEBUG_FLOW", str(on))
+        enabled = MicrosoftSSOClient()
+        enabled._record_flow("GET", "https://x.test/a")
+        assert on.exists()
+
+    def test_username_prepare_records_ssoprobe_gets(self, tmp_path):
+        """The direct ssoprobe GETs (not routed through _get) reach the flow log."""
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        client._session = ScriptedSession()
+        client._session.enqueue(
+            FakeResponse(200, html="", url="https://login.live.com/Me.htm?v=3"),
+            FakeResponse(200, html="", url="https://autologon.microsoftazuread-sso.com/common/winauth/ssoprobe"),
+            FakeResponse(200, json_data={}, url=f"{MS_BASE}/common/instrumentation/dssostatus"),
+            FakeResponse(200, json_data={"FlowToken": "FLOW-TOKEN-2"}, url=f"{MS_BASE}/common/GetCredentialType"),
+            FakeResponse(200, html="", url="https://autologon.microsoftazuread-sso.com/common/winauth/ssoprobe"),
+            FakeResponse(200, json_data={}, url=f"{MS_BASE}/common/instrumentation/dssostatus"),
+        )
+        config = {
+            "sFT": "tok",
+            "sCtx": "ctx",
+            "urlGetCredentialType": "/common/GetCredentialType",
+            "_ms_url": f"{MS_BASE}/common/",
+            "correlationId": "cid",
+        }
+        client._step_prepare_username_http(config, USERNAME)
+
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        probes = [r for r in records if "/winauth/ssoprobe" in r["url"]]
+        assert len(probes) == 2  # pre-GCT probe + post-GCT cache-busted probe
+        assert {r["method"] for r in probes} == {"GET"}
+        assert {r["status"] for r in probes} == {200}
+        # The recorder strips query strings: no client-request-id / cache-buster.
+        assert "client-request-id" not in log.read_text()
 
 
 class TestGctMalformedResponse:
@@ -852,6 +900,26 @@ class TestGctMalformedResponse:
                   "_ms_url": "https://login.microsoftonline.com/x"}
         out = client._step_get_credential_type(config, "user@example.edu")
         assert out == config  # unchanged, no UnboundLocalError
-        records = [json.loads(l) for l in (tmp_path / "flow.jsonl").read_text().splitlines()]
-        gct = [r for r in records if r["method"] == "GCT"]
-        assert gct and gct[0]["form_fields"] == ["(unparseable)"]
+        records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
+        # Post-response GCT record uses the POST method label (matches the
+        # pre-request intent record) and flags the body as unparseable.
+        gct = [r for r in records if "GetCredentialType" in r["url"] and r.get("status") == 200]
+        assert gct and gct[0]["method"] == "POST"
+        assert gct[0]["form_fields"] == ["(unparseable)"]
+
+    @pytest.mark.parametrize("payload", [[1, 2, 3], "ok"])
+    def test_non_dict_json_200_returns_config_unchanged(self, tmp_path, payload):
+        """Valid-but-non-object JSON (array, string) must not crash key extraction."""
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        client = MicrosoftSSOClient(flow_log=str(tmp_path / "flow.jsonl"))
+        client._session = ScriptedSession()
+        client._session.enqueue(FakeResponse(200, json_data=payload))
+        config = {"sFT": "tok", "sCtx": "ctx", "urlPost": "/common/login",
+                  "urlGetCredentialType": "/common/GetCredentialType",
+                  "_ms_url": "https://login.microsoftonline.com/x"}
+        out = client._step_get_credential_type(config, "user@example.edu")
+        assert out == config  # unchanged, no AttributeError on .keys()
+        records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
+        gct = [r for r in records if "GetCredentialType" in r["url"] and r.get("status") == 200]
+        assert gct and gct[0]["form_fields"] == []  # no keys to report

@@ -948,6 +948,7 @@ class MicrosoftSSOClient:
                 "hpgrequestid": str(config.get("sessionId") or ""),
                 "Referer": referer,
             },
+            allow_redirects=False,
             timeout=self._timeout,
         )
         self._record_flow(
@@ -1059,31 +1060,31 @@ class MicrosoftSSOClient:
             headers={"Referer": referer},
         )
 
-        self._session.get(
-            (
-                "https://autologon.microsoftazuread-sso.com/"
-                f"{tenant_id}/winauth/ssoprobe?client-request-id={client_request_id}"
-            ),
+        ssoprobe_url = (
+            "https://autologon.microsoftazuread-sso.com/"
+            f"{tenant_id}/winauth/ssoprobe?client-request-id={client_request_id}"
+        )
+        probe_resp = self._session.get(
+            ssoprobe_url,
             headers={"Referer": referer},
             allow_redirects=False,
             timeout=self._timeout,
         )
+        self._record_flow("GET", ssoprobe_url, probe_resp.status_code)
 
         canary_hdr = str(config.get("apiCanary") or config.get("canary") or "")
         self._post_dsso_status(config, canary_hdr)
 
         updated = self._step_get_credential_type(config, username)
 
-        self._session.get(
-            (
-                "https://autologon.microsoftazuread-sso.com/"
-                f"{tenant_id}/winauth/ssoprobe?client-request-id={client_request_id}"
-                f"&_={int(time.time() * 1000)}"
-            ),
+        ssoprobe_url_2 = f"{ssoprobe_url}&_={int(time.time() * 1000)}"
+        probe2_resp = self._session.get(
+            ssoprobe_url_2,
             headers={"Referer": referer},
             allow_redirects=False,
             timeout=self._timeout,
         )
+        self._record_flow("GET", ssoprobe_url_2, probe2_resp.status_code)
 
         post_gct_canary = str(updated.get("apiCanary") or canary_hdr)
         self._post_dsso_status(updated, post_gct_canary)
@@ -1151,15 +1152,15 @@ class MicrosoftSSOClient:
             timeout=self._timeout,
         )
         gct_keys: list[str] = []
-        data: dict[str, Any] | None = None
+        data: Any = None
         if resp.status_code == 200:
             try:
                 data = resp.json()
-                gct_keys = sorted(data.keys())
+                gct_keys = sorted(data.keys()) if isinstance(data, dict) else []
             except json.JSONDecodeError:
                 gct_keys = ["(unparseable)"]
         self._record_flow(
-            "GCT",
+            "POST",
             gct_full,
             resp.status_code,
             field_names=gct_keys,
@@ -1755,11 +1756,13 @@ class MicrosoftSSOClient:
             return
 
         # Some ACS flows set cookies only after landing on /d2l/home
+        home_url = f"{BASE_URL}/d2l/home"
         home_resp = self._session.get(
-            f"{BASE_URL}/d2l/home",
+            home_url,
             allow_redirects=True,
             timeout=self._timeout,
         )
+        self._record_flow("GET", home_url, home_resp.status_code)
         if home_resp.status_code < 400 and any(
             n.startswith("d2l") for n in self._session.cookies.keys()
         ):
