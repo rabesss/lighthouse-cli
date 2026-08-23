@@ -938,7 +938,9 @@ def test_totp_not_persisted(
     """A real (mocked-SSO) login never leaks the TOTP into the sealed artifact."""
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-    totp = "654321SENTINEL"
+    # '+' and '/' are percent-escaped by urllib.parse.quote, so the two
+    # assertions below check genuinely different byte sequences.
+    totp = "654+21/SEN="
 
     with _mock_sso():
         result = _invoke_login(cli_runner, ["--totp", totp])
@@ -1092,3 +1094,62 @@ def test_config_directory_auto_created(
     assert config_dir.exists()
     mode = config_dir.stat().st_mode & 0o777
     assert mode in (0o700, 0o755)
+
+
+# ---------------------------------------------------------------------------
+# Review-round regressions: unreadable pending checkpoint + first-party errors
+# ---------------------------------------------------------------------------
+
+class TestUnreadablePendingCheckpoint:
+    """A pending checkpoint sealed under a different key source must not
+    abort a fresh --totp login that would never resume it (PR review)."""
+
+    def test_fresh_totp_login_proceeds_past_unopenable_pending(
+        self,
+        cli_runner: CliRunner,
+        isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lighthouse_cli.config import save_mfa_pending
+
+        # Day 1: checkpoint sealed under one passphrase...
+        monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", "day-one-passphrase")
+        save_mfa_pending({"mfa_method": "sms", "created_at": "2026-08-01T00:00:00Z"})
+        # Day 2: passphrase removed/replaced — the sealed file can't open.
+        monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", "day-two-passphrase")
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, ["--totp", "123456", "--mfa-method", "app"])
+
+        assert result.exit_code == 0, result.output
+        # The SSO client was invoked (fresh flow), not aborted by the load.
+        assert sso.login.called
+        assert "unreadable MFA pending session" in result.output
+        assert "Unexpected error" not in result.output
+
+    def test_credential_store_error_text_is_not_masked(
+        self,
+        cli_runner: CliRunner,
+        isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """First-party CredentialStoreError messages stay actionable; only
+        third-party exception text is masked to its type."""
+        from lighthouse_cli.credential_store import CredentialStoreError
+
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+        def _boom(_cookies: dict[str, str]) -> None:
+            raise CredentialStoreError("sealed-hint-sentinel")
+
+        with patch.object(auth_mod, "save_cookies", side_effect=_boom):
+            with _mock_sso() as (sso, _client):
+                result = _invoke_login(cli_runner, ["--totp", "123456"])
+
+        assert result.exit_code == 1, result.output
+        assert sso.login.called  # the flow itself completed
+        assert "sealed-hint-sentinel" in result.output
+        assert "Unexpected error" not in result.output

@@ -56,9 +56,12 @@ DEFAULT_CONFIG_DIR = "~/.config/lighthouse-cli"
 
 FORMAT_VERSION = 2
 _KDF_ITERATIONS = 600_000
+#: Iterations assumed for envelopes written before the count was recorded
+#: (sealed at 300,000). Changing ``_KDF_ITERATIONS`` no longer orphans them.
+_LEGACY_KDF_ITERATIONS = 300_000
 
 #: Envelope header keys — never treated as artifact metadata.
-_ENVELOPE_KEYS = frozenset({"v", "key_source", "kdf_salt", "ciphertext"})
+_ENVELOPE_KEYS = frozenset({"v", "key_source", "kdf_salt", "kdf_iterations", "ciphertext"})
 
 
 class CredentialStoreError(Exception):
@@ -105,13 +108,17 @@ def _keyring_backend_available(keyring_mod: Any) -> bool:
 
 
 @lru_cache(maxsize=32)
-def _derive_passphrase_key(passphrase: str, salt: bytes) -> bytes:
-    """PBKDF2-HMAC-SHA256 → urlsafe base64 Fernet key (LRU-capped at 32)."""
+def _derive_passphrase_key(passphrase: str, salt: bytes, iterations: int) -> bytes:
+    """PBKDF2-HMAC-SHA256 → urlsafe base64 Fernet key (LRU-capped at 32).
+
+    ``iterations`` is part of the cache key: envelopes sealed at different
+    counts must never share a derived key.
+    """
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
-        iterations=_KDF_ITERATIONS,
+        iterations=iterations,
     )
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
 
@@ -412,7 +419,10 @@ class CredentialStore:
                 )
             salt = os.urandom(16)
             doc["kdf_salt"] = base64.b64encode(salt).decode("ascii")
-            fernet = _fernet_from_key(_derive_passphrase_key(passphrase, salt))
+            doc["kdf_iterations"] = _KDF_ITERATIONS
+            fernet = _fernet_from_key(
+                _derive_passphrase_key(passphrase, salt, _KDF_ITERATIONS)
+            )
         else:
             fernet = _fernet_from_key(_keyring_key(create=True))
         doc["ciphertext"] = fernet.encrypt(plaintext).decode("ascii")
@@ -439,7 +449,19 @@ class CredentialStore:
                         f"This data was sealed with {PASSPHRASE_ENV}; set the same "
                         "passphrase to decrypt it."
                     )
-                key = _derive_passphrase_key(passphrase, _decode_kdf_salt(salt_b64))
+                raw_iterations = envelope.get("kdf_iterations")
+                iterations = (
+                    raw_iterations
+                    if (
+                        isinstance(raw_iterations, int)
+                        and not isinstance(raw_iterations, bool)
+                        and raw_iterations > 0
+                    )
+                    else _LEGACY_KDF_ITERATIONS
+                )
+                key = _derive_passphrase_key(
+                    passphrase, _decode_kdf_salt(salt_b64), iterations
+                )
             elif source == "keyring":
                 key = _keyring_key(create=False)
             else:

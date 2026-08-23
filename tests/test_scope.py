@@ -26,7 +26,7 @@ def _config_for(semesters, enrollments):
     for e in enrollments:
         oid = str(e["OrgUnit"]["Id"])
         name = e["OrgUnit"]["Name"]
-        code = e["OrgUnit"].get("Code", "")
+        _code = e["OrgUnit"].get("Code", "")  # present in real payloads; unused here
         # Assign semester label based on which semester's code prefix matches
         sem_label = ""
         for s in semesters:
@@ -507,7 +507,7 @@ class TestAlsoFlag:
 
         def download_topic_file(cid, tid):
             if cid == 99999:
-                raise CourseNotFoundError(f"Course 99999 not found")
+                raise CourseNotFoundError("Course 99999 not found")
             return f"content{cid}".encode(), "f.pdf"
 
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \

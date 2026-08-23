@@ -92,6 +92,63 @@ class TestCookieExtractionDomains:
         finally:
             client.close()
 
+    def test_session_jar_rejects_substring_lookalike_domain(self) -> None:
+        """A jar entry whose domain merely CONTAINS the tenant domain
+        (manipal.edu.evil.com) must not pass extraction."""
+        client = _jar_with_cookies_on_domain("manipal.edu.evil.com")
+        try:
+            with pytest.raises(MicrosoftSSOError, match="Missing required D2L cookies"):
+                client._extract_d2l_cookies()
+        finally:
+            client.close()
+
+
+class TestBrowserJarDomainMatching:
+    """d2l_cookies_from_entries: untrusted browser-jar entries (auth refresh)."""
+
+    @pytest.mark.parametrize(
+        ("domain", "accepted"),
+        [
+            ("lighthouse.manipal.edu", True),
+            (".manipal.edu", True),
+            ("manipal.edu", True),
+            (".LHOUSE.manipal.edu", True),
+            ("manipal.edu.evil.com", False),
+            ("evIl.manipal.edu.attacker.net", False),
+            ("notmanipal.edu", False),
+            ("", False),
+        ],
+    )
+    def test_domain_predicate_dot_boundary_semantics(
+        self, domain: str, accepted: bool
+    ) -> None:
+        from lighthouse_cli.config import cookie_domain_accepted
+
+        assert cookie_domain_accepted(domain) is accepted
+
+    def test_host_only_cookie_wins_over_domain_scoped(self) -> None:
+        """A sibling-host domain cookie cannot shadow the genuine host-only
+        session value (no last-writer-wins poisoning)."""
+        from lighthouse_cli.config import d2l_cookies_from_entries
+
+        entries = [
+            {"name": "d2lSecureSessionVal", "value": "sibling", "domain": ".manipal.edu"},
+            {"name": "d2lSecureSessionVal", "value": "genuine", "domain": "lighthouse.manipal.edu"},
+        ]
+        assert d2l_cookies_from_entries(entries) == {"d2lSecureSessionVal": "genuine"}
+
+    def test_malformed_entries_are_skipped_not_crashing(self) -> None:
+        from lighthouse_cli.config import d2l_cookies_from_entries
+
+        entries: list[object] = [
+            "not-a-dict",
+            {"value": "x", "domain": "lighthouse.manipal.edu"},  # no name
+            {"name": "d2lSessionVal"},  # no value / no domain
+            {"name": "other", "value": "v", "domain": "lighthouse.manipal.edu"},
+            {"name": "d2lSecureSessionVal", "value": "ok", "domain": "lighthouse.manipal.edu"},
+        ]
+        assert d2l_cookies_from_entries(entries) == {"d2lSecureSessionVal": "ok"}
+
 
 # ---------------------------------------------------------------------------
 # missing_cookie_names
@@ -122,3 +179,23 @@ def test_ensure_config_dir_tolerates_chmod_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(_P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("read-only")))
     out = cfg.ensure_config_dir()
     assert out == target and out.is_dir()
+
+
+def test_ensure_config_dir_created_restrictive_under_permissive_umask(
+    tmp_path, monkeypatch
+):
+    """Creation-time mode 0700 keeps the secrets dir restrictive even where
+    the follow-up chmod is suppressed (fail closed, not open)."""
+    import os
+
+    import lighthouse_cli.config as cfg
+
+    target = tmp_path / "cfg-mode"
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
+    old_umask = os.umask(0o022)
+    try:
+        out = cfg.ensure_config_dir()
+    finally:
+        os.umask(old_umask)
+    assert out == target and out.is_dir()
+    assert (out.stat().st_mode & 0o777) == 0o700

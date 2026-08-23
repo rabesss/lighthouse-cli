@@ -60,8 +60,8 @@ from lighthouse_cli.ms_errors import (  # noqa: F401
 )
 from lighthouse_cli.config import (
     BASE_URL,
-    COOKIE_EXTRACTION_DOMAINS,
     COOKIE_SETTING_HOST,
+    cookie_domain_accepted,
     missing_cookie_names,
 )
 from lighthouse_cli.ms_mfa import (  # noqa: F401
@@ -814,7 +814,9 @@ class MicrosoftSSOClient:
             )
             return MfaProbeResult(page="no_mfa", proofs=[])
         cfg = _extract_config_json(snap.html) or {}
-        return MfaProbeResult(page="legacy_form", proofs=_parse_user_proofs(cfg))
+        proofs = _parse_user_proofs(cfg)
+        page = "converged" if proofs else "legacy_form"
+        return MfaProbeResult(page=page, proofs=proofs)
 
     # -- step implementations ------------------------------------------------------
 
@@ -1157,7 +1159,10 @@ class MicrosoftSSOClient:
             try:
                 data = resp.json()
                 gct_keys = sorted(data.keys()) if isinstance(data, dict) else []
-            except json.JSONDecodeError:
+            except ValueError:
+                # ValueError covers every JSON parser requests can use:
+                # stdlib json.JSONDecodeError and simplejson.JSONDecodeError
+                # both subclass it, so a 200 HTML body degrades gracefully.
                 gct_keys = ["(unparseable)"]
         self._record_flow(
             "POST",
@@ -1777,11 +1782,10 @@ class MicrosoftSSOClient:
     def _extract_d2l_cookies(self) -> dict[str, str]:
         """Step 6: Extract D2L session cookies from the session cookie jar."""
         cookies: dict[str, str] = {}
-        d2l_domains = COOKIE_EXTRACTION_DOMAINS
 
         for cookie in self._session.cookies:
-            if cookie.name.startswith("d2l") and any(
-                d in (cookie.domain or "") for d in d2l_domains
+            if cookie.name.startswith("d2l") and cookie_domain_accepted(
+                cookie.domain or ""
             ):
                 cookie_val = cookie.value if cookie.value is not None else ""
                 cookies[cookie.name] = cookie_val

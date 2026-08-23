@@ -346,9 +346,25 @@ class TestPasswordFlow:
         result = client.probe_mfa_methods(USERNAME, PASSWORD)
         assert result.page == "no_mfa"
         assert result.proofs == []
-        err = capsys.readouterr().err
-        assert "no_mfa — unrecognized post-credentials page: page:" in err
-        assert capsys.readouterr().out == ""
+        captured = capsys.readouterr()
+        assert "no_mfa — unrecognized post-credentials page: page:" in captured.err
+        assert captured.out == ""
+
+    def test_probe_reports_converged_proofs(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """A ConvergedTFA page with arrUserProofs probes as 'converged' with
+        the parsed proofs — 'legacy_form' is reserved for the no-proofs form."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=mfa_html(), url=CREDS_POST_URL),
+        )
+        client = make_client(scripted)
+        result = client.probe_mfa_methods(USERNAME, PASSWORD)
+        assert result.page == "converged"
+        assert [p.auth_method_id for p in result.proofs] == ["PhoneAppOTP"]
+        assert result.proofs[0].is_default is True
 
 
 class TestUsernameBootstrap:
@@ -951,3 +967,29 @@ class TestGctMalformedResponse:
         records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
         gct = [r for r in records if "GetCredentialType" in r["url"] and r.get("status") == 200]
         assert gct and gct[0]["form_fields"] == []  # no keys to report
+
+    def test_simplejson_style_decode_error_returns_config_unchanged(self, tmp_path):
+        """requests may parse JSON with simplejson, whose JSONDecodeError is
+        NOT json.JSONDecodeError — both subclass ValueError, which the flow
+        catches, so such environments degrade gracefully too."""
+
+        class SimplejsonLikeDecodeError(ValueError):
+            pass
+
+        class SimplejsonStyleResponse(FakeResponse):
+            def json(self) -> Any:
+                raise SimplejsonLikeDecodeError("Expecting value")
+
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        client = MicrosoftSSOClient(flow_log=str(tmp_path / "flow.jsonl"))
+        client._session = ScriptedSession()
+        client._session.enqueue(SimplejsonStyleResponse(200))
+        config = {"sFT": "tok", "sCtx": "ctx", "urlPost": "/common/login",
+                  "urlGetCredentialType": "/common/GetCredentialType",
+                  "_ms_url": "https://login.microsoftonline.com/x"}
+        out = client._step_get_credential_type(config, "user@example.edu")
+        assert out == config  # unchanged — no raw traceback escapes
+        records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
+        gct = [r for r in records if "GetCredentialType" in r["url"] and r.get("status") == 200]
+        assert gct and gct[0]["form_fields"] == ["(unparseable)"]

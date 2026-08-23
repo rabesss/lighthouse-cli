@@ -577,6 +577,19 @@ class TestReviewFixRegressions:
         assert result["skipped"][0]["path"] == "Mod/file.pdf"
         assert not client.body_calls()
 
+    def test_skipped_path_has_no_leading_separator_for_empty_module_title(self, root):
+        """A module title that sanitizes to "" must not produce an
+        absolute-looking skip path; skip and download paths agree (bare
+        filename, matching the containment clamp)."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD), module="..")},
+            names={ORG_ID: "Test"},
+        )
+        _seed_manifest(root / "Test-44347", {"100": _mentry(filename="file.pdf")})
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["path"] == "file.pdf"
+
     def test_skipped_entries_still_feed_duplicate_detection(self, root):
         """The F9 path rewrite must not drop SHA-256 tracking of skips."""
         client = FakeClient(
@@ -633,8 +646,9 @@ class TestReviewFixRegressions:
         assert data["errors"], "empty-course JSON must surface the manifest error"
         assert set(data["errors"][0]) <= {"topic_id", "error"}
 
-    def test_empty_course_single_download_json_counts_errors(self, runner, tmp_path):
-        """The empty download schema's numeric errors reflects recorded errors."""
+    def test_empty_course_single_download_json_lists_errors(self, runner, tmp_path):
+        """The empty download schema's errors match the non-empty branch's
+        list-of-dicts shape (never a bare count)."""
         output_dir = tmp_path / "dl"
         output_dir.mkdir()
         course_dir = output_dir / "Course A-111"
@@ -644,7 +658,8 @@ class TestReviewFixRegressions:
             result = runner.invoke(cli, ["download", "111", "-o", str(output_dir), "--json"])
         data = json.loads(result.stdout)
         assert result.exit_code == 1
-        assert data["errors"] == 1
+        assert isinstance(data["errors"], list) and data["errors"]
+        assert set(data["errors"][0]) <= {"topic_id", "error"}
 
 
 # ---------------------------------------------------------------------------

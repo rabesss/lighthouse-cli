@@ -59,7 +59,9 @@ _PENDING_METADATA_KEYS = frozenset({"created_at", "mfa_method"})
 def ensure_config_dir() -> Path:
     """Create the config directory if it doesn't exist with 0700 permissions."""
     config_dir = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", str(CONFIG_DIR))).expanduser()
-    config_dir.mkdir(parents=True, exist_ok=True)
+    # mode applies at creation wherever creation-time modes are honored, so a
+    # chmod-hostile filesystem still gets a restrictive directory.
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with suppress(OSError):
         # Best effort: some filesystems (network mounts, certain tmpfs) reject
         # chmod; auth must not hard-fail because of that.
@@ -75,6 +77,49 @@ def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
         if value is None or not str(value).strip():
             missing.append(name)
     return missing
+
+
+def cookie_domain_accepted(domain: str) -> bool:
+    """True when a cookie domain is the D2L host or a dot-boundary subdomain.
+
+    Exact registrable-domain semantics — ``manipal.edu.evil.com`` merely
+    *contains* the tenant domain as a substring and is rejected.
+    """
+    normalized = (domain or "").lstrip(".").lower()
+    return normalized == "manipal.edu" or normalized.endswith(".manipal.edu")
+
+
+def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
+    """Extract ``d2l*`` cookies from browser-jar entries (list of dicts).
+
+    Untrusted input: malformed entries are skipped, domains must pass
+    :func:`cookie_domain_accepted`, and host-only cookies (set on
+    ``COOKIE_SETTING_HOST``) win over domain-scoped ones so a sibling-host
+    cookie cannot shadow the genuine session value.
+    """
+    host_only: dict[str, str] = {}
+    domain_scoped: dict[str, str] = {}
+    if not isinstance(entries, list):
+        return {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        value = entry.get("value")
+        if not isinstance(name, str) or not name.startswith("d2l"):
+            continue
+        if not isinstance(value, str):
+            continue
+        domain = str(entry.get("domain") or "")
+        if not cookie_domain_accepted(domain):
+            continue
+        target = (
+            host_only
+            if domain.lstrip(".").lower() == COOKIE_SETTING_HOST
+            else domain_scoped
+        )
+        target[name] = value
+    return host_only or domain_scoped
 
 
 def load_cookies() -> dict[str, str]:
@@ -110,7 +155,14 @@ def load_cookies() -> dict[str, str]:
 
     # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
     cookies = _cookies_from_legacy_doc(doc)
-    _try_upgrade_plaintext_cookies(store, cookies, extracted_at=doc.get("extracted_at"))
+    legacy_extracted = doc.get("extracted_at")
+    _try_upgrade_plaintext_cookies(
+        store,
+        cookies,
+        # Only a genuine ISO string is trustworthy; any other JSON type would
+        # either reset the cookie age to "now" or poison the staleness math.
+        extracted_at=legacy_extracted if isinstance(legacy_extracted, str) else None,
+    )
     return cookies
 
 

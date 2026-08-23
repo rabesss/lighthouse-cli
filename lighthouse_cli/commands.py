@@ -69,7 +69,7 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
                     "downloaded": [], "skipped": [], "updated": [], "orphaned": [],
                     "errors": [_single_error(e) for e in result["errors"]]}
         return {"course_id": result["org_id"], "files": [], "downloaded": 0,
-                "errors": len(result["errors"])}
+                "errors": [_single_error(e) for e in result["errors"]]}
 
     assignments = result["assignments"]
     data: dict[str, Any] = {"course_id": result["org_id"], "course_name": result["course_name"], "folder": str(result["dest"])}

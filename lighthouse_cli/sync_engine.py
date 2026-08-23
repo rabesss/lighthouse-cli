@@ -221,7 +221,11 @@ def run_course(
         if mode is Mode.SYNC and existing is not None:
             if existing.get("last_modified") == (topic.get("last_modified") or ""):
                 filename = existing.get("filename", "")
-                rel_path = str(Path(topic["path"]).parent / filename)
+                # Mirror the download path's containment clamp: a module title
+                # that sanitizes to "" leaves a leading separator in
+                # topic["path"], which must not become an absolute-looking
+                # relative path here.
+                rel_path = str(Path(topic["path"]).parent / filename).lstrip("/\\")
                 skipped.append(build_entry(tid, filename, rel_path, existing))
                 if file_hash := existing.get("sha256", ""):
                     _track_duplicate(sha_hashes, file_hash, tid, filename)

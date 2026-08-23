@@ -271,7 +271,9 @@ def test_truncated_kdf_salt_raises_clean_error(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _sealed_doc(config_dir, monkeypatch)
-    doc["kdf_salt"] = doc["kdf_salt"][: len(doc["kdf_salt"]) // 2]  # breaks padding
+    # 11 chars: not a multiple of 4, so b64decode(validate=True) rejects the
+    # broken padding (a 12-char truncation would still decode cleanly).
+    doc["kdf_salt"] = doc["kdf_salt"][:11]
     (config_dir / "credentials.json").write_text(json.dumps(doc))
     with pytest.raises(CredentialStoreError):
         CredentialStore().load()
@@ -321,7 +323,37 @@ def test_passphrase_key_cache_is_bounded(
 ) -> None:
     from lighthouse_cli.credential_store import _derive_passphrase_key
 
+    # iterations=1 keeps this a cache-behavior test, not 40 real PBKDF2 runs.
     for i in range(40):
-        _derive_passphrase_key(f"pass-{i}", bytes([i]) * 16)
+        _derive_passphrase_key(f"pass-{i}", bytes([i]) * 16, 1)
     info = _derive_passphrase_key.cache_info()
     assert info.currsize <= 32
+
+
+def test_passphrase_envelope_records_kdf_iterations(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sealed envelopes record their KDF count; envelopes from before the
+    field existed still open via the pre-record fallback (no orphans)."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    CredentialStore().save("user@manipal.edu", "secret_password")
+    doc = json.loads((config_dir / "credentials.json").read_text())
+    assert doc["kdf_iterations"] == 600_000
+
+    # Simulate a genuine pre-record envelope: actually seal at the legacy
+    # 300k count, then strip the recorded field.
+    import lighthouse_cli.credential_store as cs
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cs, "_KDF_ITERATIONS", 300_000)
+        CredentialStore().save("user@manipal.edu", "secret_password")
+    legacy_doc = json.loads((config_dir / "credentials.json").read_text())
+    assert legacy_doc["kdf_iterations"] == 300_000
+    del legacy_doc["kdf_iterations"]
+    (config_dir / "credentials.json").write_text(json.dumps(legacy_doc))
+    assert CredentialStore().load() == ("user@manipal.edu", "secret_password")
+
+    legacy_doc["kdf_iterations"] = 1  # wrong count derives a wrong key: clean failure
+    (config_dir / "credentials.json").write_text(json.dumps(legacy_doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()

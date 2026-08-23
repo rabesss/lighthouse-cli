@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
@@ -307,8 +307,6 @@ class TestExtractSamlResponse:
 
 class TestMicrosoftSSOClientExtractD2lCookies:
     def test_extracts_all_four_cookies(self) -> None:
-        import http.cookiejar
-
         client = MicrosoftSSOClient()
         client._session.cookies.set(
             "d2lSecureSessionVal", "sec123", domain="lighthouse.manipal.edu"

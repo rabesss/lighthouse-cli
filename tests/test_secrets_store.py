@@ -262,6 +262,26 @@ class TestSealedCookies:
         assert is_sealed_document(doc)
         assert "sec-sentinel" not in cookies_path(store_dir).read_text()
 
+    def test_legacy_non_string_extracted_at_not_trusted(
+        self, store_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hostile/corrupt legacy extracted_at (non-string JSON type) is
+        dropped rather than persisted verbatim — staleness math stays sane."""
+        legacy = {
+            "cookies": {"d2lSecureSessionVal": "sec-sentinel"},
+            "extracted_at": 12345,  # truthy, but not an ISO timestamp
+        }
+        cookies_path(store_dir).write_text(json.dumps(legacy))
+        monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", PASSPHRASE_A)
+
+        assert load_cookies() == {"d2lSecureSessionVal": "sec-sentinel"}
+        # The upgraded envelope carries a parseable ISO timestamp, so
+        # get_cookie_age_days keeps working instead of silently disabling.
+        doc = json.loads(cookies_path(store_dir).read_text())
+        assert is_sealed_document(doc)
+        assert isinstance(doc.get("extracted_at"), str)
+        assert config_mod.get_cookie_age_days() is not None
+
     def test_cookie_age_read_from_plaintext_metadata(self, store_dir: Path) -> None:
         save_cookies({"d2lSessionVal": "ses-sentinel"})
         age = config_mod.get_cookie_age_days()

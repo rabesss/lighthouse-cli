@@ -76,6 +76,10 @@ def _clean_auth_command(fn: Callable[..., int]) -> Callable[..., int]:
             return fn(*args, json_output=json_output, **kwargs)
         except KeyboardInterrupt:
             return _interrupted(json_output)
+        except CredentialStoreError as exc:
+            # First-party errors: messages are authored to be actionable and
+            # secret-free (key resolution, unsealing, sealing failures).
+            return _auth_error(str(exc), json_output)
         except Exception as exc:  # deliberate last-resort guard
             # Never forward raw third-party exception text — str(exc) may
             # embed URLs, tokens, or page content. Only the type is shown.
@@ -268,7 +272,7 @@ def _persist_check_report(
 # ---------------------------------------------------------------------------
 
 @_clean_auth_command
-def cmd_auth_verify(totp_code: str, *, json_output: bool = False) -> int:
+def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
     """Complete MFA using saved state from ``auth login`` (same BeginAuth session)."""
     ensure_config_dir()
 
@@ -400,9 +404,10 @@ def cmd_auth_login(
         return _auth_error(str(exc), json_output, 2)
 
     # --- Preflight the encryption key source ---
-    # Login reads any pending checkpoint below and sends BeginAuth (a side
+    # Login reads the pending checkpoint below and sends BeginAuth (a side
     # effect); both require a usable key source — fail here with an
-    # actionable message BEFORE reading sealed state.
+    # actionable message before either happens. (Stored credentials may have
+    # been read earlier, but only under error suppression.)
     try:
         CredentialStore().preflight()
     except CredentialStoreError as exc:
@@ -411,7 +416,17 @@ def cmd_auth_login(
     # Resume the pending MFA session only when the provided code belongs to it.
     # An explicit --mfa-method that differs from the pending session (e.g. an
     # offline app TOTP after a stale SMS pending) starts a fresh flow instead.
-    pending = load_mfa_pending() if code is not None else None
+    # An unopenable checkpoint (e.g. sealed under a different key source) must
+    # not abort a login that would never resume it — degrade to a fresh flow.
+    pending = None
+    if code is not None:
+        try:
+            pending = load_mfa_pending()
+        except CredentialStoreError as exc:
+            print(
+                f"Warning: ignoring an unreadable MFA pending session ({exc}).",
+                file=sys.stderr,
+            )
     plan = plan_login(
         totp_code=code,
         read_totp_after_challenge=read_totp_after_challenge,
