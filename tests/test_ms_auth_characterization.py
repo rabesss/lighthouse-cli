@@ -153,6 +153,51 @@ SAML_REQUEST_HTML = (
 )
 
 
+# Microsoft's Aug-2026 session-pull reload interstitial: HTTP 200, title
+# "Redirecting", ZERO forms; $Config echoes the whole credential form in
+# oPostParams (including passwd) and points urlPost at ...&sso_reload=True.
+# Structure mirrors a sanitized live capture; values are sentinels.
+SSO_RELOAD_URL_POST = "/tenant-id/login?ctx=CTX&sso_reload=True"
+SSO_RELOAD_FIELDS = {
+    "i13": "0",
+    "login": USERNAME,
+    "loginfmt": USERNAME,
+    "type": "11",
+    "LoginOptions": "3",
+    "passwd": PASSWORD,
+    "canary": "PAGE-CANARY-1",
+    "ctx": "CTX-TOKEN-1",
+    "flowToken": "FLOW-TOKEN-1",
+    "hpgrequestid": "SESSION-ID-1",
+    "ps": "2",
+    "NewUser": "1",
+    "fspost": "0",
+    "i21": "0",
+    "CookieDisclosure": "0",
+    "isSignupPost": "0",
+    "i19": "9231",
+    "IsFidoSupported": "1",
+}
+
+
+def sso_reload_html(
+    url_post: str = SSO_RELOAD_URL_POST,
+    o_post_params: dict[str, str] | None = None,
+) -> str:
+    import json as _json
+
+    params = SSO_RELOAD_FIELDS if o_post_params is None else o_post_params
+    return (
+        "<html><head><title>Redirecting</title></head><body><script>\n"
+        "$Config = {\n"
+        '"iSessionPullType": 2,\n'
+        '"slMaxRetry": 2,\n'
+        f'"urlPost": "{url_post}",\n'
+        f'"oPostParams": {_json.dumps(params)}\n'
+        "};\n</script></body></html>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scripted transport
 # ---------------------------------------------------------------------------
@@ -328,8 +373,10 @@ class TestPasswordFlow:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(), url=MS_SSO_URL),
-            # KMSI-shaped page: not MFA, not an error page, no SAMLResponse.
-            FakeResponse(200, html=kmsi_html(), url=CREDS_POST_URL),
+            # Genuinely unrecognized page: not MFA, not an error page, no
+            # SAMLResponse, and no walk-recognizable markers (a KMSI page
+            # would now be submitted inline by the bounded walk).
+            FakeResponse(200, html="<html><head><title>Mystery</title></head><body>huh</body></html>", url=CREDS_POST_URL),
         )
         with pytest.raises(MicrosoftSSOError, match=r"Unexpected response — page:"):
             run_login(scripted)
@@ -340,7 +387,7 @@ class TestPasswordFlow:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(), url=MS_SSO_URL),
-            FakeResponse(200, html=kmsi_html(), url=CREDS_POST_URL),
+            FakeResponse(200, html="<html><head><title>Mystery</title></head><body>huh</body></html>", url=CREDS_POST_URL),
         )
         client = make_client(scripted)
         result = client.probe_mfa_methods(USERNAME, PASSWORD)
@@ -993,3 +1040,173 @@ class TestGctMalformedResponse:
         records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
         gct = [r for r in records if "GetCredentialType" in r["url"] and r.get("status") == 200]
         assert gct and gct[0]["form_fields"] == ["(unparseable)"]
+
+
+# ---------------------------------------------------------------------------
+# Aug-2026 session-pull reload interstitial (sso_reload=True + oPostParams)
+# ---------------------------------------------------------------------------
+
+
+class TestSsoReloadInterstitial:
+    """A form-less 200 "Redirecting" page after the password POST must be
+    detected and re-POSTed (bounded), not reported as an unexpected response."""
+
+    def _snap(self, html: str, url: str = CREDS_POST_URL) -> Any:
+        from lighthouse_cli.ms_auth import ResponseSnapshot
+
+        return ResponseSnapshot(url=url, status_code=200, location="", html=html)
+
+    # -- pure detection ------------------------------------------------------
+
+    def test_detects_interstitial_markers(self) -> None:
+        from lighthouse_cli.ms_auth import is_sso_reload_page
+
+        assert is_sso_reload_page(self._snap(sso_reload_html()))
+
+    @pytest.mark.parametrize(
+        "html",
+        [config_html(), mfa_html(), LEGACY_MFA_HTML, HIDDENFORM_HTML, kmsi_html()],
+    )
+    def test_normal_pages_are_not_interstitial(self, html: str) -> None:
+        from lighthouse_cli.ms_auth import is_sso_reload_page
+
+        assert not is_sso_reload_page(self._snap(html))
+
+    def test_empty_opost_params_is_not_interstitial(self) -> None:
+        from lighthouse_cli.ms_auth import is_sso_reload_page
+
+        assert not is_sso_reload_page(
+            self._snap(sso_reload_html(o_post_params={}))
+        )
+
+    def test_urlpost_without_sso_reload_is_not_interstitial(self) -> None:
+        from lighthouse_cli.ms_auth import is_sso_reload_page
+
+        assert not is_sso_reload_page(
+            self._snap(sso_reload_html(url_post="/tenant-id/login?ctx=CTX"))
+        )
+
+    # -- pure transition -----------------------------------------------------
+
+    def test_transition_reposts_echoed_params_to_absolute_url(self) -> None:
+        from lighthouse_cli.ms_auth import sso_reload_transition
+
+        t = sso_reload_transition(self._snap(sso_reload_html()), CREDS_POST_URL)
+        assert t.kind == "sso_reload"
+        # Tenant-relative urlPost resolves against the response URL.
+        assert t.url == f"{MS_BASE}{SSO_RELOAD_URL_POST}"
+        # The echoed credential form round-trips verbatim (field names only
+        # asserted; values flow straight back to Microsoft, never to logs).
+        assert set(t.data or {}) == set(SSO_RELOAD_FIELDS)
+
+    def test_classify_routes_interstitial_as_repost(self) -> None:
+        from lighthouse_cli.ms_auth import classify_post_mfa
+
+        t = classify_post_mfa(self._snap(sso_reload_html()), CREDS_POST_URL)
+        assert t.kind == "sso_reload"
+
+    def test_classify_converged_tfa_is_mfa_terminal(self) -> None:
+        from lighthouse_cli.ms_auth import classify_post_mfa
+
+        t = classify_post_mfa(self._snap(mfa_html()), CREDS_POST_URL)
+        assert t.kind == "mfa"
+
+    # -- walk integration ----------------------------------------------------
+
+    def test_login_walks_interstitial_to_error_page(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """Wrong-password flow: password POST -> interstitial -> re-POST ->
+        real ConvergedSignIn error page (the pre-Aug-2026 behavior)."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=sso_reload_html(), url=CREDS_POST_URL),
+            FakeResponse(200, html=ERROR_HTML, url=CREDS_POST_URL),
+        )
+        with pytest.raises(MicrosoftSSOError) as ei:
+            run_login(scripted)
+        assert "50126" in str(ei.value)
+
+    def test_probe_walks_interstitial_to_converged_page(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """MFA-method probe traverses the same hop and reports the proofs."""
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=sso_reload_html(), url=CREDS_POST_URL),
+            FakeResponse(200, html=mfa_html(), url=CREDS_POST_URL),
+        )
+        client = make_client(scripted)
+        result = client.probe_mfa_methods(USERNAME, PASSWORD)
+        assert result.page == "converged"
+        assert [p.auth_method_id for p in result.proofs] == ["PhoneAppOTP"]
+
+    def test_walk_is_bounded_by_slmaxretry(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """A tenant looping the interstitial forever stops after
+        _MAX_SSO_RELOADS re-POSTs and surfaces a clean error."""
+        from lighthouse_cli.ms_auth import _MAX_SSO_RELOADS
+
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            *[
+                FakeResponse(200, html=sso_reload_html(), url=CREDS_POST_URL)
+                for _ in range(_MAX_SSO_RELOADS + 2)
+            ],
+        )
+        with pytest.raises(MicrosoftSSOError) as ei:
+            run_login(scripted)
+        assert "Unexpected response" in str(ei.value)
+        # Exactly _MAX_SSO_RELOADS re-POSTs were issued (password POST + the
+        # bounded reloads; the third interstitial is returned, never re-POSTed).
+        reposts = [c for c in scripted.calls if c[0] == "POST"]
+        assert len(reposts) == 1 + _MAX_SSO_RELOADS
+
+    # -- leak guards ---------------------------------------------------------
+
+    def test_flow_log_records_field_names_only(
+        self, scripted: ScriptedSession, isolated_config: Path, tmp_path: Path
+    ) -> None:
+        """oPostParams echoes the password: the recorder must persist field
+        NAMES and marker booleans only, never values."""
+        flow_log = tmp_path / "flow.jsonl"
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=sso_reload_html(), url=CREDS_POST_URL),
+            FakeResponse(200, html=ERROR_HTML, url=CREDS_POST_URL),
+        )
+        with patch("requests.Session", return_value=scripted):
+            client = MicrosoftSSOClient(flow_log=str(flow_log))
+            with pytest.raises(MicrosoftSSOError):
+                client.login(USERNAME, PASSWORD)
+
+        raw = flow_log.read_text()
+        assert PASSWORD not in raw
+        assert "FLOW-TOKEN-1" not in raw
+        assert "PAGE-CANARY-1" not in raw
+        records = [json.loads(line) for line in raw.splitlines()]
+        # The re-POST is recorded by name, like every other form POST.
+        repost = [
+            r
+            for r in records
+            if r["method"] == "POST" and "passwd" in (r.get("form_fields") or [])
+        ]
+        assert repost, "expected the sso_reload re-POST to be recorded"
+        # The interstitial page shape flags the new markers.
+        page = [r for r in records if r.get("page") and "oPostParams=1" in r["page"]]
+        assert page and "sso_reload=1" in page[0]["page"]
+
+    def test_describe_page_shape_flags_interstitial(self) -> None:
+        from lighthouse_cli.ms_auth import describe_page_shape
+
+        shape = describe_page_shape(self._snap(sso_reload_html()))
+        assert "oPostParams=1" in shape
+        assert "sso_reload=1" in shape
+        assert "Redirecting" in shape
+        # And the normal login page stays all-zeros for the new markers.
+        assert "oPostParams=0" in describe_page_shape(self._snap(config_html()))

@@ -89,6 +89,9 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 _MAX_POST_MFA_HOPS = 12
 _MAX_ENDAUTH_POLLS = 30
+# Microsoft's session-pull reload interstitial declares slMaxRetry=2; the
+# walk honors that bound so a broken tenant loop cannot ping-pong forever.
+_MAX_SSO_RELOADS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +119,12 @@ class ResponseSnapshot:
 
 
 class Transition(NamedTuple):
-    """A pure routing decision for the post-MFA interstitial walk.
+    """A pure routing decision for the interstitial walk.
 
-    ``kind`` is one of: ``saml`` (done), ``redirect``, ``hiddenform``,
-    ``kmsi``, ``samlrequest``, ``stop``.
+    ``kind`` is one of: ``saml`` (done), ``mfa`` (terminal — an MFA
+    verification page the caller must handle), ``sso_reload`` (re-POST the
+    echoed credential params), ``redirect``, ``hiddenform``, ``kmsi``,
+    ``samlrequest``, ``stop``.
     """
 
     kind: str
@@ -216,6 +221,8 @@ def describe_page_shape(snapshot: ResponseSnapshot) -> str:
         "SAMLResponse": "SAMLResponse" in html,
         "sFT-present": bool(cfg.get("sFT")),
         "urlPost": bool(cfg.get("urlPost")),
+        "oPostParams": bool(cfg.get("oPostParams")),
+        "sso_reload": "sso_reload" in str(cfg.get("urlPost") or "").lower(),
     }
     flags = " ".join(f"{k}={int(v)}" for k, v in markers.items())
     title_match = re.search(r"<title[^>]*>([^<]{0,80})", html)
@@ -435,16 +442,65 @@ def kmsi_transition(snapshot: ResponseSnapshot, base_url: str) -> Transition:
     return Transition(kind="kmsi", url=post_url, data=kmsi_data)
 
 
+def is_sso_reload_page(snapshot: ResponseSnapshot) -> bool:
+    """True when the snapshot is Microsoft's session-pull reload interstitial.
+
+    Observed in the wild since Aug 2026 after the password POST: an HTTP 200
+    "Redirecting" page with **no forms** whose ``$Config`` carries
+    ``iSessionPullType``/``slMaxRetry`` and, critically, ``urlPost`` (with
+    ``sso_reload=True`` in its query) plus ``oPostParams`` — the entire
+    credential form echoed back. Browsers re-POST those params via JS; a
+    pure-HTTP client must perform the same hop to reach the real page.
+    """
+    cfg = _extract_config_json(snapshot.html) or {}
+    url_post = str(cfg.get("urlPost") or "")
+    params = cfg.get("oPostParams")
+    return (
+        "sso_reload" in url_post.lower()
+        and isinstance(params, dict)
+        and bool(params)
+    )
+
+
+def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transition:
+    """Re-POST target + echoed fields for the sso_reload interstitial (pure).
+
+    ``oPostParams`` echoes the credential form — including the password — so
+    the payload flows straight back to Microsoft over the existing session
+    and is never logged, recorded, or embedded in errors (the flow recorder
+    stores field *names* only).
+    """
+    cfg = _extract_config_json(snapshot.html) or {}
+    url_post = str(cfg.get("urlPost") or "")
+    params = cfg.get("oPostParams")
+    form_data = (
+        {str(k): str(v) for k, v in params.items()} if isinstance(params, dict) else {}
+    )
+    return Transition(
+        kind="sso_reload",
+        url=_absolute_url(base_url, url_post),
+        data=form_data,
+    )
+
+
 def classify_post_mfa(snapshot: ResponseSnapshot, base_url: str) -> Transition:
-    """Pure router for one step of the post-MFA interstitial walk.
+    """Pure router for one step of the interstitial walk.
 
     Order matters and mirrors the wire protocol: an extracted SAMLResponse
-    ends the walk; redirects are followed; then auto-submit forms (hiddenform,
-    KMSI/CMSI); then the SAMLRequest JS redirect; otherwise stop.
+    ends the walk; an MFA verification page is terminal for the caller to
+    handle; the sso_reload session-pull hop re-POSTs echoed credentials;
+    redirects are followed; then auto-submit forms (hiddenform, KMSI/CMSI);
+    then the SAMLRequest JS redirect; otherwise stop.
     """
     saml = extract_saml_response(snapshot.html)
     if saml:
         return Transition(kind="saml", saml_response=saml)
+
+    if is_mfa_page(snapshot.html):
+        return Transition(kind="mfa")
+
+    if is_sso_reload_page(snapshot):
+        return sso_reload_transition(snapshot, base_url)
 
     if snapshot.status_code in _REDIRECT_STATUSES and snapshot.location:
         resolved = (
@@ -750,6 +806,13 @@ class MicrosoftSSOClient:
         self._record_flow(
             "PAGE", snap.url, snap.status_code, page_shape=describe_page_shape(snap)
         )
+        # Aug-2026 Microsoft session-pull interstitial: a form-less 200
+        # "Redirecting" page whose $Config asks the client to re-POST the
+        # echoed credential params (oPostParams) to urlPost. The bounded
+        # walk also follows any KMSI/hiddenform/redirect hops so the MFA /
+        # error / SAML classification below sees the real page. No KMSI
+        # checkpointing here: pre-MFA interrupts are handled inline.
+        snap = self._advance_to_saml(snap, snap.url, checkpoint_kmsi=False)
         if is_mfa_page(snap.html):
             if on_credentials_submitted is not None:
                 on_credentials_submitted()
@@ -803,6 +866,9 @@ class MicrosoftSSOClient:
         snap = self._step_post_credentials(
             config, username, password, skip_username_prepare=True
         )
+        # Same session-pull interstitial as login(): re-POST echoed params
+        # (bounded) before deciding whether an MFA page was reached.
+        snap = self._advance_to_saml(snap, snap.url, checkpoint_kmsi=False)
         if not is_mfa_page(snap.html):
             if is_error_page(snap):
                 code, msg = _extract_error_code_and_msg(snap.html)
@@ -1691,18 +1757,37 @@ class MicrosoftSSOClient:
         return self._snapshot(self._post(t.url, data=t.data or {}))
 
     def _advance_to_saml(
-        self, snapshot: ResponseSnapshot, base_url: str
+        self, snapshot: ResponseSnapshot, base_url: str, *, checkpoint_kmsi: bool = True
     ) -> ResponseSnapshot:
-        """Advance through KMSI, hiddenform, and SAMLRequest pages after ProcessAuth.
+        """Advance through sso_reload, KMSI, hiddenform, and SAMLRequest pages.
 
         Pure classification (:func:`classify_post_mfa`) decides each hop; this
-        driver only performs the HTTP side effects and checkpoints KMSI pages.
+        driver only performs the HTTP side effects. KMSI checkpointing is
+        enabled for the post-MFA walk (where a checkpointed page lets
+        ``auth verify`` resume) and disabled for the post-credentials walk
+        (which continues inline through any interrupts before MFA).
+
+        Terminal outcomes: a page carrying SAMLResponse, or an MFA
+        verification page the caller handles, or the hop/reload budget
+        running out (the snapshot is returned for error classification).
         """
+        sso_reloads = 0
         for _ in range(_MAX_POST_MFA_HOPS):
             transition = classify_post_mfa(snapshot, base_url)
 
             if transition.kind == "saml":
                 return snapshot
+
+            if transition.kind == "mfa":
+                return snapshot
+
+            if transition.kind == "sso_reload":
+                sso_reloads += 1
+                if sso_reloads > _MAX_SSO_RELOADS:
+                    break
+                snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
+                base_url = snapshot.url
+                continue
 
             if transition.kind == "redirect":
                 snapshot = self._snapshot(self._get(transition.url))
@@ -1715,9 +1800,10 @@ class MicrosoftSSOClient:
                 continue
 
             if transition.kind == "kmsi":
-                self._checkpoint_mfa_pending(
-                    kmsi_checkpoint={"url": snapshot.url, "html": snapshot.html},
-                )
+                if checkpoint_kmsi:
+                    self._checkpoint_mfa_pending(
+                        kmsi_checkpoint={"url": snapshot.url, "html": snapshot.html},
+                    )
                 snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
                 base_url = snapshot.url
                 continue
