@@ -1260,3 +1260,56 @@ class TestSsoReloadInterstitial:
         assert "Redirecting" in shape
         # And the normal login page stays all-zeros for the new markers.
         assert "oPostParams=0" in describe_page_shape(self._snap(config_html()))
+
+    def test_signin_error_page_is_not_mfa(self) -> None:
+        """The ConvergedSignIn page the sso_reload walk lands on after a
+        wrong password carries $Config flags like fAvoidNewOTCGeneration… —
+        a bare "otc" substring made is_mfa_page misroute it to MFA handling
+        (live regression, Aug 2026). Word-bounded matching keeps it an error."""
+        from lighthouse_cli.ms_auth import is_error_page, is_mfa_page
+
+        html = (
+            "<html><head><title>Sign in to your account</title></head><body><script>\n"
+            "$Config = {\n"
+            '"pgid": "ConvergedSignIn",\n'
+            '"sErrorCode": "50126",\n'
+            '"sErrTxt": "",\n'
+            '"fAvoidNewOTCGenerationWhenAlreadySent": true,\n'
+            '"urlPost": "/tenant-id/login",\n'
+            '"sFT": "FLOW-TOKEN-1",\n'
+            '"sPOST_Username": "' + USERNAME + '"\n'
+            "};\n</script>\n"
+            "Your account has apps like Microsoft Authenticator available.\n"
+            "</body></html>"
+        )
+        snap = self._snap(html)
+        assert not is_mfa_page(html)
+        assert is_error_page(snap)
+
+    def test_login_reports_wrong_password_through_interstitial(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """Full live-shaped sequence: password POST -> interstitial -> re-POST
+        -> ConvergedSignIn error page (with the OTC-flag false-positive bait)
+        -> clean 50126 wrong-password error."""
+        terminal = (
+            "<html><head><title>Sign in to your account</title></head><body><script>\n"
+            "$Config = {\n"
+            '"pgid": "ConvergedSignIn",\n'
+            '"sErrorCode": "50126",\n'
+            '"fAvoidNewOTCGenerationWhenAlreadySent": true,\n'
+            '"sErrTxt": ""\n'
+            "};\n</script>\n"
+            "apps like Microsoft Authenticator are available.\n"
+            "</body></html>"
+        )
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=sso_reload_html(), url=CREDS_POST_URL),
+            FakeResponse(200, html=terminal, url=CREDS_POST_URL),
+        )
+        with pytest.raises(MicrosoftSSOError) as ei:
+            run_login(scripted)
+        assert "50126" in str(ei.value)
+        assert "2FA" not in str(ei.value)

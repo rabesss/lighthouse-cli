@@ -169,8 +169,13 @@ def is_mfa_page(html: str) -> bool:
     mfa_config = _extract_config_json(html)
     if mfa_config and mfa_config.get("arrUserProofs"):
         return True
+    # Legacy form heuristics. The OTC match must be word-bounded: a bare
+    # substring trips on $Config flags like "fAvoidNewOTCGenerationWhen
+    # AlreadySent" that appear on the ordinary ConvergedSignIn page the
+    # sso_reload walk lands on after a wrong password (live regression:
+    # that page was misrouted to MFA handling instead of error handling).
     text_lower = html.lower()
-    otc_in_text = "otc" in text_lower
+    otc_in_text = bool(re.search(r"\botc\b", text_lower))
     verification_in_text = "verification" in text_lower
     authenticator_in_text = "authenticator" in text_lower
     return (
