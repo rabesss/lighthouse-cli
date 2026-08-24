@@ -45,6 +45,7 @@ jobs:
           compressed = base64.b64decode(payload, validate=True)
           Path('/tmp/pr12_followups.py').write_bytes(gzip.decompress(compressed))
           PY
+          python .github/pr12-payload/fix_patcher.py
           python -m py_compile /tmp/pr12_followups.py
           python /tmp/pr12_followups.py
           git diff --check
