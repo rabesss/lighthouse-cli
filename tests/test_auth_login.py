@@ -9,19 +9,24 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli import auth as auth_mod
-from lighthouse_cli.auth import normalize_totp, plan_login, resolve_credentials
+from lighthouse_cli.auth import (
+    normalize_totp,
+    plan_login,
+    resolve_credentials,
+    validate_totp_usage,
+)
 from lighthouse_cli.cli import cli
 from lighthouse_cli.ms_auth import MicrosoftSSOError
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -208,10 +213,10 @@ def test_normalize_app_totp_kept() -> None:
     assert normalize_totp("123456", totp_stdin=False, mfa_method="auto") == ("123456", False)
 
 
-def test_normalize_sms_and_choose_totp_discarded() -> None:
-    """A literal code cannot match a server-sent SMS/choose code."""
-    assert normalize_totp("123456", totp_stdin=False, mfa_method="sms") == (None, False)
-    assert normalize_totp("123456", totp_stdin=False, mfa_method="choose") == (None, False)
+def test_normalize_preserves_literal_after_policy_validation() -> None:
+    """Normalization is transport-only; incompatible methods fail in validation."""
+    assert normalize_totp("123456", totp_stdin=False, mfa_method="sms") == ("123456", False)
+    assert normalize_totp("123456", totp_stdin=False, mfa_method="choose") == ("123456", False)
 
 
 def test_normalize_stdin_defers_reading() -> None:
@@ -225,9 +230,9 @@ def test_normalize_whitespace_code_rejected() -> None:
         normalize_totp("   ", totp_stdin=False, mfa_method="auto")
 
 
-def test_normalize_discarded_code_not_validated() -> None:
-    """Whitespace validation applies only to codes that survive discarding."""
-    assert normalize_totp("  ", totp_stdin=False, mfa_method="sms") == (None, False)
+def test_normalize_whitespace_rejected_for_every_literal() -> None:
+    with pytest.raises(ValueError, match="2FA code cannot be empty"):
+        normalize_totp("  ", totp_stdin=False, mfa_method="sms")
 
 
 # ---------------------------------------------------------------------------
@@ -938,8 +943,8 @@ def test_totp_not_persisted(
     """A real (mocked-SSO) login never leaks the TOTP into the sealed artifact."""
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
-    # '+' and '/' are percent-escaped by urllib.parse.quote, so the two
-    # assertions below check genuinely different byte sequences.
+    # quote_plus matches application/x-www-form-urlencoded encoding, so
+    # this checks a genuinely different byte sequence from the raw sentinel.
     totp = "654+21/SEN="
 
     with _mock_sso():
@@ -953,7 +958,7 @@ def test_totp_not_persisted(
     # neither as plaintext nor URL-encoded.
     assert totp.encode() not in raw
     import urllib.parse
-    assert urllib.parse.quote(totp).encode() not in raw
+    assert urllib.parse.quote_plus(totp).encode() not in raw
 
 
 # ---------------------------------------------------------------------------
@@ -1055,7 +1060,7 @@ def test_concurrent_auth_no_corruption(isolated_config: Path) -> None:
     def write(value: dict[str, str]) -> None:
         try:
             config_module.save_cookies(value)
-        except Exception as e:  # noqa: BLE001 - collected below
+        except Exception as e:
             errors.append(e)
 
     threads = [threading.Thread(target=write, args=(c,)) for c in (cookies1, cookies2)]
@@ -1199,6 +1204,7 @@ class TestAuthMfaMethodsCommand:
         assert payload["page"] == "converged"
         ids = [m["id"] for m in payload["methods"]]
         assert ids == ["OneWaySMS", "TwoWayVoiceMobile", "PhoneAppOTP"]
+        assert [m["method"] for m in payload["methods"]] == ["sms", "call", "app"]
         assert payload["methods"][1]["is_default"] is True
         # The raw phone number (proof.data) must never reach the output.
         assert "+919876541234" not in result.stdout
@@ -1217,6 +1223,7 @@ class TestAuthMfaMethodsCommand:
 
         assert result.exit_code == 0
         assert "TwoWayVoiceMobile" in result.output
+        assert "--mfa-method call" in result.output
         assert "Microsoft default" in result.output
         assert "+919876541234" not in result.output
 
@@ -1264,20 +1271,38 @@ class TestAuthMfaMethodsCommand:
 
 
 class TestMfaMethodVocabulary:
-    def test_call_discards_literal_totp(self) -> None:
-        """Voice codes are spoken after BeginAuth: a literal --totp cannot match."""
-        code, read_after = normalize_totp(
-            "123456", totp_stdin=False, mfa_method="call"
-        )
-        assert code is None
-        assert read_after is False
+    @pytest.mark.parametrize("method", ["sms", "call", "push", "choose"])
+    def test_incompatible_literal_totp_is_rejected(self, method: str) -> None:
+        with pytest.raises(ValueError):
+            validate_totp_usage("123456", totp_stdin=False, mfa_method=method)
 
-    def test_push_accepts_stdin_deferral(self) -> None:
-        code, read_after = normalize_totp(
-            None, totp_stdin=True, mfa_method="push"
-        )
-        assert code is None
-        assert read_after is True
+    @pytest.mark.parametrize("method", ["call", "push"])
+    def test_codeless_method_rejects_stdin_totp(self, method: str) -> None:
+        with pytest.raises(ValueError, match="codeless"):
+            validate_totp_usage(None, totp_stdin=True, mfa_method=method)
+
+    def test_app_and_auto_accept_literal_totp(self) -> None:
+        for method in ("app", "auto"):
+            validate_totp_usage("123456", totp_stdin=False, mfa_method=method)
+            assert normalize_totp(
+                "123456", totp_stdin=False, mfa_method=method
+            ) == ("123456", False)
+
+    @pytest.mark.parametrize("method", ["sms", "call", "push"])
+    def test_login_rejects_incompatible_totp_before_sso(
+        self, method: str, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(
+                cli_runner,
+                ["--mfa-method", method, "--totp", "123456", "--json"],
+            )
+        assert result.exit_code == 2
+        assert "--totp" in json.loads(result.stdout)["error"]
+        sso.login.assert_not_called()
 
     def test_login_accepts_call_and_push_choices(self, cli_runner: CliRunner) -> None:
         """--mfa-method call/push parse at the CLI layer."""

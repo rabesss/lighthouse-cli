@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -35,23 +34,26 @@ MFA_AUTH_VOICE_ALT_MOBILE = "TwoWayVoiceAlternateMobile"
 MFA_AUTH_VOICE_OFFICE = "TwoWayVoiceOffice"
 
 # Methods whose verification code is generated server-side and delivered on
-# BeginAuth (SMS/WhatsApp text, or spoken during a phone call): a literal
-# pre-provided code cannot match — always collect after the challenge.
-SERVER_SENT_CODE_AUTH_IDS = frozenset({
-    MFA_AUTH_SMS,
+# BeginAuth. A literal pre-provided code cannot match the new SMS/WhatsApp code.
+SERVER_SENT_CODE_AUTH_IDS = frozenset({MFA_AUTH_SMS})
+
+# Methods completed by approving on another device instead of typing a code.
+# Voice calls prompt the user to press #; Authenticator push may require number
+# matching. EndAuth is polled without AdditionalAuthData for all of them.
+CODELESS_APPROVAL_AUTH_IDS = frozenset({
+    MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_VOICE_MOBILE,
     MFA_AUTH_VOICE_ALT_MOBILE,
     MFA_AUTH_VOICE_OFFICE,
 })
 
-# Methods that submit a code through EndAuth's AdditionalAuthData: offline
-# authenticator TOTP plus every server-sent code method. Codeless methods
-# (push notification approval) never send one.
-CODE_SUBMITTING_AUTH_IDS = frozenset({MFA_AUTH_APP_OTP}) | SERVER_SENT_CODE_AUTH_IDS
+# Methods that submit a code through EndAuth's AdditionalAuthData: the
+# server-sent SMS/WhatsApp code and the offline Authenticator TOTP.
+CODE_SUBMITTING_AUTH_IDS = frozenset({MFA_AUTH_SMS, MFA_AUTH_APP_OTP})
 
 MFA_METHOD_AUTH_IDS: dict[str, tuple[str, ...]] = {
     MFA_METHOD_SMS: (MFA_AUTH_SMS,),
-    MFA_METHOD_APP: (MFA_AUTH_APP_OTP, MFA_AUTH_APP_NOTIFY),
+    MFA_METHOD_APP: (MFA_AUTH_APP_OTP,),
     MFA_METHOD_CALL: (
         MFA_AUTH_VOICE_MOBILE,
         MFA_AUTH_VOICE_ALT_MOBILE,
@@ -64,9 +66,9 @@ MFA_METHOD_INSTRUCTIONS: dict[str, str] = {
     MFA_AUTH_SMS: "Check the SMS text message on your registered phone.",
     MFA_AUTH_APP_OTP: "Open Microsoft Authenticator and enter the 6-digit code.",
     MFA_AUTH_APP_NOTIFY: "Approve the sign-in request in Microsoft Authenticator.",
-    MFA_AUTH_VOICE_MOBILE: "Answer the phone call and enter the code it reads out.",
-    MFA_AUTH_VOICE_ALT_MOBILE: "Answer the phone call and enter the code it reads out.",
-    MFA_AUTH_VOICE_OFFICE: "Answer the office phone call and enter the code it reads out.",
+    MFA_AUTH_VOICE_MOBILE: "Answer the phone call and press # to approve the sign-in.",
+    MFA_AUTH_VOICE_ALT_MOBILE: "Answer the phone call and press # to approve the sign-in.",
+    MFA_AUTH_VOICE_OFFICE: "Answer the office phone call and press # to approve the sign-in.",
 }
 
 # Microsoft error codes and their meanings
@@ -116,6 +118,10 @@ class MicrosoftSSOError(Exception):
         if self.recovery:
             parts.append(f"  Fix: {self.recovery}")
         return "\n".join(parts)
+
+
+class PlaywrightUnavailableError(MicrosoftSSOError):
+    """The Playwright runtime or Chromium executable could not be launched."""
 
 
 class MfaPendingError(MicrosoftSSOError):

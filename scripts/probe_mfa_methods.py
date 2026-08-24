@@ -21,11 +21,8 @@ def _print_proofs(result: MfaProbeResult) -> None:
         print("No MFA required: sign-in completed without a verification page.")
         return
     if result.page == "legacy_form":
-        print("Legacy form-based MFA page detected: 2FA IS required for this")
-        print("  account, but the page exposes no arrUserProofs method list.")
-        return
-    if not result.proofs:
-        print("ConvergedTFA page returned no registered methods (empty arrUserProofs).")
+        print("MFA page detected: 2FA IS required for this account, but no")
+        print("  usable arrUserProofs entries were exposed.")
         return
     for p in result.proofs:
         default = " [default]" if p.is_default else ""

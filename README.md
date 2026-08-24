@@ -133,9 +133,10 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|call|push|choose] [--save-credentials] [--json]`
 
-Microsoft SSO login (HTTP + optional Playwright for the username step). For
-SMS/WhatsApp and voice-call codes, agents should use **`auth verify`** after
-login sends the code — see [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
+Microsoft SSO login (HTTP + optional Playwright for the username step).
+SMS/WhatsApp uses `auth verify <code>` after login sends the fresh code;
+voice and push are codeless approvals resumed with `auth verify ok`. See
+[docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 Session cookies usually expire after ~5 days; re-run login when `auth status` fails.
 
 **Credentials (pick one; do not commit secrets):**
@@ -157,7 +158,7 @@ lighthouse auth login
 |------|---------|-------------|
 | `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
 | `--pass` | — | Password for Microsoft SSO (or `LIGHTHOUSE_PASSWORD` env var) |
-| `--totp` | — | 2FA code. Omit for two-phase interactive prompt |
+| `--totp` | — | Offline `PhoneAppOTP` code, or `-` to read a fresh SMS code after BeginAuth; rejected for voice/push |
 | `--mfa-method` | `auto` | `auto`, `sms`, `app`, `call` (voice), `push` (approve), or `choose` (interactive list) |
 | `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days |
 | `--json` | — | Machine-readable output |
@@ -167,8 +168,8 @@ lighthouse auth login
 1. GET D2L SAML login → Microsoft
 2. Username step (Playwright if `[auth]` installed) → password POST
 3. Session-pull interstitial hop (re-POST echoed params, bounded — Aug 2026 upstream change)
-4. `BeginAuth` sends the code (or the approval prompt for `push`); may exit and save `mfa_pending.json`
-5. `lighthouse auth verify <code>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
+4. `BeginAuth` sends the SMS code or starts a voice/push approval; may exit and save `mfa_pending.json`
+5. `lighthouse auth verify <code|ok>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
 6. Saves cookies to `~/.config/lighthouse-cli/cookies.json` (encrypted)
 7. Optional `--save-credentials` (encrypted via CredentialStore)
 
@@ -195,21 +196,25 @@ do not run `login` again before verifying). Required for non-TTY / agent workflo
 
 ### `lighthouse auth mfa-methods [--user EMAIL] [--pass PASSWORD] [--json]`
 
-Discover the MFA methods registered on the account without sending any code.
-Runs the SSO flow up to (not including) the verification step and reports
-each method's `authMethodId` (OneWaySMS, TwoWayVoice*, PhoneAppOTP,
-PhoneAppNotification) with the `--mfa-method` spelling that selects it.
+Performs a real Microsoft sign-in through the post-password stage and may
+advance KMSI/session state, but stops before `BeginAuth`, so it sends no SMS,
+places no call, and triggers no push. Reports each `authMethodId`, Microsoft's
+masked display, default flag, and the `--mfa-method` selector.
 
 **Human output:**
 ```
-Auth login successful. Cookies stored.
+MFA methods registered on this account:
+  • Call +91 ***1234 — TwoWayVoiceMobile; use --mfa-method call (Microsoft default)
 ```
 
 **JSON output (`--json`):**
 ```json
 {
-  "valid": true,
-  "cookies": ["d2lSameSiteCanaryA", "d2lSameSiteCanaryB", "d2lSecureSessionVal", "d2lSessionVal"]
+  "success": true,
+  "page": "converged",
+  "methods": [
+    {"id": "PhoneAppOTP", "method": "app", "display": "Authenticator app", "is_default": false}
+  ]
 }
 ```
 

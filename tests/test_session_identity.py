@@ -1,26 +1,23 @@
 """Targeted tests for D2L session identity ownership (config.py).
 
 config.py is the single owner of D2L session identity: COOKIE_NAMES,
-BASE_URL, COOKIE_SETTING_HOST (exact host cookies are written/filtered for),
-COOKIE_EXTRACTION_DOMAINS (variants accepted when validating fresh logins),
-and missing_cookie_names().
+BASE_URL, COOKIE_SETTING_HOST, cookie_domain_accepted(), and
+missing_cookie_names().
 """
 
 from __future__ import annotations
 
 import pytest
 
+from lighthouse_cli import ms_errors
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.config import (
     BASE_URL,
-    COOKIE_EXTRACTION_DOMAINS,
     COOKIE_NAMES,
     COOKIE_SETTING_HOST,
     missing_cookie_names,
 )
 from lighthouse_cli.ms_auth import MicrosoftSSOClient, MicrosoftSSOError
-from lighthouse_cli import ms_errors
-
 
 # ---------------------------------------------------------------------------
 # Constants: roles and exact values
@@ -34,14 +31,6 @@ class TestSessionIdentityConstants:
     def test_base_url_derived_from_setting_host(self) -> None:
         """BASE_URL shares the single owner — no second literal."""
         assert BASE_URL == f"https://{COOKIE_SETTING_HOST}"
-
-    def test_extraction_domains_exact_variant_set(self) -> None:
-        """Extraction accepts exactly today's variant set — pinned knowingly."""
-        assert COOKIE_EXTRACTION_DOMAINS == (
-            "lighthouse.manipal.edu",
-            ".manipal.edu",
-            "manipal.edu",
-        )
 
     def test_ms_errors_no_longer_dups_identity(self) -> None:
         """The deleted duplicates stay deleted (no silent reintroduction)."""
@@ -75,7 +64,7 @@ def _jar_with_cookies_on_domain(domain: str) -> MicrosoftSSOClient:
 
 
 class TestCookieExtractionDomains:
-    @pytest.mark.parametrize("domain", COOKIE_EXTRACTION_DOMAINS)
+    @pytest.mark.parametrize("domain", ("lighthouse.manipal.edu", ".manipal.edu", "manipal.edu"))
     def test_accepts_each_configured_variant(self, domain: str) -> None:
         client = _jar_with_cookies_on_domain(domain)
         try:
@@ -172,6 +161,7 @@ class TestMissingCookieNames:
 def test_ensure_config_dir_tolerates_chmod_failure(tmp_path, monkeypatch):
     """chmod-hostile filesystems (network mounts) must not break auth."""
     from pathlib import Path as _P
+
     import lighthouse_cli.config as cfg
 
     target = tmp_path / "cfg"
@@ -187,11 +177,15 @@ def test_ensure_config_dir_created_restrictive_under_permissive_umask(
     """Creation-time mode 0700 keeps the secrets dir restrictive even where
     the follow-up chmod is suppressed (fail closed, not open)."""
     import os
+    from pathlib import Path as _P
 
     import lighthouse_cli.config as cfg
 
     target = tmp_path / "cfg-mode"
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
+    monkeypatch.setattr(
+        _P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("blocked"))
+    )
     old_umask = os.umask(0o022)
     try:
         out = cfg.ensure_config_dir()
@@ -199,3 +193,21 @@ def test_ensure_config_dir_created_restrictive_under_permissive_umask(
         os.umask(old_umask)
     assert out == target and out.is_dir()
     assert (out.stat().st_mode & 0o777) == 0o700
+
+def test_mixed_scope_cookie_names_are_merged_per_name() -> None:
+    """Host-only values win only for their own names; other domain cookies survive."""
+    from lighthouse_cli.config import d2l_cookies_from_entries
+
+    entries = [
+        {"name": "d2lSecureSessionVal", "value": "domain-sec", "domain": ".manipal.edu"},
+        {"name": "d2lSessionVal", "value": "domain-session", "domain": ".manipal.edu"},
+        {"name": "d2lSameSiteCanaryA", "value": "domain-a", "domain": ".manipal.edu"},
+        {"name": "d2lSameSiteCanaryB", "value": "domain-b", "domain": ".manipal.edu"},
+        {"name": "d2lSecureSessionVal", "value": "host-sec", "domain": "lighthouse.manipal.edu"},
+    ]
+    assert d2l_cookies_from_entries(entries) == {
+        "d2lSecureSessionVal": "host-sec",
+        "d2lSessionVal": "domain-session",
+        "d2lSameSiteCanaryA": "domain-a",
+        "d2lSameSiteCanaryB": "domain-b",
+    }

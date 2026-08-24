@@ -19,24 +19,27 @@ import getpass
 import json
 import os
 import sys
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .api import LighthouseClient
 from .config import ensure_config_dir, load_mfa_pending, save_cookies
-from .credential_store import CredentialStore, CredentialStoreError  # noqa: F401
+from .credential_store import CredentialStore, CredentialStoreError
 from .ms_auth import (
+    MFA_METHOD_APP,
+    MFA_METHOD_AUTH_IDS,
     MFA_METHOD_AUTO,
     MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
+    MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    VALID_MFA_METHODS,
     MfaPendingError,
     MicrosoftSSOClient,
     MicrosoftSSOError,
-    VALID_MFA_METHODS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Exceptions and uniform exits
@@ -158,30 +161,48 @@ def resolve_credentials(
     return username or None, password or None
 
 
+def validate_totp_usage(
+    totp_code: str | None,
+    *,
+    totp_stdin: bool,
+    mfa_method: str,
+) -> None:
+    """Reject code options that cannot belong to the requested fresh challenge.
+
+    ``auto`` is decided only after Microsoft returns the account's proof list,
+    so the SSO driver performs the equivalent selected-proof check before
+    BeginAuth. A literal ``auto`` value can also resume an existing checkpoint.
+    """
+    literal = totp_code is not None and not totp_stdin
+    if literal and mfa_method == MFA_METHOD_SMS:
+        raise ValueError(
+            "--totp <code> cannot be used with --mfa-method sms because "
+            "Microsoft sends a fresh code after BeginAuth. Run auth login, "
+            "then auth verify <code>, or use --totp -."
+        )
+    if (literal or totp_stdin) and mfa_method in (MFA_METHOD_CALL, MFA_METHOD_PUSH):
+        raise ValueError(
+            f"--mfa-method {mfa_method} is codeless; do not use --totp. "
+            "Start login, complete the approval, then run auth verify ok."
+        )
+    if literal and mfa_method == MFA_METHOD_CHOOSE:
+        raise ValueError(
+            "A literal --totp code is ambiguous with --mfa-method choose. "
+            "Select --mfa-method app for an offline TOTP, or start the "
+            "two-step flow without --totp."
+        )
+
+
 def normalize_totp(
     totp_code: str | None,
     *,
     totp_stdin: bool,
     mfa_method: str,
 ) -> tuple[str | None, bool]:
-    """Normalize a pre-provided 2FA code against the challenge BeginAuth sends.
-
-    Returns ``(code, read_totp_after_challenge)``.  A literal ``--totp`` value
-    cannot match a code the server is about to SEND (sms/choose methods), so
-    it is discarded; offline Authenticator codes (``app``) stay valid.
-    ``--totp -`` defers reading to after the challenge instead.
-
-    Raises:
-        ValueError: When a surviving literal code is whitespace-only.
-    """
+    """Return the literal code or defer stdin reading until after BeginAuth."""
+    del mfa_method  # compatibility parameter; validation happens separately.
     if totp_stdin:
         return None, True
-    if totp_code is not None and mfa_method in (
-        MFA_METHOD_SMS,
-        MFA_METHOD_CALL,
-        MFA_METHOD_CHOOSE,
-    ):
-        totp_code = None
     if totp_code is not None and not totp_code.strip():
         raise ValueError("2FA code cannot be empty")
     return totp_code, False
@@ -295,6 +316,12 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
         pending_present = load_mfa_pending() is not None
     except CredentialStoreError as exc:
         return _auth_error(str(exc), json_output)
+    except OSError as exc:
+        return _auth_error(
+            f"Pending MFA session could not be read ({exc.__class__.__name__}). "
+            "Run: lighthouse auth login",
+            json_output,
+        )
     if not pending_present:
         return _auth_error(
             "No pending MFA session. Run: lighthouse auth login --mfa-method sms",
@@ -321,6 +348,14 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
     return _persist_check_report(cookies, json_output=json_output)
 
 
+def _cli_method_for_auth_id(auth_method_id: str) -> str:
+    """Return the explicit CLI selector for a Microsoft authMethodId."""
+    for method in (MFA_METHOD_SMS, MFA_METHOD_CALL, MFA_METHOD_APP, MFA_METHOD_PUSH):
+        if auth_method_id in MFA_METHOD_AUTH_IDS.get(method, ()):
+            return method
+    return "unknown"
+
+
 @_clean_auth_command
 def cmd_auth_mfa_methods(
     username: str | None = None,
@@ -328,10 +363,12 @@ def cmd_auth_mfa_methods(
     *,
     json_output: bool = False,
 ) -> int:
-    """Discover the MFA methods registered on the account (no code is sent).
+    """Discover the MFA methods registered on the account (no challenge is sent).
 
-    Runs the SSO flow up to (but not including) BeginAuth and reports the
-    ``arrUserProofs`` list Microsoft serves.  Use it to decide which
+    Performs a real sign-in through the post-password stage and may submit a
+    KMSI/CMSI continuation, but stops before BeginAuth: no SMS, call, or push
+    challenge is triggered. Reports the ``arrUserProofs`` list Microsoft
+    serves. Use it to decide which
     ``--mfa-method`` value ``auth login`` supports: sms (OneWaySMS text),
     call (TwoWayVoice* phone call), app (Authenticator OTP), or push
     (Authenticator approval).
@@ -341,7 +378,7 @@ def cmd_auth_mfa_methods(
     interactive = _is_interactive()
     stored: tuple[str, str] | None = None
     if not username or not password:
-        with suppress(CredentialStoreError):
+        with suppress(CredentialStoreError, OSError):
             stored = CredentialStore().load()
 
     def _prompt(field: str) -> str:
@@ -383,6 +420,7 @@ def cmd_auth_mfa_methods(
     methods = [
         {
             "id": proof.auth_method_id,
+            "method": _cli_method_for_auth_id(proof.auth_method_id),
             "display": proof.display,
             "is_default": proof.is_default,
         }
@@ -404,7 +442,11 @@ def cmd_auth_mfa_methods(
     print("MFA methods registered on this account:")
     for proof in result.proofs:
         marker = " (Microsoft default)" if proof.is_default else ""
-        print(f"  • {proof.display} — {proof.auth_method_id}{marker}")
+        method = _cli_method_for_auth_id(proof.auth_method_id)
+        print(
+            f"  • {proof.display} — {proof.auth_method_id}; "
+            f"use --mfa-method {method}{marker}"
+        )
     return 0
 
 
@@ -435,7 +477,7 @@ def cmd_auth_login(
         totp_stdin: If True, read TOTP from stdin
         save_credentials: If True, save credentials encrypted
         json_output: If True, output JSON
-        mfa_method: MFA delivery preference (auto, sms, app)
+        mfa_method: MFA delivery preference (auto, sms, app, call, push, choose)
 
     Returns:
         Exit code (0=success, 1=auth failure, 2=CLI usage error, 130=interrupted)
@@ -445,7 +487,7 @@ def cmd_auth_login(
     interactive = _is_interactive()
     stored: tuple[str, str] | None = None
     if not username or not password:
-        with suppress(CredentialStoreError):
+        with suppress(CredentialStoreError, OSError):
             stored = CredentialStore().load()
 
     def _prompt(field: str) -> str:
@@ -489,6 +531,9 @@ def cmd_auth_login(
         )
 
     try:
+        validate_totp_usage(
+            totp_code, totp_stdin=totp_stdin, mfa_method=resolved_mfa_method
+        )
         code, read_totp_after_challenge = normalize_totp(
             totp_code, totp_stdin=totp_stdin, mfa_method=resolved_mfa_method
         )
@@ -519,6 +564,12 @@ def cmd_auth_login(
                 f"Warning: ignoring an unreadable MFA pending session ({exc}).",
                 file=sys.stderr,
             )
+        except OSError as exc:
+            print(
+                "Warning: ignoring an unreadable MFA pending session "
+                f"({exc.__class__.__name__}).",
+                file=sys.stderr,
+            )
     plan = plan_login(
         totp_code=code,
         read_totp_after_challenge=read_totp_after_challenge,
@@ -537,7 +588,7 @@ def cmd_auth_login(
     if interactive and not json_output and plan.totp_code is None:
         print(
             "Two-step sign-in: enter email and password first; "
-            "you will be asked for a verification code next.",
+            "then complete the verification method Microsoft selects.",
             flush=True,
         )
         if resolved_mfa_method == MFA_METHOD_SMS:

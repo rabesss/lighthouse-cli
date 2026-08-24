@@ -16,12 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lighthouse_cli.credential_store import (
+    FORMAT_VERSION,
     CredentialStore,
     CredentialStoreError,
-    FORMAT_VERSION,
     is_sealed_document,
 )
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -29,9 +28,6 @@ from lighthouse_cli.credential_store import (
 
 # Canonical D2L origin: the exact host session cookies are set on and filtered for.
 COOKIE_SETTING_HOST = "lighthouse.manipal.edu"
-
-# Domain variants accepted when extracting fresh D2L cookies from a login session jar.
-COOKIE_EXTRACTION_DOMAINS = ("lighthouse.manipal.edu", ".manipal.edu", "manipal.edu")
 
 BASE_URL = f"https://{COOKIE_SETTING_HOST}"
 API_LE = f"{BASE_URL}/d2l/api/le/1.93"
@@ -119,7 +115,9 @@ def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
             else domain_scoped
         )
         target[name] = value
-    return host_only or domain_scoped
+    merged = dict(domain_scoped)
+    merged.update(host_only)
+    return merged
 
 
 def load_cookies() -> dict[str, str]:
@@ -269,11 +267,17 @@ def load_mfa_pending() -> dict | None:
     """
     store = CredentialStore()
     path = store.mfa_pending_file
-    if not path.exists():
-        return None
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        if not path.exists():
+            return None
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CredentialStoreError(
+            f"{path.name} could not be read ({exc.__class__.__name__})."
+        ) from None
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(doc, dict):
         return None

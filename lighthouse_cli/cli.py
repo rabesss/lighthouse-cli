@@ -11,8 +11,10 @@ from __future__ import annotations
 import click
 
 from . import __version__
+from .auth import cmd_auth_login
 from .commands import (
     cmd_announcements,
+    cmd_assignments,
     cmd_auth_status,
     cmd_calendar,
     cmd_content,
@@ -22,11 +24,9 @@ from .commands import (
     cmd_quiz_detail,
     cmd_quizzes,
     cmd_semesters,
-    cmd_sync,
-    cmd_assignments,
     cmd_submit,
+    cmd_sync,
 )
-from .auth import cmd_auth_login
 from .course_config import cmd_config_courses
 
 # ---------------------------------------------------------------------------
@@ -130,8 +130,8 @@ def auth_login(
 
     MFA: --mfa-method auto (default), sms, call, app, push, or choose (pick from
     a list). Text codes may arrive via SMS or WhatsApp depending on Microsoft;
-    the CLI cannot select the delivery channel. Voice codes (call) are spoken
-    during the phone call; push is approved in Microsoft Authenticator.
+    the CLI cannot select the delivery channel. Voice calls are approved by
+    answering and pressing #; push is approved in Microsoft Authenticator.
 
     Discover what the account supports first: lighthouse auth mfa-methods
 
@@ -187,11 +187,11 @@ def auth_mfa_methods(
     password: str | None,
     json_output: bool,
 ) -> None:
-    """List the MFA methods registered on the account (no code is sent).
+    """List the account's MFA methods without triggering a challenge.
 
-    Runs the SSO flow up to — but not including — the verification step and
-    reports the methods Microsoft offers: OneWaySMS (sms), TwoWayVoice*
-    (call), PhoneAppOTP (app), PhoneAppNotification (push).
+    Performs a real sign-in through the post-password stage and may advance
+    KMSI/session state, but stops before BeginAuth. Reports OneWaySMS (sms),
+    TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
     """
     from lighthouse_cli.auth import cmd_auth_mfa_methods
 
@@ -200,8 +200,6 @@ def auth_mfa_methods(
         password=password,
         json_output=json_output,
     ))
-
-
 
 
 # ---------------------------------------------------------------------------

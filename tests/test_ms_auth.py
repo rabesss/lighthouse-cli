@@ -7,32 +7,31 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
     MFA_METHOD_APP,
     MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    MS_ERROR_CODES,
     VALID_MFA_METHODS,
-    ResponseSnapshot,
-    _prompt_user_proof_choice,
     MicrosoftSSOClient,
     MicrosoftSSOError,
+    ResponseSnapshot,
     UserProof,
     _absolute_url,
+    _extract_config_json,
+    _extract_error_code_and_msg,
+    _parse_user_proofs,
+    _prompt_user_proof_choice,
+    _select_user_proof,
     build_sso_error,
     extract_saml_response,
     is_error_page,
     is_mfa_page,
     kmsi_page_detected,
-    _extract_config_json,
-    _extract_error_code_and_msg,
-    _parse_user_proofs,
-    _select_user_proof,
-    MS_ERROR_CODES,
 )
-from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -697,38 +696,28 @@ class TestVoiceAndPushMethods:
         assert MFA_METHOD_CALL in VALID_MFA_METHODS
         assert MFA_METHOD_PUSH in VALID_MFA_METHODS
 
-    def test_voice_codes_are_server_sent(self) -> None:
-        """A pre-provided --totp cannot match a spoken code: discarded."""
-        from lighthouse_cli.ms_errors import SERVER_SENT_CODE_AUTH_IDS
+    def test_voice_is_codeless_approval(self) -> None:
+        from lighthouse_cli.ms_errors import (
+            CODELESS_APPROVAL_AUTH_IDS,
+            SERVER_SENT_CODE_AUTH_IDS,
+        )
 
-        client = MicrosoftSSOClient()
-        try:
-            selected = UserProof("TwoWayVoiceMobile", "Call +91 ***1234", "", False)
-            assert selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS
-            # Non-interactive + no stdin deferral -> clean error, never a
-            # silent reuse of a stale literal code.
-            import io
+        assert "TwoWayVoiceMobile" in CODELESS_APPROVAL_AUTH_IDS
+        assert "TwoWayVoiceMobile" not in SERVER_SENT_CODE_AUTH_IDS
 
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setattr("sys.stdin", io.StringIO(""))
-                with pytest.raises(MicrosoftSSOError):
-                    client._collect_totp_after_challenge(
-                        selected,
-                        "123456",
-                        read_totp_after_challenge=False,
-                        code_sent_on_begin=True,
-                    )
-        finally:
-            client.close()
-
-    def test_end_payload_carries_code_for_voice(self) -> None:
+    def test_end_payload_never_carries_code_for_voice(self) -> None:
         from lighthouse_cli.ms_auth import build_end_payload
 
         proof = UserProof("TwoWayVoiceOffice", "Call office", "", False)
         payload = build_end_payload(
             proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
         )
-        assert payload["AdditionalAuthData"] == "998877"
+        assert "AdditionalAuthData" not in payload
+
+    def test_app_selector_does_not_fall_through_to_push(self) -> None:
+        proofs = [UserProof("PhoneAppNotification", "Approve", "", True)]
+        with pytest.raises(MicrosoftSSOError, match="not available"):
+            _select_user_proof(proofs, MFA_METHOD_APP)
 
     def test_end_payload_never_carries_code_for_push(self) -> None:
         from lighthouse_cli.ms_auth import build_end_payload

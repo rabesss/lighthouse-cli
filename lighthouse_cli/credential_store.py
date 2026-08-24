@@ -59,6 +59,7 @@ _KDF_ITERATIONS = 600_000
 #: Iterations assumed for envelopes written before the count was recorded
 #: (sealed at 300,000). Changing ``_KDF_ITERATIONS`` no longer orphans them.
 _LEGACY_KDF_ITERATIONS = 300_000
+_SUPPORTED_KDF_ITERATIONS = frozenset({_LEGACY_KDF_ITERATIONS, _KDF_ITERATIONS})
 
 #: Envelope header keys — never treated as artifact metadata.
 _ENVELOPE_KEYS = frozenset({"v", "key_source", "kdf_salt", "kdf_iterations", "ciphertext"})
@@ -87,7 +88,7 @@ def _passphrase_from_env() -> str | None:
 def _load_keyring_module() -> Any | None:
     """Import keyring, or None when unavailable (missing or broken install)."""
     try:
-        import keyring  # noqa: PLC0415
+        import keyring
     except Exception:
         return None
     return keyring
@@ -338,9 +339,15 @@ class CredentialStore:
             CredentialStoreError: When decryption fails or the key source for
                 the recorded/legacy format is unavailable.
         """
-        if not self.credentials_file.exists():
-            return None
-        blob = self.credentials_file.read_bytes()
+        try:
+            if not self.credentials_file.exists():
+                return None
+            blob = self.credentials_file.read_bytes()
+        except OSError as exc:
+            raise CredentialStoreError(
+                f"{self.credentials_file.name} could not be read "
+                f"({exc.__class__.__name__})."
+            ) from None
         if not blob.lstrip().startswith(b"{"):
             return self._load_and_migrate_legacy(blob)
         try:
@@ -449,16 +456,20 @@ class CredentialStore:
                         f"This data was sealed with {PASSPHRASE_ENV}; set the same "
                         "passphrase to decrypt it."
                     )
-                raw_iterations = envelope.get("kdf_iterations")
-                iterations = (
-                    raw_iterations
+                if "kdf_iterations" not in envelope:
+                    iterations = _LEGACY_KDF_ITERATIONS
+                else:
+                    raw_iterations = envelope.get("kdf_iterations")
                     if (
-                        isinstance(raw_iterations, int)
-                        and not isinstance(raw_iterations, bool)
-                        and raw_iterations > 0
-                    )
-                    else _LEGACY_KDF_ITERATIONS
-                )
+                        not isinstance(raw_iterations, int)
+                        or isinstance(raw_iterations, bool)
+                        or raw_iterations not in _SUPPORTED_KDF_ITERATIONS
+                    ):
+                        raise CredentialStoreError(
+                            "Sealed data records an unsupported KDF iteration "
+                            "count and cannot be opened."
+                        )
+                    iterations = raw_iterations
                 key = _derive_passphrase_key(
                     passphrase, _decode_kdf_salt(salt_b64), iterations
                 )

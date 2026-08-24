@@ -231,6 +231,7 @@ class ScriptedSession:
         self.cookies = requests.cookies.RequestsCookieJar()
         self.headers: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
+        self.request_kwargs: list[tuple[str, str, dict[str, Any]]] = []
         self._queue: list[Any] = []
 
     def enqueue(self, *items: Any) -> None:
@@ -246,9 +247,11 @@ class ScriptedSession:
         return item
 
     def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.request_kwargs.append(("GET", url, kwargs))
         return self._next("GET", url)
 
     def post(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.request_kwargs.append(("POST", url, kwargs))
         return self._next("POST", url)
 
     def close(self) -> None:
@@ -381,21 +384,21 @@ class TestPasswordFlow:
         with pytest.raises(MicrosoftSSOError, match=r"Unexpected response — page:"):
             run_login(scripted)
 
-    def test_probe_reports_no_mfa_shape_on_stderr(self, scripted: ScriptedSession, isolated_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """probe_mfa_methods reports an unrecognized post-credentials page as
-        no_mfa with the sanitized shape on stderr (never stdout)."""
+    def test_probe_rejects_unrecognized_post_credentials_page(
+        self, scripted: ScriptedSession, isolated_config: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(), url=MS_SSO_URL),
             FakeResponse(200, html="<html><head><title>Mystery</title></head><body>huh</body></html>", url=CREDS_POST_URL),
         )
         client = make_client(scripted)
-        result = client.probe_mfa_methods(USERNAME, PASSWORD)
-        assert result.page == "no_mfa"
-        assert result.proofs == []
+        with pytest.raises(MicrosoftSSOError, match="unrecognized page"):
+            client.probe_mfa_methods(USERNAME, PASSWORD)
         captured = capsys.readouterr()
-        assert "no_mfa — unrecognized post-credentials page: page:" in captured.err
         assert captured.out == ""
+        assert captured.err == ""
 
     def test_probe_reports_converged_proofs(
         self, scripted: ScriptedSession, isolated_config: Path
@@ -487,8 +490,9 @@ class TestUsernameBootstrap:
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert f"{MS_BASE}/common/GetCredentialType" in [u for _, u in scripted.calls]
         captured = capsys.readouterr()
-        assert "falling back" in captured.err or "pure-HTTP flow" in captured.err
+        assert "pure-HTTP flow" in captured.err
         assert PASSWORD not in captured.err
+        assert "chromium executable missing" not in captured.err
         assert captured.out == ""
 
     def test_playwright_failure_surfaces_when_http_also_fails(
@@ -520,6 +524,35 @@ class TestUsernameBootstrap:
         )
         with pytest.raises(requests.ConnectionError):
             run_login(scripted)
+
+    def test_playwright_semantic_failure_does_not_fall_back(
+        self, scripted: ScriptedSession, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake_api = ModuleType("playwright.sync_api")
+        fake_api.sync_playwright = lambda: object()  # type: ignore[attr-defined]
+        fake_root = ModuleType("playwright")
+        fake_root.sync_api = fake_api  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "playwright", fake_root)
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+        monkeypatch.setattr(
+            MicrosoftSSOClient,
+            "_bootstrap_username_via_playwright",
+            lambda self, config, username: (_ for _ in ()).throw(
+                MicrosoftSSOError("semantic page failure", step="prepare username")
+            ),
+        )
+        http_fallback = patch.object(
+            MicrosoftSSOClient, "_step_prepare_username_http"
+        )
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(url_get_credential_type=True), url=MS_SSO_URL),
+        )
+        with http_fallback as fallback:
+            with pytest.raises(MicrosoftSSOError, match="semantic page failure"):
+                run_login(scripted)
+            fallback.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +610,14 @@ class TestConvergedMfa:
         with pytest.raises(MicrosoftSSOError, match="not available"):
             run_login(scripted, totp_code=TOTP_CODE, mfa_method="app")
         # No SAS API traffic happened.
+        assert ("POST", BEGIN_URL) not in scripted.calls
+
+    def test_auto_literal_code_rejected_before_sms_beginauth(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        self._mfa_script_head(scripted, "OneWaySMS")
+        with pytest.raises(MicrosoftSSOError, match="valid only for PhoneAppOTP"):
+            run_login(scripted, totp_code=TOTP_CODE, mfa_method="auto")
         assert ("POST", BEGIN_URL) not in scripted.calls
 
     def test_begin_auth_failure_raises(self, scripted: ScriptedSession, isolated_config: Path) -> None:
@@ -756,6 +797,88 @@ class TestDeferAndResume:
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("POST", END_URL) in scripted.calls
         assert read_pending() is None
+
+    def test_voice_defer_then_verify_is_codeless(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(
+                200,
+                html=mfa_html(auth_method_id="TwoWayVoiceMobile", display="Call"),
+                url=MFA_PAGE_URL,
+            ),
+            begin_success(),
+        )
+        with pytest.raises(MfaPendingError, match="press #"):
+            run_login(
+                scripted, mfa_method="call", defer_mfa_to_pending=True
+            )
+
+        scripted.enqueue(
+            end_success(),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending("ok")
+        finally:
+            client.close()
+        assert set(cookies) == set(COOKIE_NAMES)
+        end_calls = [
+            kwargs
+            for method, url, kwargs in scripted.request_kwargs
+            if method == "POST" and url == END_URL
+        ]
+        assert end_calls
+        assert "AdditionalAuthData" not in end_calls[-1]["json"]
+
+    def test_push_defer_verify_prints_number_match_on_non_tty_stderr(
+        self, scripted: ScriptedSession, isolated_config: Path,
+        capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(
+                200,
+                html=mfa_html(auth_method_id="PhoneAppNotification", display="Push"),
+                url=MFA_PAGE_URL,
+            ),
+            begin_success(),
+        )
+        with pytest.raises(MfaPendingError, match="approval requested"):
+            run_login(
+                scripted, mfa_method="push", defer_mfa_to_pending=True
+            )
+
+        scripted.enqueue(
+            FakeResponse(json_data={"Retry": True, "Entropy": "42"}),
+            end_success(),
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        monkeypatch.setattr("time.sleep", lambda _seconds: None)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending("ok")
+        finally:
+            client.close()
+        captured = capsys.readouterr()
+        assert set(cookies) == set(COOKIE_NAMES)
+        assert "number shown: 42" in captured.err
+        assert captured.out == ""
+        end_calls = [
+            kwargs
+            for method, url, kwargs in scripted.request_kwargs
+            if method == "POST" and url == END_URL
+        ]
+        assert end_calls
+        assert all("AdditionalAuthData" not in call["json"] for call in end_calls)
 
     def test_verify_without_pending_fails_cleanly(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         client = make_client(scripted)
@@ -1161,6 +1284,23 @@ class TestSsoReloadInterstitial:
         t = classify_post_mfa(self._snap(mfa_html()), CREDS_POST_URL)
         assert t.kind == "mfa"
 
+    def test_cross_origin_reload_target_is_rejected(self) -> None:
+        from lighthouse_cli.ms_auth import sso_reload_transition
+
+        html = sso_reload_html(
+            url_post="https://evil.example/login?sso_reload=True"
+        )
+        with pytest.raises(MicrosoftSSOError, match="unsafe re-POST target"):
+            sso_reload_transition(self._snap(html), CREDS_POST_URL)
+
+    def test_nested_reload_value_is_rejected_without_value_echo(self) -> None:
+        from lighthouse_cli.ms_auth import sso_reload_transition
+
+        html = sso_reload_html(o_post_params={"passwd": ["nested-secret"]})
+        with pytest.raises(MicrosoftSSOError, match="unsupported value type") as exc:
+            sso_reload_transition(self._snap(html), CREDS_POST_URL)
+        assert "nested-secret" not in str(exc.value)
+
     # -- walk integration ----------------------------------------------------
 
     def test_login_walks_interstitial_to_error_page(
@@ -1193,11 +1333,10 @@ class TestSsoReloadInterstitial:
         assert result.page == "converged"
         assert [p.auth_method_id for p in result.proofs] == ["PhoneAppOTP"]
 
-    def test_walk_is_bounded_by_slmaxretry(
+    def test_walk_is_bounded_by_local_reload_budget(
         self, scripted: ScriptedSession, isolated_config: Path
     ) -> None:
-        """A tenant looping the interstitial forever stops after
-        _MAX_SSO_RELOADS re-POSTs and surfaces a clean error."""
+        """A looping interstitial stops after the local safety budget."""
         from lighthouse_cli.ms_auth import _MAX_SSO_RELOADS
 
         scripted.enqueue(
@@ -1208,13 +1347,29 @@ class TestSsoReloadInterstitial:
                 for _ in range(_MAX_SSO_RELOADS + 2)
             ],
         )
-        with pytest.raises(MicrosoftSSOError) as ei:
+        with pytest.raises(MicrosoftSSOError, match="reload limit exceeded"):
             run_login(scripted)
-        assert "Unexpected response" in str(ei.value)
         # Exactly _MAX_SSO_RELOADS re-POSTs were issued (password POST + the
         # bounded reloads; the third interstitial is returned, never re-POSTed).
         reposts = [c for c in scripted.calls if c[0] == "POST"]
         assert len(reposts) == 1 + _MAX_SSO_RELOADS
+
+    def test_probe_reload_exhaustion_is_error_not_no_mfa(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        from lighthouse_cli.ms_auth import _MAX_SSO_RELOADS
+
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            *[
+                FakeResponse(200, html=sso_reload_html(), url=CREDS_POST_URL)
+                for _ in range(_MAX_SSO_RELOADS + 1)
+            ],
+        )
+        client = make_client(scripted)
+        with pytest.raises(MicrosoftSSOError, match="reload limit exceeded"):
+            client.probe_mfa_methods(USERNAME, PASSWORD)
 
     # -- leak guards ---------------------------------------------------------
 

@@ -31,19 +31,29 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, NamedTuple
-from urllib.parse import urljoin, urlparse
+from typing import Any, NamedTuple
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+from lighthouse_cli.config import (
+    BASE_URL,
+    COOKIE_SETTING_HOST,
+    cookie_domain_accepted,
+    missing_cookie_names,
+)
+
 # ---------------------------------------------------------------------------
 # Re-exports from sub-modules (preserve public API)
 # ---------------------------------------------------------------------------
-from lighthouse_cli.ms_errors import (  # noqa: F401
+from lighthouse_cli.ms_errors import (
     CODE_SUBMITTING_AUTH_IDS,
+    CODELESS_APPROVAL_AUTH_IDS,
     LOGIN_PATH,
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
@@ -56,31 +66,26 @@ from lighthouse_cli.ms_errors import (  # noqa: F401
     MFA_METHOD_INSTRUCTIONS,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
-    MfaPendingError,
-    MicrosoftSSOError,
     MS_ERROR_CODES,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
+    MfaPendingError,
+    MicrosoftSSOError,
+    PlaywrightUnavailableError,
 )
-from lighthouse_cli.config import (
-    BASE_URL,
-    COOKIE_SETTING_HOST,
-    cookie_domain_accepted,
-    missing_cookie_names,
-)
-from lighthouse_cli.ms_mfa import (  # noqa: F401
+from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
     UserProof,
     _parse_user_proofs,
     _prompt_user_proof_choice,
     _select_user_proof,
 )
-from lighthouse_cli.ms_parse import (  # noqa: F401
+from lighthouse_cli.ms_parse import (
     _extract_balanced_json_object,
     _extract_config_json,
     _extract_error_code_and_msg,
 )
-from lighthouse_cli.ms_session import (  # noqa: F401
+from lighthouse_cli.ms_session import (
     _absolute_url,
     _export_session_cookies,
     _import_session_cookies,
@@ -93,8 +98,8 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 _MAX_POST_MFA_HOPS = 12
 _MAX_ENDAUTH_POLLS = 30
-# Microsoft's session-pull reload interstitial declares slMaxRetry=2; the
-# walk honors that bound so a broken tenant loop cannot ping-pong forever.
+# Conservative client-side safety budget. The page's ``slMaxRetry`` belongs
+# to Microsoft's script loader, not to the session-pull form submission.
 _MAX_SSO_RELOADS = 2
 
 
@@ -464,8 +469,16 @@ def is_sso_reload_page(snapshot: ResponseSnapshot) -> bool:
     cfg = _extract_config_json(snapshot.html) or {}
     url_post = str(cfg.get("urlPost") or "")
     params = cfg.get("oPostParams")
+    query = parse_qs(urlparse(url_post).query, keep_blank_values=True)
+    reload_values = [
+        value
+        for key, values in query.items()
+        if key.lower() == "sso_reload"
+        for value in values
+    ]
     return (
-        "sso_reload" in url_post.lower()
+        snapshot.status_code == 200
+        and any(value.lower() == "true" for value in reload_values)
         and isinstance(params, dict)
         and bool(params)
     )
@@ -482,14 +495,35 @@ def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
     cfg = _extract_config_json(snapshot.html) or {}
     url_post = str(cfg.get("urlPost") or "")
     params = cfg.get("oPostParams")
-    form_data = (
-        {str(k): str(v) for k, v in params.items()} if isinstance(params, dict) else {}
-    )
-    return Transition(
-        kind="sso_reload",
-        url=_absolute_url(base_url, url_post),
-        data=form_data,
-    )
+    target = _absolute_url(base_url, url_post)
+    source_url = snapshot.url or base_url
+    source = urlparse(source_url)
+    destination = urlparse(target)
+    if (
+        destination.scheme.lower() != "https"
+        or not source.netloc
+        or destination.netloc.lower() != source.netloc.lower()
+    ):
+        raise MicrosoftSSOError(
+            "Microsoft session-pull requested an unsafe re-POST target.",
+            step="POST credentials",
+            recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
+        )
+    if not isinstance(params, dict):
+        raise MicrosoftSSOError(
+            "Microsoft session-pull parameters were missing.",
+            step="POST credentials",
+        )
+    form_data: dict[str, str] = {}
+    for key, value in params.items():
+        if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
+            raise MicrosoftSSOError(
+                "Microsoft session-pull parameters had an unsupported value type.",
+                step="POST credentials",
+                recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
+            )
+        form_data[key] = str(value)
+    return Transition(kind="sso_reload", url=target, data=form_data)
 
 
 def classify_post_mfa(snapshot: ResponseSnapshot, base_url: str) -> Transition:
@@ -885,12 +919,14 @@ class MicrosoftSSOClient:
             if extract_saml_response(snap.html):
                 # Password accepted, no second factor requested.
                 return MfaProbeResult(page="no_mfa", proofs=[])
-            print(
-                f"no_mfa — unrecognized post-credentials page: "
-                f"{describe_page_shape(snap)}",
-                file=sys.stderr,
+            raise MicrosoftSSOError(
+                "Microsoft returned an unrecognized page while discovering MFA methods.",
+                step="MFA discovery",
+                recovery=(
+                    "Retry the command. If it persists, enable LIGHTHOUSE_DEBUG_FLOW "
+                    "and report the sanitized page-shape trace."
+                ),
             )
-            return MfaProbeResult(page="no_mfa", proofs=[])
         cfg = _extract_config_json(snap.html) or {}
         proofs = _parse_user_proofs(cfg)
         page = "converged" if proofs else "legacy_form"
@@ -1056,8 +1092,8 @@ class MicrosoftSSOClient:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            raise MicrosoftSSOError(
-                "Playwright is required for Microsoft username bootstrap.",
+            raise PlaywrightUnavailableError(
+                "Playwright is not installed.",
                 step="prepare username",
                 recovery="Install with: pip install playwright && playwright install chromium",
             ) from exc
@@ -1080,39 +1116,66 @@ class MicrosoftSSOClient:
             })
 
         try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
-                try:
-                    context = browser.new_context(user_agent=user_agent)
-                    if export_cookies:
-                        context.add_cookies(export_cookies)
-                    page = context.new_page()
-                    page.goto(ms_url, wait_until="networkidle", timeout=60000)
-                    login_input = page.query_selector('input[name="loginfmt"]')
-                    if login_input:
-                        page.fill('input[name="loginfmt"]', username)
-                        page.click("#idSIButton9")
-                        page.wait_for_selector('input[name="passwd"]', timeout=30000)
-                    pw_cfg = page.evaluate(
-                        """() => ({
-                            urlPost: $Config.urlPost,
-                            sFT: $Config.sFT,
-                            sCtx: $Config.sCtx,
-                            canary: $Config.canary,
-                            sessionId: $Config.sessionId,
-                            i19: $Config.i19
-                        })"""
-                    )
-                    referer = page.url
-                    pw_cookies = context.cookies()
-                finally:
-                    browser.close()
+            manager = sync_playwright()
+            playwright = manager.__enter__()
         except Exception as exc:
-            raise MicrosoftSSOError(
-                f"Playwright username bootstrap failed: {exc}",
+            raise PlaywrightUnavailableError(
+                f"Playwright runtime could not start ({exc.__class__.__name__}).",
                 step="prepare username",
-                recovery="Ensure Chromium is installed: playwright install chromium",
-            ) from exc
+                recovery="Ensure Playwright and its driver are installed correctly.",
+            ) from None
+
+        browser = None
+        try:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except Exception as exc:
+                raise PlaywrightUnavailableError(
+                    f"Chromium could not launch ({exc.__class__.__name__}).",
+                    step="prepare username",
+                    recovery="Install Chromium with: playwright install chromium",
+                ) from None
+
+            try:
+                context = browser.new_context(user_agent=user_agent)
+                if export_cookies:
+                    context.add_cookies(export_cookies)
+                page = context.new_page()
+                page.goto(ms_url, wait_until="networkidle", timeout=60000)
+                login_input = page.query_selector('input[name="loginfmt"]')
+                if login_input:
+                    page.fill('input[name="loginfmt"]', username)
+                    page.click("#idSIButton9")
+                    page.wait_for_selector('input[name="passwd"]', timeout=30000)
+                pw_cfg = page.evaluate(
+                    """() => ({
+                        urlPost: $Config.urlPost,
+                        sFT: $Config.sFT,
+                        sCtx: $Config.sCtx,
+                        canary: $Config.canary,
+                        sessionId: $Config.sessionId,
+                        i19: $Config.i19
+                    })"""
+                )
+                referer = page.url
+                pw_cookies = context.cookies()
+            except PlaywrightUnavailableError:
+                raise
+            except Exception as exc:
+                raise MicrosoftSSOError(
+                    f"Playwright username step failed ({exc.__class__.__name__}).",
+                    step="prepare username",
+                    recovery=(
+                        "Microsoft may have changed the username page. Retry, or "
+                        "remove the auth extra to force the mirrored HTTP path."
+                    ),
+                ) from None
+        finally:
+            if browser is not None:
+                with suppress(Exception):
+                    browser.close()
+            with suppress(Exception):
+                manager.__exit__(None, None, None)
 
         self._import_playwright_cookies(pw_cookies)
         _prune_stale_esctx_cookies(self._session)
@@ -1182,21 +1245,16 @@ class MicrosoftSSOClient:
         if not config.get("urlGetCredentialType"):
             return config
         try:
-            from playwright.sync_api import sync_playwright  # noqa: F401
+            from playwright.sync_api import sync_playwright
         except ImportError:
             return self._step_prepare_username_http(config, username)
         try:
             return self._bootstrap_username_via_playwright(config, username)
-        except MicrosoftSSOError as exc:
-            # Playwright imports but cannot actually run (Chromium not
-            # installed, sandbox denied, driver/OS mismatch). The browser
-            # bootstrap is an optimization over the mirrored HTTP sequence,
-            # not a requirement — degrade with a warning instead of failing
-            # the login; the HTTP path raises if it also fails. The error
-            # text carries no credentials (it wraps a launcher failure).
+        except PlaywrightUnavailableError:
+            # Import/runtime/launch failures can use the mirrored HTTP path.
+            # Semantic browser-flow failures remain errors and are not hidden.
             print(
-                f"Playwright username bootstrap unavailable ({exc}); "
-                "using the pure-HTTP flow.",
+                "Playwright username bootstrap unavailable; using the pure-HTTP flow.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1389,9 +1447,9 @@ class MicrosoftSSOClient:
     ) -> str:
         """Collect OTP after BeginAuth.
 
-        Server-sent code methods (SMS/WhatsApp text, TwoWayVoice* phone calls)
-        issue a fresh code on BeginAuth; PhoneAppOTP is an offline TOTP
-        generated on the user's device, so a pre-provided code stays valid.
+        SMS/WhatsApp issues a fresh code on BeginAuth; PhoneAppOTP is an
+        offline TOTP generated on the user's device, so a pre-provided code
+        stays valid. Codeless methods never call this helper.
         """
         needs_fresh_code = selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS
         if needs_fresh_code and totp_code and not read_totp_after_challenge:
@@ -1477,6 +1535,23 @@ class MicrosoftSSOClient:
     ) -> ResponseSnapshot:
         """Handle ConvergedTFA via BeginAuth → EndAuth → ProcessAuth."""
         selected = _select_user_proof(proofs, mfa_method)
+        is_codeless = selected.auth_method_id in CODELESS_APPROVAL_AUTH_IDS
+        if totp_code is not None and selected.auth_method_id != MFA_AUTH_APP_OTP:
+            raise MicrosoftSSOError(
+                "A pre-provided --totp code is valid only for PhoneAppOTP.",
+                step="MFA",
+                recovery=(
+                    "Use --mfa-method app for an offline Authenticator code, "
+                    "or start the selected two-step challenge without --totp."
+                ),
+            )
+        if read_totp_after_challenge and is_codeless:
+            raise MicrosoftSSOError(
+                "The selected MFA method is codeless and cannot read --totp from stdin.",
+                step="MFA",
+                recovery="Start login without --totp, then run auth verify ok.",
+            )
+
         begin_url = mfa_config.get("urlBeginAuth") or "/common/SAS/BeginAuth"
 
         begin_resp = self._post(
@@ -1530,9 +1605,24 @@ class MicrosoftSSOClient:
             })
             if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
                 raise MfaPendingError(
-                    "Approval requested — approve the sign-in on your registered device.",
+                    "Authenticator approval requested.",
                     step="MFA",
-                    recovery="Run: lighthouse auth verify ok  (after approving the request)",
+                    recovery=(
+                        "Run: lighthouse auth verify ok  (displays any number "
+                        "match and waits for approval)"
+                    ),
+                )
+            if selected.auth_method_id in CODELESS_APPROVAL_AUTH_IDS:
+                raise MfaPendingError(
+                    "Voice approval call started — answer and press #.",
+                    step="MFA",
+                    recovery="Run: lighthouse auth verify ok  (waits for the call approval)",
+                )
+            if selected.auth_method_id == MFA_AUTH_APP_OTP:
+                raise MfaPendingError(
+                    "Authenticator code required.",
+                    step="MFA",
+                    recovery="Run: lighthouse auth verify <current-app-code>",
                 )
             raise MfaPendingError(
                 "Verification code sent.",
@@ -1540,18 +1630,13 @@ class MicrosoftSSOClient:
                 recovery="Run: lighthouse auth verify <code>  (use the code from this message)",
             )
 
-        if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
-            if totp_code is None and sys.stdin.isatty():
-                totp_code = self._prompt_mfa_code(selected)
-        else:
+        if not is_codeless:
             totp_code = self._collect_totp_after_challenge(
                 selected,
                 totp_code,
                 read_totp_after_challenge=read_totp_after_challenge,
                 code_sent_on_begin=code_sent_on_begin,
             )
-
-        if selected.auth_method_id != MFA_AUTH_APP_NOTIFY:
             if not totp_code:
                 raise MicrosoftSSOError(
                     "2FA code is required but was empty.",
@@ -1643,11 +1728,12 @@ class MicrosoftSSOClient:
         poll_seconds = max(0.5, poll_seconds)
 
         end_data: dict[str, Any] = {}
+        shown_entropy: str | None = None
         if skip_end_auth and end_auth_flow and end_auth_ctx:
             end_flow = end_auth_flow
             end_ctx = end_auth_ctx
             end_data = {"FlowToken": end_flow, "Ctx": end_ctx, "Success": True}
-        for attempt in range(_MAX_ENDAUTH_POLLS):
+        for _ in range(_MAX_ENDAUTH_POLLS):
             if skip_end_auth:
                 break
             end_resp = self._post(
@@ -1697,9 +1783,10 @@ class MicrosoftSSOClient:
                     step="MFA",
                     recovery="Request a new code and try again.",
                 )
-            if selected.auth_method_id == MFA_AUTH_APP_NOTIFY and attempt == 0:
-                entropy = end_data.get("Entropy")
-                if entropy and sys.stdin.isatty():
+            if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
+                entropy = str(end_data.get("Entropy") or "")
+                if entropy and entropy != shown_entropy:
+                    shown_entropy = entropy
                     print(
                         f"Approve sign-in in Authenticator (number shown: {entropy}).",
                         flush=True,
@@ -1802,9 +1889,9 @@ class MicrosoftSSOClient:
         ``auth verify`` resume) and disabled for the post-credentials walk
         (which continues inline through any interrupts before MFA).
 
-        Terminal outcomes: a page carrying SAMLResponse, or an MFA
-        verification page the caller handles, or the hop/reload budget
-        running out (the snapshot is returned for error classification).
+        Terminal outcomes: a page carrying SAMLResponse, an MFA page, or an
+        unrecognized page returned to the caller. Exhausting either safety
+        budget raises a clean error.
         """
         sso_reloads = 0
         for _ in range(_MAX_POST_MFA_HOPS):
@@ -1817,9 +1904,13 @@ class MicrosoftSSOClient:
                 return snapshot
 
             if transition.kind == "sso_reload":
+                if sso_reloads >= _MAX_SSO_RELOADS:
+                    raise MicrosoftSSOError(
+                        "Microsoft session-pull reload limit exceeded.",
+                        step="SSO interstitial walk",
+                        recovery="Retry the login; the upstream sign-in flow may be looping.",
+                    )
                 sso_reloads += 1
-                if sso_reloads > _MAX_SSO_RELOADS:
-                    break
                 snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
                 base_url = snapshot.url
                 continue
@@ -1848,9 +1939,13 @@ class MicrosoftSSOClient:
                 base_url = snapshot.url
                 continue
 
-            break
+            return snapshot
 
-        return snapshot
+        raise MicrosoftSSOError(
+            "Microsoft sign-in interstitial hop limit exceeded.",
+            step="SSO interstitial walk",
+            recovery="Retry the login; the upstream sign-in flow may be looping.",
+        )
 
     # -- SAML completion -------------------------------------------------------
 
@@ -1878,7 +1973,11 @@ class MicrosoftSSOClient:
 
         self._post_with_redirects(acs_url, data=data)
 
-        if any(n.startswith("d2l") for n in self._session.cookies.keys()):
+        if any(
+            cookie.name.startswith("d2l")
+            and cookie_domain_accepted(cookie.domain or "")
+            for cookie in self._session.cookies
+        ):
             return
 
         # Some ACS flows set cookies only after landing on /d2l/home
@@ -1890,7 +1989,9 @@ class MicrosoftSSOClient:
         )
         self._record_flow("GET", home_url, home_resp.status_code)
         if home_resp.status_code < 400 and any(
-            n.startswith("d2l") for n in self._session.cookies.keys()
+            cookie.name.startswith("d2l")
+            and cookie_domain_accepted(cookie.domain or "")
+            for cookie in self._session.cookies
         ):
             return
 

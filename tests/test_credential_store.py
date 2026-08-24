@@ -11,7 +11,6 @@ import pytest
 
 from lighthouse_cli.auth import CredentialStore, CredentialStoreError
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -356,4 +355,16 @@ def test_passphrase_envelope_records_kdf_iterations(
     legacy_doc["kdf_iterations"] = 1  # wrong count derives a wrong key: clean failure
     (config_dir / "credentials.json").write_text(json.dumps(legacy_doc))
     with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+@pytest.mark.parametrize("bad_iterations", [True, 0, -1, "600000", 600_001, 10**12])
+def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_iterations: object,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["kdf_iterations"] = bad_iterations
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError, match="unsupported KDF iteration"):
         CredentialStore().load()

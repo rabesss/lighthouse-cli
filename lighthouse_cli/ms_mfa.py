@@ -63,7 +63,7 @@ def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
         return proofs[0]
     if not sys.stdin.isatty():
         raise MicrosoftSSOError(
-            "Multiple MFA methods are available; pick one with --mfa-method sms|app.",
+            "Multiple MFA methods are available; pick one with --mfa-method sms|app|call|push.",
             step="MFA",
             recovery="Re-run with --mfa-method or use a single-method account.",
         )
