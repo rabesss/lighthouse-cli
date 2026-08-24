@@ -32,11 +32,19 @@ jobs:
       - name: Materialize and apply reviewed follow-ups
         shell: bash
         run: |
-          cat .github/pr12-payload/part* \
-            | tr -d '\n' \
-            | base64 --decode \
-            | gzip --decompress \
-            > /tmp/pr12_followups.py
+          wc -c .github/pr12-payload/part*
+          sha256sum .github/pr12-payload/part*
+          python - <<'PY'
+          import base64
+          import gzip
+          from pathlib import Path
+
+          parts = sorted(Path('.github/pr12-payload').glob('part*'))
+          payload = ''.join(path.read_text() for path in parts)
+          print('payload characters:', len(payload))
+          compressed = base64.b64decode(payload, validate=True)
+          Path('/tmp/pr12_followups.py').write_bytes(gzip.decompress(compressed))
+          PY
           python -m py_compile /tmp/pr12_followups.py
           python /tmp/pr12_followups.py
           git diff --check
