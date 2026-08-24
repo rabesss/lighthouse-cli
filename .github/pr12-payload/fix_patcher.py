@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Remove a redundant self-replacement before applying the substantive patch.
 path = Path('/tmp/pr12_followups.py')
 text = path.read_text()
 old = '''replace_once(
