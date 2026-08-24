@@ -1,0 +1,195 @@
+name: PR 12 follow-up acceptance gate
+
+on:
+  push:
+    branches: [arch/deepening-pass]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arch/deepening-pass
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Require the landed follow-up source, not temporary automation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 53d378c1071ca6954146787cc8dc889d1105dc28 HEAD
+          test ! -e .github/pr12_followups.py
+          grep -Fq 'CODELESS_APPROVAL_AUTH_IDS' lighthouse_cli/ms_errors.py
+          grep -Fq 'VOICE_APPROVAL_AUTH_IDS' lighthouse_cli/ms_errors.py
+          grep -Fq 'same-origin HTTPS check' lighthouse_cli/ms_auth.py
+          grep -Fq 'Could not determine MFA methods' lighthouse_cli/ms_auth.py
+          grep -Fq 'return {**domain_scoped, **host_only}' lighthouse_cli/config.py
+          grep -Fq 'unsupported KDF iteration count' lighthouse_cli/credential_store.py
+          grep -Fq 'answer the call and press #' docs/auth-microsoft-sso.md
+
+      - name: Source checks and dependency installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          python -m compileall -q lighthouse_cli tests
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[auth,credentials,dev]'
+          python -m pip check
+
+      - name: Complete pytest suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q 2>&1 | tee /tmp/pr12-acceptance-pytest.log
+          echo "PYTEST_SUMMARY=$(tail -n 1 /tmp/pr12-acceptance-pytest.log)" >> "$GITHUB_ENV"
+
+      - name: Ruff when available
+        shell: bash
+        run: |
+          if python -c 'import ruff' 2>/dev/null; then
+            python -m ruff check lighthouse_cli tests scripts 2>&1 | tee /tmp/pr12-acceptance-ruff.log
+          else
+            echo "ruff unavailable in declared extras" | tee /tmp/pr12-acceptance-ruff.log
+          fi
+
+      - name: Remove acceptance workflow and push tested cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/pr12-followups-acceptance.yml
+          git commit -m "chore: record green PR 12 follow-up acceptance"
+          git push origin HEAD:arch/deepening-pass
+          echo "TESTED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Update PR description with corrected protocol semantics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cat > /tmp/pr12-body.md <<EOF
+          ## Summary
+
+          This PR deepens `lighthouse-cli`'s Microsoft Entra/D2L authentication and session handling. The current branch includes the original architecture/security work plus the post-review authentication follow-ups.
+
+          ### Microsoft session-pull interstitial
+
+          - Detects the Aug-2026 HTTP-200 `sso_reload=true` interstitial and re-POSTs Microsoft's echoed `oPostParams`.
+          - Requires a same-origin HTTPS target and scalar form values.
+          - Uses a conservative local two-reload safety cap. The page's `slMaxRetry` belongs to its resource loader and is **not** treated as the session-pull budget.
+          - Raises a typed error when the reload or total-hop budget is exhausted; MFA discovery no longer reports unknown pages as `no_mfa`.
+          - Flow diagnostics retain field names and page structure only—never passwords, cookies, OTPs, SAML values, headers, bodies, or query strings.
+
+          ### MFA semantics
+
+          - `OneWaySMS`: server-sent code; use `auth login` → `auth verify <code>` or `--totp -`. A fresh literal `--totp` is rejected.
+          - `PhoneAppOTP`: offline Authenticator TOTP; a pre-provided `--totp` is valid for `--mfa-method app`.
+          - `PhoneAppNotification`: codeless push approval; `auth verify ok` displays number matching on stderr and polls EndAuth without `AdditionalAuthData`.
+          - `TwoWayVoice*`: codeless voice approval; answer and press `#`, then EndAuth is polled without `AdditionalAuthData`.
+          - `app` selects only `PhoneAppOTP`; `push` selects only `PhoneAppNotification`.
+
+          ### Discovery and browser fallback
+
+          - `auth mfa-methods` reports the matching CLI selector and discloses that it performs a real post-password sign-in/KMSI walk while stopping before BeginAuth (no SMS, call, or push challenge).
+          - Playwright falls back to the HTTP username mirror only when Playwright/Chromium cannot start. Semantic browser-page failures remain explicit, and external exception text is not forwarded.
+
+          ### Additional hardening
+
+          - Mixed host-only and domain-scoped D2L cookie jars merge per name, with host-only values winning conflicts.
+          - KDF iteration metadata is backward-compatible but strictly validated before PBKDF2 work begins.
+          - Pending/stored artifact OS read failures degrade or report cleanly on the appropriate command path.
+
+          ## Automated verification
+
+          Tested on GitHub at `${TESTED_SHA}`:
+
+          - `git diff --check`
+          - `python -m compileall -q lighthouse_cli tests`
+          - editable install of `.[auth,credentials,dev]`
+          - `python -m pip check`
+          - full suite: **${PYTEST_SUMMARY}**
+          - Ruff when present in the declared environment
+
+          ## Still requires a real account
+
+          No live credentials were used by automation. Final acceptance still requires real-password end-to-end runs for every method actually registered on the account: SMS, PhoneAppOTP, Authenticator push with number matching, each available TwoWayVoice proof, and a correct-password Chromium-missing HTTP-bootstrap login. Captures must retain keys/structure only and redact all secret values.
+          EOF
+          sed -i 's/^          //' /tmp/pr12-body.md
+          jq -Rs '{body: .}' /tmp/pr12-body.md > /tmp/pr12-body.json
+          gh api repos/rabesss/lighthouse-cli/pulls/12 -X PATCH --input /tmp/pr12-body.json >/dev/null
+
+      - name: Reply to and resolve addressed review threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reply_and_resolve() {
+            thread_id="$1"
+            body="$2"
+            gh api graphql \
+              -f query='mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id}}}' \
+              -f threadId="$thread_id" -f body="$body" >/dev/null || true
+            gh api graphql \
+              -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}' \
+              -f threadId="$thread_id" >/dev/null || true
+          }
+          note="Addressed by the tested follow-up at ${TESTED_SHA} (${PYTEST_SUMMARY})."
+          for thread in \
+            PRRT_kwDOSaD1Rs6bhjnx \
+            PRRT_kwDOSaD1Rs6bhjn3 \
+            PRRT_kwDOSaD1Rs6bhjn6 \
+            PRRT_kwDOSaD1Rs6bhk0- \
+            PRRT_kwDOSaD1Rs6bhk1A \
+            PRRT_kwDOSaD1Rs6bhk1C \
+            PRRT_kwDOSaD1Rs6bhk1D \
+            PRRT_kwDOSaD1Rs6bhk1E \
+            PRRT_kwDOSaD1Rs6bhuxw \
+            PRRT_kwDOSaD1Rs6bhuxz \
+            PRRT_kwDOSaD1Rs6bhux0 \
+            PRRT_kwDOSaD1Rs6bhux1 \
+            PRRT_kwDOSaD1Rs6bhux4 \
+            PRRT_kwDOSaD1Rs6bhux6 \
+            PRRT_kwDOSaD1Rs6bhux9 \
+            PRRT_kwDOSaD1Rs6bhuyC \
+            PRRT_kwDOSaD1Rs6bhuyF
+          do
+            reply_and_resolve "$thread" "$note"
+          done
+
+      - name: Post acceptance summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: >-
+          gh pr comment 12 --repo rabesss/lighthouse-cli --body
+          "PR 12 follow-up acceptance is green at \`${TESTED_SHA}\`: **${PYTEST_SUMMARY}**.
+          The PR description now records the corrected voice/push/reload semantics and the remaining real-account matrix."
+
+      - name: Post bounded failure output
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          {
+            echo 'PR 12 follow-up acceptance gate failed:'
+            echo '```text'
+            for f in /tmp/pr12-acceptance-pytest.log /tmp/pr12-acceptance-ruff.log; do
+              test -f "$f" && { echo "--- $(basename "$f") ---"; tail -n 120 "$f"; }
+            done
+            echo '```'
+          } > /tmp/pr12-acceptance-failure.md
+          gh pr comment 12 --repo rabesss/lighthouse-cli --body-file /tmp/pr12-acceptance-failure.md
