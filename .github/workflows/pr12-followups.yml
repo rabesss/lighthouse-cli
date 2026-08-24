@@ -4,17 +4,24 @@ on:
   push:
     branches:
       - arch/deepening-pass
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
 
 permissions:
   contents: write
 
 jobs:
   patch-test-push:
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'arch/deepening-pass'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: arch/deepening-pass
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
