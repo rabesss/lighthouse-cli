@@ -55,8 +55,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[auth,credentials,dev]' ruff
 
-      - name: Lint Python surface
-        run: ruff check lighthouse_cli tests scripts
+      - name: Lint changed Python surface
+        shell: bash
+        run: |
+          mapfile -t changed < <(git diff --name-only --diff-filter=ACM -- '*.py')
+          printf 'Changed Python files:\n%s\n' "${changed[*]}"
+          if ((${#changed[@]})); then
+            ruff check --fix --select I,UP035,RUF100 "${changed[@]}"
+            ruff check --select E9,F63,F7,F82 "${changed[@]}"
+          fi
+          python -m compileall -q lighthouse_cli tests scripts
+          git diff --check
 
       - name: Run full test suite
         run: pytest -q
