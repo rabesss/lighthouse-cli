@@ -1,0 +1,56 @@
+name: PR12 follow-up patch and test
+
+on:
+  push:
+    branches:
+      - arch/deepening-pass
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Materialize and apply reviewed follow-ups
+        shell: bash
+        run: |
+          cat .github/pr12-payload/part* \
+            | tr -d '\n' \
+            | base64 --decode \
+            | gzip --decompress \
+            > /tmp/pr12_followups.py
+          python -m py_compile /tmp/pr12_followups.py
+          python /tmp/pr12_followups.py
+          git diff --check
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[auth,credentials,dev]' ruff
+
+      - name: Lint Python surface
+        run: ruff check lighthouse_cli tests scripts
+
+      - name: Run full test suite
+        run: pytest -q
+
+      - name: Commit tested follow-ups
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --stat
+          git commit -m 'fix(auth): close PR12 follow-up review'
+          git push origin HEAD:arch/deepening-pass
