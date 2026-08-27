@@ -163,6 +163,27 @@ class TestMfaMethodSelection:
         selected = _select_user_proof(proofs, MFA_METHOD_CHOOSE)
         assert selected.auth_method_id == "OneWaySMS"
 
+    def test_choose_labels_same_destination_by_method(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        proofs = [
+            UserProof("OneWaySMS", "+XX XXXXXXXX04", "+001234567804", True),
+            UserProof("TwoWayVoiceMobile", "+XX XXXXXXXX04", "+001234567804", False),
+        ]
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda: "1")
+
+        selected = _select_user_proof(proofs, MFA_METHOD_CHOOSE)
+        output = capsys.readouterr().err
+
+        assert selected.auth_method_id == "OneWaySMS"
+        assert "Text code (SMS or WhatsApp): +XX XXXXXXXX04" in output
+        assert "Voice call to mobile: +XX XXXXXXXX04" in output
+        assert "Microsoft default" in output
+        assert "+001234567804" not in output
+
     def test_choose_single_proof_skips_prompt(self) -> None:
         single = [UserProof("OneWaySMS", "SMS", "+91", True)]
         assert _prompt_user_proof_choice(single).auth_method_id == "OneWaySMS"

@@ -40,6 +40,7 @@ from .ms_auth import (
     MicrosoftSSOClient,
     MicrosoftSSOError,
 )
+from .ms_mfa import format_user_proof
 
 # ---------------------------------------------------------------------------
 # Exceptions and uniform exits
@@ -482,7 +483,10 @@ def cmd_auth_mfa_methods(
             if method is not None
             else "no supported --mfa-method selector"
         )
-        print(f"  • {proof.display} — {proof.auth_method_id}; {advice}{marker}")
+        print(
+            f"  • {format_user_proof(proof)} — "
+            f"{proof.auth_method_id}; {advice}{marker}"
+        )
     return 0
 
 

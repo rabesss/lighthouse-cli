@@ -7,11 +7,27 @@ from dataclasses import dataclass
 from typing import Any
 
 from lighthouse_cli.ms_errors import (
+    MFA_AUTH_APP_NOTIFY,
+    MFA_AUTH_APP_OTP,
+    MFA_AUTH_SMS,
+    MFA_AUTH_VOICE_ALT_MOBILE,
+    MFA_AUTH_VOICE_MOBILE,
+    MFA_AUTH_VOICE_OFFICE,
     MFA_METHOD_AUTH_IDS,
     MFA_METHOD_AUTO,
     MFA_METHOD_CHOOSE,
     MicrosoftSSOError,
 )
+
+
+_PROOF_METHOD_LABELS = {
+    MFA_AUTH_SMS: "Text code (SMS or WhatsApp)",
+    MFA_AUTH_APP_OTP: "Microsoft Authenticator code",
+    MFA_AUTH_APP_NOTIFY: "Microsoft Authenticator approval",
+    MFA_AUTH_VOICE_MOBILE: "Voice call to mobile",
+    MFA_AUTH_VOICE_ALT_MOBILE: "Voice call to alternate mobile",
+    MFA_AUTH_VOICE_OFFICE: "Voice call to office phone",
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +73,17 @@ def _parse_user_proofs(config: dict[str, Any]) -> list[UserProof]:
     return proofs
 
 
+def format_user_proof(proof: UserProof) -> str:
+    """Describe an MFA proof by method and Microsoft-provided destination."""
+    method = _PROOF_METHOD_LABELS.get(proof.auth_method_id)
+    display = proof.display.strip()
+    if method is None:
+        return display or proof.auth_method_id
+    if not display or display == proof.auth_method_id:
+        return method
+    return f"{method}: {display}"
+
+
 def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
     """Interactively pick one of several registered MFA methods."""
     if len(proofs) == 1:
@@ -70,7 +97,7 @@ def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
     print("\nChoose a verification method:", flush=True, file=sys.stderr)
     for idx, proof in enumerate(proofs, start=1):
         default = " (Microsoft default)" if proof.is_default else ""
-        print(f"  {idx}) {proof.display}{default}", flush=True, file=sys.stderr)
+        print(f"  {idx}) {format_user_proof(proof)}{default}", flush=True, file=sys.stderr)
     while True:
         print(f"Enter 1\u2013{len(proofs)} [1]: ", end="", flush=True, file=sys.stderr)
         choice = input().strip() or "1"
