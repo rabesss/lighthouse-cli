@@ -12,7 +12,6 @@ from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.course_config import (
     load as _load_course_config,
     save as _save_course_config,
-    COURSE_CONFIG_FILE,
 )
 
 

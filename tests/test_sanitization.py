@@ -140,8 +140,6 @@ class TestPathResolution:
 
     def test_tilde_expanded(self, tmp_path: Path):
         """~ in output-dir is expanded to home directory."""
-        from lighthouse_cli.utils import _sanitize_filename
-
         home = Path.home()
         result = str(home)
         assert "~" not in result or result.startswith(str(home))
@@ -155,8 +153,6 @@ class TestPathResolution:
 
     def test_path_expanduser_called(self):
         """Path with ~ calls Path.expanduser() for resolution."""
-        from lighthouse_cli.utils import _sanitize_filename
-
         # Simulate what happens with -o ~/Downloads/test
         path_str = "~/test-lighthouse"
         expanded = Path(path_str).expanduser()

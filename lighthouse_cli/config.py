@@ -141,7 +141,7 @@ def load_cookies() -> dict[str, str]:
 
     if is_sealed_document(doc):
         try:
-            _meta, secret = store.read_artifact(path)
+            artifact = store.read_artifact(path)
         except CredentialStoreError as exc:
             print(
                 f"Warning: stored cookies could not be unlocked ({exc}). "
@@ -149,6 +149,9 @@ def load_cookies() -> dict[str, str]:
                 file=sys.stderr,
             )
             return {}
+        if artifact is None:
+            return {}
+        _meta, secret = artifact
         return _filter_cookie_names(secret.get("cookies", {}))
 
     # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
@@ -283,7 +286,10 @@ def load_mfa_pending() -> dict | None:
         return None
 
     if is_sealed_document(doc):
-        metadata, secret = store.read_artifact(path)
+        artifact = store.read_artifact(path)
+        if artifact is None:
+            return None
+        metadata, secret = artifact
         return {**secret, **metadata, "version": FORMAT_VERSION}
 
     version = doc.get("version")

@@ -545,6 +545,9 @@ class TestDryRunCliFixes:
         stub = data["courses"][0]
         assert stub["manifest_total"] == 0
         assert stub["downloaded"] == [] and stub["errors"] == []
+        assert stub["planned"] == [
+            {"topic_id": 1110, "title": "f.pdf", "path": "Mod/f.pdf"}
+        ]
 
     def test_dry_run_human_still_lists_plan(self, tmp_path):
         output_dir = tmp_path / "dl"
@@ -660,6 +663,11 @@ class TestReviewFixRegressions:
         assert result.exit_code == 1
         assert isinstance(data["errors"], list) and data["errors"]
         assert set(data["errors"][0]) <= {"topic_id", "error"}
+        assert data["course_name"] == "Course A"
+        assert data["folder"] == str(course_dir)
+        assert data["manifest"] == str(course_dir / MANIFEST_FILENAME)
+        assert data["downloaded"] == []
+        assert "files" not in data
 
 
 # ---------------------------------------------------------------------------

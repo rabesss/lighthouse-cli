@@ -11,7 +11,7 @@ from __future__ import annotations
 import click
 
 from . import __version__
-from .auth import cmd_auth_login
+from .auth import cmd_auth_login, cmd_auth_mfa_methods, cmd_auth_verify
 from .commands import (
     cmd_announcements,
     cmd_assignments,
@@ -173,8 +173,6 @@ def auth_verify(code: str, json_output: bool) -> None:
     Use after ``auth login`` prints "Verification code sent." Do not run a second
     ``auth login`` — that sends a new code and invalidates the previous one.
     """
-    from lighthouse_cli.auth import cmd_auth_verify
-
     raise SystemExit(cmd_auth_verify(code, json_output=json_output))
 
 
@@ -193,8 +191,6 @@ def auth_mfa_methods(
     KMSI/session state, but stops before BeginAuth. Reports OneWaySMS (sms),
     TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
     """
-    from lighthouse_cli.auth import cmd_auth_mfa_methods
-
     raise SystemExit(cmd_auth_mfa_methods(
         username=username,
         password=password,

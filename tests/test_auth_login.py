@@ -207,32 +207,20 @@ def test_resolve_unresolved_fields_return_none() -> None:
 # normalize_totp — literal codes vs the challenge BeginAuth sends
 # ---------------------------------------------------------------------------
 
-def test_normalize_app_totp_kept() -> None:
-    """Offline Authenticator codes stay valid for app logins."""
-    assert normalize_totp("123456", totp_stdin=False, mfa_method="app") == ("123456", False)
-    assert normalize_totp("123456", totp_stdin=False, mfa_method="auto") == ("123456", False)
-
-
 def test_normalize_preserves_literal_after_policy_validation() -> None:
     """Normalization is transport-only; incompatible methods fail in validation."""
-    assert normalize_totp("123456", totp_stdin=False, mfa_method="sms") == ("123456", False)
-    assert normalize_totp("123456", totp_stdin=False, mfa_method="choose") == ("123456", False)
+    assert normalize_totp("123456", totp_stdin=False) == ("123456", False)
 
 
 def test_normalize_stdin_defers_reading() -> None:
     """--totp - reads from stdin after BeginAuth, not at parse time."""
-    assert normalize_totp("ignored", totp_stdin=True, mfa_method="sms") == (None, True)
+    assert normalize_totp("ignored", totp_stdin=True) == (None, True)
 
 
 def test_normalize_whitespace_code_rejected() -> None:
     """A whitespace-only surviving literal code is a usage error."""
     with pytest.raises(ValueError, match="2FA code cannot be empty"):
-        normalize_totp("   ", totp_stdin=False, mfa_method="auto")
-
-
-def test_normalize_whitespace_rejected_for_every_literal() -> None:
-    with pytest.raises(ValueError, match="2FA code cannot be empty"):
-        normalize_totp("  ", totp_stdin=False, mfa_method="sms")
+        normalize_totp("   ", totp_stdin=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1227,6 +1215,27 @@ class TestAuthMfaMethodsCommand:
         assert "Microsoft default" in result.output
         assert "+919876541234" not in result.output
 
+    def test_unknown_method_has_no_fake_cli_selector(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lighthouse_cli.ms_mfa import UserProof
+
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        proof = UserProof("FutureProof", "Future method", "", False)
+        with patch.object(
+            auth_mod.MicrosoftSSOClient,
+            "probe_mfa_methods",
+            MagicMock(return_value=_probe_result(proofs=[proof])),
+        ):
+            json_result = self._invoke(cli_runner, ["--json"])
+            human_result = self._invoke(cli_runner, [])
+
+        assert json.loads(json_result.stdout)["methods"][0]["method"] is None
+        assert "no supported --mfa-method selector" in human_result.output
+        assert "--mfa-method unknown" not in human_result.output
+
     def test_no_mfa_account_reports_cleanly(
         self, cli_runner: CliRunner, isolated_config: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1271,9 +1280,19 @@ class TestAuthMfaMethodsCommand:
 
 
 class TestMfaMethodVocabulary:
-    @pytest.mark.parametrize("method", ["sms", "call", "push", "choose"])
-    def test_incompatible_literal_totp_is_rejected(self, method: str) -> None:
-        with pytest.raises(ValueError):
+    @pytest.mark.parametrize(
+        ("method", "message"),
+        [
+            ("sms", "fresh code"),
+            ("call", "codeless"),
+            ("push", "codeless"),
+            ("choose", "ambiguous"),
+        ],
+    )
+    def test_incompatible_literal_totp_is_rejected(
+        self, method: str, message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
             validate_totp_usage("123456", totp_stdin=False, mfa_method=method)
 
     @pytest.mark.parametrize("method", ["call", "push"])
@@ -1284,9 +1303,7 @@ class TestMfaMethodVocabulary:
     def test_app_and_auto_accept_literal_totp(self) -> None:
         for method in ("app", "auto"):
             validate_totp_usage("123456", totp_stdin=False, mfa_method=method)
-            assert normalize_totp(
-                "123456", totp_stdin=False, mfa_method=method
-            ) == ("123456", False)
+        assert normalize_totp("123456", totp_stdin=False) == ("123456", False)
 
     @pytest.mark.parametrize("method", ["sms", "call", "push"])
     def test_login_rejects_incompatible_totp_before_sso(

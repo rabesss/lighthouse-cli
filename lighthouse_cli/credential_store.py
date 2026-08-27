@@ -394,10 +394,6 @@ class CredentialStore:
 
     # -- internals --------------------------------------------------------------
 
-    def _seal_payload(self, data: bytes, *, force_source: str | None = None) -> bytes:
-        source = force_source or self._select_source()
-        return self._build_document({}, data, force_source=source)
-
     def _select_source(self) -> str:
         if _passphrase_from_env() is not None:
             return "passphrase"
@@ -460,14 +456,17 @@ class CredentialStore:
                     iterations = _LEGACY_KDF_ITERATIONS
                 else:
                     raw_iterations = envelope.get("kdf_iterations")
-                    if (
-                        not isinstance(raw_iterations, int)
-                        or isinstance(raw_iterations, bool)
-                        or raw_iterations not in _SUPPORTED_KDF_ITERATIONS
+                    if not isinstance(raw_iterations, int) or isinstance(
+                        raw_iterations, bool
                     ):
                         raise CredentialStoreError(
-                            "Sealed data records an unsupported KDF iteration "
-                            "count and cannot be opened."
+                            "Sealed data records an invalid KDF iteration count "
+                            "and cannot be opened."
+                        )
+                    if raw_iterations not in _SUPPORTED_KDF_ITERATIONS:
+                        raise CredentialStoreError(
+                            "Sealed data records unsupported KDF iteration count "
+                            f"{raw_iterations} and cannot be opened."
                         )
                     iterations = raw_iterations
                 key = _derive_passphrase_key(

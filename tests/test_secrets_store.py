@@ -227,6 +227,18 @@ class TestSealedCookies:
         assert "cookies" not in doc  # payload is sealed, not plaintext
         assert load_cookies() == cookies
 
+    def test_disappearing_sealed_file_is_treated_as_absent(
+        self, store_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        save_cookies({"d2lSecureSessionVal": "sec-sentinel"})
+        monkeypatch.setattr(
+            config_mod.CredentialStore,
+            "read_artifact",
+            lambda self, path: None,
+        )
+
+        assert load_cookies() == {}
+
     def test_wrong_passphrase_non_auth_read_warns_and_treats_as_absent(
         self, store_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -375,6 +387,18 @@ class TestMfaPendingRoundtrip:
         clear_mfa_pending()
         assert load_mfa_pending() is None
         assert not pending_path(store_dir).exists()
+
+    def test_disappearing_sealed_file_is_treated_as_absent(
+        self, store_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        save_mfa_pending(self._sample_payload())
+        monkeypatch.setattr(
+            config_mod.CredentialStore,
+            "read_artifact",
+            lambda self, path: None,
+        )
+
+        assert load_mfa_pending() is None
 
     def test_on_disk_bytes_never_contain_secret_fields(self, store_dir: Path) -> None:
         save_mfa_pending(self._sample_payload())

@@ -366,5 +366,10 @@ def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
     doc = _sealed_doc(config_dir, monkeypatch)
     doc["kdf_iterations"] = bad_iterations
     (config_dir / "credentials.json").write_text(json.dumps(doc))
-    with pytest.raises(CredentialStoreError, match="unsupported KDF iteration"):
+    expected = "unsupported KDF iteration" if isinstance(
+        bad_iterations, int
+    ) and not isinstance(bad_iterations, bool) else "invalid KDF iteration"
+    with pytest.raises(CredentialStoreError, match=expected) as exc_info:
         CredentialStore().load()
+    if isinstance(bad_iterations, int) and not isinstance(bad_iterations, bool):
+        assert str(bad_iterations) in str(exc_info.value)

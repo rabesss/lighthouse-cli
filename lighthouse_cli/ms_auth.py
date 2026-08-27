@@ -58,14 +58,14 @@ from lighthouse_cli.ms_errors import (
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
     MFA_AUTH_SMS,
-    MFA_METHOD_APP,
-    MFA_METHOD_AUTH_IDS,
+    MFA_METHOD_APP as MFA_METHOD_APP,
+    MFA_METHOD_AUTH_IDS as MFA_METHOD_AUTH_IDS,
     MFA_METHOD_AUTO,
-    MFA_METHOD_CALL,
-    MFA_METHOD_CHOOSE,
+    MFA_METHOD_CALL as MFA_METHOD_CALL,
+    MFA_METHOD_CHOOSE as MFA_METHOD_CHOOSE,
     MFA_METHOD_INSTRUCTIONS,
-    MFA_METHOD_PUSH,
-    MFA_METHOD_SMS,
+    MFA_METHOD_PUSH as MFA_METHOD_PUSH,
+    MFA_METHOD_SMS as MFA_METHOD_SMS,
     MS_ERROR_CODES,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
@@ -77,11 +77,11 @@ from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
     UserProof,
     _parse_user_proofs,
-    _prompt_user_proof_choice,
+    _prompt_user_proof_choice as _prompt_user_proof_choice,
     _select_user_proof,
 )
 from lighthouse_cli.ms_parse import (
-    _extract_balanced_json_object,
+    _extract_balanced_json_object as _extract_balanced_json_object,
     _extract_config_json,
     _extract_error_code_and_msg,
 )
@@ -497,13 +497,25 @@ def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
     params = cfg.get("oPostParams")
     target = _absolute_url(base_url, url_post)
     source_url = snapshot.url or base_url
-    source = urlparse(source_url)
-    destination = urlparse(target)
-    if (
-        destination.scheme.lower() != "https"
-        or not source.netloc
-        or destination.netloc.lower() != source.netloc.lower()
-    ):
+
+    def https_origin(url: str) -> tuple[str, int] | None:
+        parsed = urlparse(url)
+        try:
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return None
+        if (
+            parsed.scheme.lower() != "https"
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        return hostname.lower(), port or 443
+
+    source_origin = https_origin(source_url)
+    if source_origin is None or https_origin(target) != source_origin:
         raise MicrosoftSSOError(
             "Microsoft session-pull requested an unsafe re-POST target.",
             step="POST credentials",
@@ -1159,8 +1171,6 @@ class MicrosoftSSOClient:
                 )
                 referer = page.url
                 pw_cookies = context.cookies()
-            except PlaywrightUnavailableError:
-                raise
             except Exception as exc:
                 raise MicrosoftSSOError(
                     f"Playwright username step failed ({exc.__class__.__name__}).",
@@ -1244,10 +1254,6 @@ class MicrosoftSSOClient:
         """Establish Microsoft session state after the user enters their username."""
         if not config.get("urlGetCredentialType"):
             return config
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return self._step_prepare_username_http(config, username)
         try:
             return self._bootstrap_username_via_playwright(config, username)
         except PlaywrightUnavailableError:
@@ -1427,13 +1433,10 @@ class MicrosoftSSOClient:
                 )
         print(f"\n{hint}", flush=True, file=sys.stderr)
 
-    def _prompt_mfa_code(self, selected: UserProof) -> str:
+    def _prompt_mfa_code(self) -> str:
         if sys.stdin.isatty():
-            label = "Enter verification code: "
-            if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
-                label = "Press Enter after approving in Authenticator: "
             # Prompt on stderr so stdout stays JSON-only under --json in a TTY.
-            print(label, end="", flush=True, file=sys.stderr)
+            print("Enter verification code: ", end="", flush=True, file=sys.stderr)
             return input().strip()
         return sys.stdin.readline().strip()
 
@@ -1461,7 +1464,7 @@ class MicrosoftSSOClient:
                 if line:
                     return line
             if sys.stdin.isatty():
-                return self._prompt_mfa_code(selected)
+                return self._prompt_mfa_code()
             raise MicrosoftSSOError(
                 "2FA code required after verification was sent.",
                 step="MFA",
@@ -1480,7 +1483,7 @@ class MicrosoftSSOClient:
                         flush=True,
                         file=sys.stderr,
                     )
-                return self._prompt_mfa_code(selected)
+                return self._prompt_mfa_code()
             raise MicrosoftSSOError(
                 "2FA code is required but was empty.",
                 step="MFA",

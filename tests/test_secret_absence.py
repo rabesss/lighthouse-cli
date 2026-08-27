@@ -73,7 +73,7 @@ def mfa_html() -> str:
         f'"urlPost": "{PROCESS_URL}"',
         '"sFTName": "flowToken"',
         '"oPerAuthPollingInterval": {"PhoneAppOTP": 0.5}',
-        '"arrUserProofs": [{"authMethodId": "PhoneAppOTP", "display": "Android", "data": "+91 ***1234", "is_default": true}]',
+        '"arrUserProofs": [{"authMethodId": "PhoneAppOTP", "display": "Android", "data": "+91 ***1234", "isDefault": true}]',
     ]
     return (
         "<html><body><script>\n$Config = {\n"

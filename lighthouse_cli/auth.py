@@ -197,10 +197,8 @@ def normalize_totp(
     totp_code: str | None,
     *,
     totp_stdin: bool,
-    mfa_method: str,
 ) -> tuple[str | None, bool]:
     """Return the literal code or defer stdin reading until after BeginAuth."""
-    del mfa_method  # compatibility parameter; validation happens separately.
     if totp_stdin:
         return None, True
     if totp_code is not None and not totp_code.strip():
@@ -316,12 +314,6 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
         pending_present = load_mfa_pending() is not None
     except CredentialStoreError as exc:
         return _auth_error(str(exc), json_output)
-    except OSError as exc:
-        return _auth_error(
-            f"Pending MFA session could not be read ({exc.__class__.__name__}). "
-            "Run: lighthouse auth login",
-            json_output,
-        )
     if not pending_present:
         return _auth_error(
             "No pending MFA session. Run: lighthouse auth login --mfa-method sms",
@@ -348,12 +340,12 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
     return _persist_check_report(cookies, json_output=json_output)
 
 
-def _cli_method_for_auth_id(auth_method_id: str) -> str:
+def _cli_method_for_auth_id(auth_method_id: str) -> str | None:
     """Return the explicit CLI selector for a Microsoft authMethodId."""
     for method in (MFA_METHOD_SMS, MFA_METHOD_CALL, MFA_METHOD_APP, MFA_METHOD_PUSH):
         if auth_method_id in MFA_METHOD_AUTH_IDS.get(method, ()):
             return method
-    return "unknown"
+    return None
 
 
 @_clean_auth_command
@@ -443,10 +435,12 @@ def cmd_auth_mfa_methods(
     for proof in result.proofs:
         marker = " (Microsoft default)" if proof.is_default else ""
         method = _cli_method_for_auth_id(proof.auth_method_id)
-        print(
-            f"  • {proof.display} — {proof.auth_method_id}; "
-            f"use --mfa-method {method}{marker}"
+        advice = (
+            f"use --mfa-method {method}"
+            if method is not None
+            else "no supported --mfa-method selector"
         )
+        print(f"  • {proof.display} — {proof.auth_method_id}; {advice}{marker}")
     return 0
 
 
@@ -535,7 +529,7 @@ def cmd_auth_login(
             totp_code, totp_stdin=totp_stdin, mfa_method=resolved_mfa_method
         )
         code, read_totp_after_challenge = normalize_totp(
-            totp_code, totp_stdin=totp_stdin, mfa_method=resolved_mfa_method
+            totp_code, totp_stdin=totp_stdin
         )
     except ValueError as exc:
         return _auth_error(str(exc), json_output, 2)
@@ -562,12 +556,6 @@ def cmd_auth_login(
         except CredentialStoreError as exc:
             print(
                 f"Warning: ignoring an unreadable MFA pending session ({exc}).",
-                file=sys.stderr,
-            )
-        except OSError as exc:
-            print(
-                "Warning: ignoring an unreadable MFA pending session "
-                f"({exc.__class__.__name__}).",
                 file=sys.stderr,
             )
     plan = plan_login(
