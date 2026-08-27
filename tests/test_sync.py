@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
-from lighthouse_cli.manifest import MANIFEST_FILENAME
+from lighthouse_cli.manifest import MANIFEST_FILENAME, compute_sha256
 
 
 @pytest.fixture
@@ -30,11 +30,12 @@ class TestSyncIncremental:
         course_dir = output_dir / "Test-44347"
         course_dir.mkdir(parents=True)
         manifest_path = course_dir / MANIFEST_FILENAME
+        local_content = b"x" * 1024
         manifest_data = {
             "100": {
-                "sha256": "abc123",
+                "sha256": compute_sha256(local_content),
                 "filename": "file.pdf",
-                "size": 1024,
+                "size": len(local_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-03-15T12:00:00Z",
             }
@@ -42,7 +43,7 @@ class TestSyncIncremental:
         manifest_path.write_text(json.dumps(manifest_data))
         module_dir = course_dir / "Mod"
         module_dir.mkdir()
-        (module_dir / "file.pdf").write_bytes(b"x" * 1024)
+        (module_dir / "file.pdf").write_bytes(local_content)
 
         toc = {
             "Modules": [{
@@ -70,6 +71,7 @@ class TestSyncIncremental:
             download_mock.assert_not_called()
             data = json.loads(result.output)
             assert len(data["skipped"]) == 1
+            assert data["skipped"][0]["sha256"] == compute_sha256(local_content)
             assert data["downloaded"] == []
 
     def test_sync_idempotent_second_run_no_downloads(self, cli_runner, tmp_path):
@@ -81,11 +83,12 @@ class TestSyncIncremental:
         course_dir = output_dir / "Test-44347"
         course_dir.mkdir(parents=True)
         manifest_path = course_dir / MANIFEST_FILENAME
+        local_content = b"x" * 1024
         manifest_data = {
             "100": {
-                "sha256": "abc123",
+                "sha256": compute_sha256(local_content),
                 "filename": "file.pdf",
-                "size": 1024,
+                "size": len(local_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-03-15T12:00:00Z",
             }
@@ -93,7 +96,7 @@ class TestSyncIncremental:
         manifest_path.write_text(json.dumps(manifest_data))
         module_dir = course_dir / "Mod"
         module_dir.mkdir()
-        (module_dir / "file.pdf").write_bytes(b"x" * 1024)
+        (module_dir / "file.pdf").write_bytes(local_content)
 
         toc = {
             "Modules": [{
@@ -130,11 +133,12 @@ class TestSyncIncremental:
         course_dir = output_dir / "Test-44347"
         course_dir.mkdir(parents=True)
         manifest_path = course_dir / MANIFEST_FILENAME
+        existing_content = b"x" * 1024
         manifest_data = {
             "100": {
-                "sha256": "abc123",
+                "sha256": compute_sha256(existing_content),
                 "filename": "existing.pdf",
-                "size": 1024,
+                "size": len(existing_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-03-15T12:00:00Z",
             }
@@ -142,7 +146,7 @@ class TestSyncIncremental:
         manifest_path.write_text(json.dumps(manifest_data))
         module_dir = course_dir / "Mod"
         module_dir.mkdir()
-        (module_dir / "existing.pdf").write_bytes(b"x" * 1024)
+        (module_dir / "existing.pdf").write_bytes(existing_content)
 
         toc = {
             "Modules": [{
@@ -219,6 +223,54 @@ class TestSyncIncremental:
             data = json.loads(result.output)
             assert len(data["updated"]) == 1
             assert data["updated"][0]["topic_id"] == "100"
+
+    def test_sync_re_downloads_legacy_hash_with_matching_timestamp(self, cli_runner, tmp_path):
+        """A legacy non-digest hash must not make a topic eligible for skip."""
+        output_dir = tmp_path / "sync_test"
+        output_dir.mkdir()
+
+        course_dir = output_dir / "Test-44347"
+        course_dir.mkdir(parents=True)
+        manifest_path = course_dir / MANIFEST_FILENAME
+        manifest_path.write_text(json.dumps({
+            "100": {
+                "sha256": "legacy-hash",
+                "filename": "file.pdf",
+                "size": 7,
+                "downloaded_at": "2026-01-01T00:00:00Z",
+                "last_modified": "2026-03-15T12:00:00Z",
+            }
+        }))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "file.pdf").write_bytes(b"content")
+
+        toc = {
+            "Modules": [{
+                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                    {"TopicId": 100, "Title": "file.pdf", "TypeIdentifier": "File",
+                     "Url": "", "LastModifiedDate": "2026-03-15T12:00:00Z"},
+                ]
+            }]
+        }
+        download_mock = MagicMock(return_value=(b"fresh!", "file.pdf"))
+
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
+        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
+             patch.object(LighthouseClient, "download_topic_file", download_mock):
+
+            result = cli_runner.invoke(
+                cli,
+                ["sync", "44347", "-o", str(output_dir), "--json"],
+            )
+
+        assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
+        download_mock.assert_called_once_with(44347, 100)
+        data = json.loads(result.output)
+        assert [entry["topic_id"] for entry in data["updated"]] == ["100"]
+        assert data["skipped"] == []
+        assert data["updated"][0]["sha256"] == compute_sha256(b"fresh!")
 
 
 class TestSyncManifestHandling:
@@ -309,18 +361,19 @@ class TestSyncOrphaned:
         course_dir = output_dir / "Test-44347"
         course_dir.mkdir(parents=True)
         manifest_path = course_dir / MANIFEST_FILENAME
+        orphan_content = b"old content"
         manifest_data = {
             "100": {
-                "sha256": "hash100",
+                "sha256": compute_sha256(b"content"),
                 "filename": "file100.pdf",
                 "size": 1024,
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-03-15T12:00:00Z",
             },
             "200": {
-                "sha256": "hash200",
+                "sha256": compute_sha256(orphan_content),
                 "filename": "file200.pdf",
-                "size": 2048,
+                "size": len(orphan_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-03-15T12:00:00Z",
             },
@@ -329,7 +382,7 @@ class TestSyncOrphaned:
 
         # File on disk for topic 200 (orphaned)
         file200 = course_dir / "file200.pdf"
-        file200.write_bytes(b"old content")
+        file200.write_bytes(orphan_content)
 
         toc = {
             "Modules": [{
@@ -354,6 +407,7 @@ class TestSyncOrphaned:
             data = json.loads(result.output)
             assert len(data["orphaned"]) == 1
             assert data["orphaned"][0]["topic_id"] == "200"
+            assert data["orphaned"][0]["sha256"] == compute_sha256(orphan_content)
             # File still exists on disk
             assert file200.exists(), "Orphaned file should not be deleted"
 
@@ -369,18 +423,20 @@ class TestSyncDownloadedVsUpdated:
         course_dir = output_dir / "Test-44347"
         course_dir.mkdir(parents=True)
         manifest_path = course_dir / MANIFEST_FILENAME
+        unchanged_content = b"x" * 1024
+        old_updated_content = b"old updated content"
         manifest_data = {
             "100": {
-                "sha256": "oldhash",
+                "sha256": compute_sha256(unchanged_content),
                 "filename": "unchanged.pdf",
-                "size": 1024,
+                "size": len(unchanged_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-01-01T00:00:00Z",
             },
             "200": {
-                "sha256": "oldhash200",
+                "sha256": compute_sha256(old_updated_content),
                 "filename": "updated.pdf",
-                "size": 2048,
+                "size": len(old_updated_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-01-01T00:00:00Z",  # Old date — will differ from TOC
             },
@@ -388,7 +444,7 @@ class TestSyncDownloadedVsUpdated:
         manifest_path.write_text(json.dumps(manifest_data))
         module_dir = course_dir / "Mod"
         module_dir.mkdir()
-        (module_dir / "unchanged.pdf").write_bytes(b"x" * 1024)
+        (module_dir / "unchanged.pdf").write_bytes(unchanged_content)
 
         toc = {
             "Modules": [{

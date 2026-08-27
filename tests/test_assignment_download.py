@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.assignments import (
+    _attachment_error,
     _manifest_attachment_path,
     download_for_course,
     download_single_attachment,
@@ -18,6 +19,7 @@ from lighthouse_cli.assignments import (
 )
 from lighthouse_cli.cli import cli
 from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest
+from lighthouse_cli.manifest import compute_sha256
 
 
 @pytest.fixture
@@ -43,6 +45,195 @@ def test_manifest_attachment_path_rejects_normalized_traversal(tmp_path: Path) -
     ) is None
 
 
+def test_attachment_error_redacts_untrusted_message(capsys) -> None:
+    sentinel = "BODY_SENTINEL"
+
+    rc = _attachment_error(f"response_body={sentinel}", json_output=True)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert json.loads(captured.out)["error"]
+
+
+def test_bulk_attachment_error_redacts_url_and_query(tmp_path: Path) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.side_effect = RuntimeError(
+        "request failed: https://example.invalid/dropbox?token=TOKEN_SENTINEL"
+    )
+
+    downloaded, errors = download_for_course(client, 44347, tmp_path, Manifest())
+
+    assert downloaded == []
+    assert errors
+    assert "TOKEN_SENTINEL" not in errors[0]["error"]
+    assert "https://" not in errors[0]["error"]
+
+
+@pytest.mark.parametrize("bad_folders", [None, {"Id": 1}, "not-a-list"])
+def test_bulk_attachment_invalid_folder_shape_fails_closed(tmp_path: Path, bad_folders) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = bad_folders
+
+    downloaded, errors = download_for_course(client, 44347, tmp_path, Manifest())
+
+    assert downloaded == []
+    assert errors and errors[0]["type"] == "assignment_list"
+
+
+def test_bulk_attachment_invalid_element_preserves_valid_sibling(tmp_path: Path) -> None:
+    folder = {
+        "Id": 101,
+        "Name": "Assignment 1",
+        "Attachments": [None, {"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"}],
+    }
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [folder]
+    client.download_attachment.return_value = (b"fresh", "q1.pdf")
+
+    downloaded, errors = download_for_course(client, 44347, tmp_path, Manifest())
+
+    assert len(downloaded) == 1
+    assert errors and errors[0]["type"] == "assignment_data"
+
+
+def test_bulk_attachment_invalid_collection_preserves_valid_folder(tmp_path: Path) -> None:
+    folders = [
+        {"Id": 100, "Name": "Malformed", "Attachments": None},
+        {"Id": 101, "Name": "Valid", "Attachments": [
+            {"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"},
+        ]},
+    ]
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = folders
+    client.download_attachment.return_value = (b"fresh", "q1.pdf")
+
+    downloaded, errors = download_for_course(client, 44347, tmp_path, Manifest())
+
+    assert len(downloaded) == 1
+    assert any(error["folder_id"] == 100 for error in errors)
+
+
+@pytest.mark.parametrize("bad_id", [True, 1.5, 0, -1, "../../evil", None])
+def test_bulk_download_rejects_invalid_folder_id_without_followup_calls(
+    tmp_path: Path, bad_id,
+) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [{
+        "Id": bad_id,
+        "Name": "Malformed",
+        "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"}],
+    }]
+
+    downloaded, errors = download_for_course(client, 44347, tmp_path, Manifest())
+
+    assert downloaded == []
+    assert errors and errors[0]["type"] == "assignment_data"
+    client.get_dropbox_folder_detail.assert_not_called()
+    client.download_attachment.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad_id", [True, 1.5, 0, -1, "../../evil", None])
+def test_bulk_sync_rejects_invalid_folder_id_without_followup_calls(
+    tmp_path: Path, bad_id,
+) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [{
+        "Id": bad_id,
+        "Name": "Malformed",
+        "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"}],
+    }]
+
+    downloaded, skipped, updated, errors = sync_for_course(
+        client, 44347, tmp_path, Manifest(),
+    )
+
+    assert downloaded == [] and skipped == [] and updated == []
+    assert errors and errors[0]["type"] == "assignment_data"
+    client.get_dropbox_folder_detail.assert_not_called()
+    client.download_attachment.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad_id", [True, 1.5, 0, -1, "../../evil", None])
+def test_bulk_download_rejects_invalid_attachment_id_preserving_valid_sibling(
+    tmp_path: Path, bad_id,
+) -> None:
+    folder = {
+        "Id": 101,
+        "Name": "Assignment 1",
+        "Attachments": [
+            {"Id": bad_id, "FileName": "bad.pdf", "Size": 3, "Type": "File"},
+            {"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"},
+        ],
+    }
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [folder]
+    client.download_attachment.return_value = (b"fresh", "q1.pdf")
+
+    downloaded, errors = download_for_course(client, 44347, tmp_path, Manifest())
+
+    assert len(downloaded) == 1
+    assert errors and errors[0]["type"] == "assignment_data"
+    client.get_dropbox_folder_detail.assert_not_called()
+    client.download_attachment.assert_called_once_with(44347, 101, 1)
+    assert not (tmp_path / "Assignments" / "Assignment 1" / "bad.pdf").exists()
+
+
+def test_bulk_download_missing_assignment_selector_is_an_error_without_writes(
+    tmp_path: Path,
+) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [{
+        "Id": 101,
+        "Name": "Assignment 1",
+        "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"}],
+    }]
+
+    downloaded, errors = download_for_course(
+        client, 44347, tmp_path, Manifest(), folder_ids=[999],
+    )
+
+    assert downloaded == []
+    assert errors == [{
+        "error": "Requested assignment folder was not found.",
+        "type": "assignment_not_found",
+    }]
+    client.get_dropbox_folder_detail.assert_not_called()
+    client.download_attachment.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad_id", [True, 1.5, 0, -1, "../../evil", None])
+def test_bulk_sync_rejects_invalid_attachment_id_preserving_valid_sibling(
+    tmp_path: Path, bad_id,
+) -> None:
+    folder = {
+        "Id": 101,
+        "Name": "Assignment 1",
+        "Attachments": [
+            {"Id": bad_id, "FileName": "bad.pdf", "Size": 3, "Type": "File"},
+            {"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"},
+        ],
+    }
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [folder]
+    client.download_attachment.return_value = (b"fresh", "q1.pdf")
+
+    downloaded, skipped, updated, errors = sync_for_course(
+        client, 44347, tmp_path, Manifest(),
+    )
+
+    assert len(downloaded) == 1
+    assert skipped == [] and updated == []
+    assert errors and errors[0]["type"] == "assignment_data"
+    client.get_dropbox_folder_detail.assert_not_called()
+    client.download_attachment.assert_called_once_with(44347, 101, 1)
+    assert not (tmp_path / "Assignments" / "Assignment 1" / "bad.pdf").exists()
+
+
 def test_single_attachment_corrupt_manifest_returns_json_error(
     tmp_path: Path, capsys
 ) -> None:
@@ -58,7 +249,7 @@ def test_single_attachment_corrupt_manifest_returns_json_error(
     captured = capsys.readouterr()
     assert rc == 1
     assert "error" in json.loads(captured.out)
-    assert "FAILED attachment 1" in captured.err
+    assert "Assignment attachment download failed." in captured.err
     client.download_attachment.assert_not_called()
 
 
@@ -68,6 +259,43 @@ def test_single_attachment_corrupt_manifest_returns_json_error(
 
 class TestDownloadAllAssignmentAttachments:
     """Test lighthouse download COURSE_ID --include-assignments."""
+
+    def test_download_json_redacts_secret_shaped_server_filename(
+        self, cli_runner, temp_download_dir,
+    ):
+        sentinel = "ATTACHMENT_SECRET_SENTINEL"
+        folder_sentinel = "FOLDER_SECRET_SENTINEL"
+        folders = [{
+            "Id": 101,
+            "Name": f"password={folder_sentinel}",
+            "Attachments": [{"Id": 1, "FileName": "listed.pdf", "Size": 4, "Type": "File"}],
+        }]
+
+        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
+             patch.object(LighthouseClient, "download_attachment", return_value=(b"body", f"password={sentinel}.pdf")), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}):
+            result = cli_runner.invoke(cli, [
+                "download", "44347", "--include-assignments",
+                "-o", str(temp_download_dir), "--json",
+            ])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["assignments_downloaded"][0]["filename"] == "attachment_1.pdf"
+        assert sentinel not in result.stdout + result.stderr
+        assert folder_sentinel not in result.stdout + result.stderr
+        assert "Folder-101" in payload["assignments_downloaded"][0]["path"]
+        output_path = Path(payload["folder"]) / payload["assignments_downloaded"][0]["path"]
+        assert output_path.read_bytes() == b"body"
+        manifest = json.loads((Path(payload["folder"]) / MANIFEST_FILENAME).read_text())
+        assert manifest["assignment_101_1"]["filename"] == "attachment_1.pdf"
+        assert sentinel not in json.dumps(manifest)
+        assert folder_sentinel not in json.dumps(manifest)
+        assert output_path.name == "attachment_1.pdf"
+        assert output_path.exists()
 
     def test_download_include_assignments_saves_to_assignments_subfolder(
         self, cli_runner, temp_download_dir
@@ -269,7 +497,7 @@ class TestSingleAttachmentDownload:
             ])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            data = json.loads(result.output)
+            data = json.loads(result.stdout)
             assert "path" in data
             assert "size_kb" in data
             assert "filename" in data
@@ -528,11 +756,14 @@ class TestSyncAssignmentAttachments:
             "assignment_101_1": {
                 "sha256": hashlib.sha256(content_1).hexdigest(),
                 "filename": "q1.pdf",
+                "path": "Assignments/Assignment 1/q1.pdf",
                 "size": len(content_1),
                 "downloaded_at": "2026-05-01T00:00:00Z",
                 "last_modified": "2026-05-01T00:00:00Z",
             }
         }))
+        (course_dir / "Assignments" / "Assignment 1").mkdir(parents=True)
+        (course_dir / "Assignments" / "Assignment 1" / "q1.pdf").write_bytes(content_1)
 
         def get_dropbox_folder_detail(cid, fid):
             return folders[0]
@@ -560,7 +791,7 @@ class TestSyncAssignmentAttachments:
             ])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            data = json.loads(result.output)
+            data = json.loads(result.stdout)
             # New attachment downloaded
             assert len(data.get("assignments_downloaded", [])) == 1, f"Expected 1 new, got {data.get('assignments_downloaded')}"
             # q1 skipped (already in manifest)
@@ -621,7 +852,7 @@ class TestSyncAssignmentAttachments:
             ])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            data = json.loads(result.output)
+            data = json.loads(result.stdout)
             # Should detect size changed → re-download
             assert len(data.get("assignments_updated", [])) == 1, f"Expected 1 updated, got {data.get('assignments_updated')}"
             # File should have new content
@@ -809,6 +1040,7 @@ class TestCrossAssignmentSync:
             "assignment_101_1": {
                 "sha256": hashlib.sha256(content_1).hexdigest(),
                 "filename": "q1.pdf",
+                "path": "Assignments/Assignment 1/q1.pdf",
                 "size": len(content_1),
                 "downloaded_at": "2026-05-01T00:00:00Z",
                 "last_modified": "2026-05-01T00:00:00Z",
@@ -849,7 +1081,7 @@ class TestCrossAssignmentSync:
             ])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            data = json.loads(result.output)
+            data = json.loads(result.stdout)
             assert len(data.get("assignments_downloaded", [])) == 1, f"Expected 1 new, got {data.get('assignments_downloaded')}"
             assert (course_dir / "Assignments" / "Assignment 1" / "q2.pdf").exists()
             # q1 same size as before, should be skipped (not updated)
@@ -936,6 +1168,381 @@ class TestSyncDropboxAttachmentMetadata:
         assert errors == []
         client.get_dropbox_folder_detail.assert_called_once_with(44347, 103)
 
+    def test_bulk_download_deduplicates_folder_ids_first_record_wins(
+        self, tmp_path: Path,
+    ):
+        folders = [
+            {"Id": 101, "Name": "First assignment"},
+            {
+                "Id": 101,
+                "Name": "Conflicting duplicate",
+                "Attachments": [{"Id": 2, "FileName": "second.pdf", "Size": 6, "Type": "File"}],
+            },
+        ]
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = folders
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 101,
+            "Name": "First assignment detail",
+            "Attachments": [{"Id": 1, "FileName": "first.pdf", "Size": 5, "Type": "File"}],
+        }
+        client.download_attachment.return_value = (b"first", "first.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, tmp_path, Manifest(),
+        )
+
+        assert errors == []
+        assert [entry["folder_id"] for entry in downloaded] == [101]
+        assert [entry["file_id"] for entry in downloaded] == [1]
+        assert client.get_dropbox_folder_detail.call_args_list == [
+            ((44347, 101),),
+        ]
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+        assert (tmp_path / "Assignments" / "First assignment detail" / "first.pdf").exists()
+        assert not (tmp_path / "Assignments" / "Conflicting duplicate" / "second.pdf").exists()
+
+    def test_sync_deduplicates_folder_ids_first_record_wins(self, tmp_path: Path):
+        folders = [
+            {
+                "Id": 101,
+                "Name": "First assignment",
+                "Attachments": [{"Id": 1, "FileName": "first.pdf", "Size": 5, "Type": "File"}],
+            },
+            {
+                "Id": 101,
+                "Name": "Conflicting duplicate",
+                "Attachments": [{"Id": 2, "FileName": "second.pdf", "Size": 6, "Type": "File"}],
+            },
+        ]
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = folders
+        client.download_attachment.return_value = (b"first", "first.pdf")
+        manifest = Manifest()
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, tmp_path, manifest,
+        )
+
+        assert skipped == []
+        assert updated == []
+        assert errors == []
+        assert [entry["folder_id"] for entry in downloaded] == [101]
+        assert [entry["file_id"] for entry in downloaded] == [1]
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+        assert set(manifest.entries) == {"assignment_101_1"}
+        assert not (tmp_path / "Assignments" / "Conflicting duplicate").exists()
+
+    def test_bulk_download_allows_valid_duplicate_after_malformed_first_record(
+        self, tmp_path: Path,
+    ):
+        folders = [
+            {"Id": 101, "Name": "Malformed first"},
+            {
+                "Id": 101,
+                "Name": "Valid second",
+                "Attachments": [{"Id": 2, "FileName": "second.pdf", "Size": 6, "Type": "File"}],
+            },
+        ]
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = folders
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 101,
+            "Name": "Malformed detail",
+            "Attachments": None,
+        }
+        client.download_attachment.return_value = (b"second", "second.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, tmp_path, Manifest(),
+        )
+
+        assert len(downloaded) == 1
+        assert downloaded[0]["file_id"] == 2
+        assert errors == [{
+            "folder_id": 101,
+            "error": "Assignment response has an invalid shape.",
+            "type": "assignment_data",
+        }]
+        client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
+        client.download_attachment.assert_called_once_with(44347, 101, 2)
+
+    def test_sync_allows_valid_duplicate_after_malformed_first_record(
+        self, tmp_path: Path,
+    ):
+        folders = [
+            {"Id": 101, "Name": "Malformed first"},
+            {
+                "Id": 101,
+                "Name": "Valid second",
+                "Attachments": [{"Id": 2, "FileName": "second.pdf", "Size": 6, "Type": "File"}],
+            },
+        ]
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = folders
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 101,
+            "Name": "Malformed detail",
+            "Attachments": None,
+        }
+        client.download_attachment.return_value = (b"second", "second.pdf")
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, tmp_path, Manifest(),
+        )
+
+        assert len(downloaded) == 1
+        assert downloaded[0]["file_id"] == 2
+        assert skipped == []
+        assert updated == []
+        assert errors == [{
+            "folder_id": 101,
+            "error": "Assignment response has an invalid shape.",
+            "type": "assignment_data",
+        }]
+        client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
+        client.download_attachment.assert_called_once_with(44347, 101, 2)
+
+    def test_bulk_download_rejects_mismatched_detail_id_before_attachment_write(
+        self, tmp_path: Path,
+    ):
+        folder = {"Id": 101, "Name": "Assignment 1"}
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 202,
+            "Name": "Wrong assignment",
+            "Attachments": [{"Id": 1, "FileName": "wrong.pdf", "Size": 5, "Type": "File"}],
+        }
+        client.download_attachment.return_value = (b"must not write", "wrong.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, tmp_path, Manifest(), folder_ids=[101],
+        )
+
+        assert downloaded == []
+        assert errors == [{
+            "folder_id": 101,
+            "error": "Assignment record has an invalid identifier.",
+            "type": "assignment_data",
+        }]
+        client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
+        client.download_attachment.assert_not_called()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_single_attachment_rejects_mismatched_detail_id_before_write(
+        self, tmp_path: Path, capsys,
+    ):
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 202,
+            "Name": "Wrong assignment",
+            "Attachments": [{"Id": 1, "FileName": "wrong.pdf", "Size": 5, "Type": "File"}],
+        }
+        client.download_attachment.return_value = (b"must not write", "wrong.pdf")
+
+        rc = download_single_attachment(client, 44347, 101, 1, tmp_path, True)
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert json.loads(captured.out) == {
+            "error": "Assignment record has an invalid identifier.",
+            "type": "assignment_data",
+        }
+        assert "202" not in captured.out + captured.err
+        client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
+        client.download_attachment.assert_not_called()
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "body",
+        ["not bytes", bytearray(b"not bytes"), object()],
+        ids=["str", "bytearray", "object"],
+    )
+    def test_bulk_download_rejects_non_bytes_body_before_write(
+        self, tmp_path: Path, body,
+    ):
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "wrong.pdf", "Size": 5, "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (body, "wrong.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, tmp_path, Manifest(), folder_ids=[101],
+        )
+
+        assert downloaded == []
+        assert errors == [{
+            "folder_id": 101,
+            "file_id": 1,
+            "error": "Assignment response has an invalid shape.",
+            "type": "assignment_data",
+        }]
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "body",
+        ["not bytes", bytearray(b"not bytes"), object()],
+        ids=["str", "bytearray", "object"],
+    )
+    def test_single_attachment_rejects_non_bytes_body_before_write(
+        self, tmp_path: Path, body, capsys,
+    ):
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "wrong.pdf", "Size": 5, "Type": "File"}],
+        }
+        client.download_attachment.return_value = (body, "wrong.pdf")
+
+        rc = download_single_attachment(client, 44347, 101, 1, tmp_path, True)
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert json.loads(captured.out) == {
+            "error": "Assignment response has an invalid shape.",
+            "type": "assignment_data",
+        }
+        assert "not bytes" not in captured.out + captured.err
+        assert "object at" not in captured.out + captured.err
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "body",
+        ["not bytes", bytearray(b"not bytes"), object()],
+        ids=["str", "bytearray", "object"],
+    )
+    def test_sync_rejects_non_bytes_body_before_write(
+        self, tmp_path: Path, body,
+    ):
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "wrong.pdf", "Size": 5, "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (body, "wrong.pdf")
+        manifest = Manifest()
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, tmp_path, manifest,
+        )
+
+        assert downloaded == []
+        assert skipped == []
+        assert updated == []
+        assert errors == [{
+            "folder_id": 101,
+            "file_id": 1,
+            "error": "Assignment response has an invalid shape.",
+            "type": "assignment_data",
+        }]
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+        assert manifest.entries == {}
+        assert list(tmp_path.iterdir()) == []
+
+    def test_bulk_download_redacts_secret_shaped_server_filename_in_path_and_manifest(
+        self, tmp_path: Path,
+    ):
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "listed.pdf", "Size": 4, "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (b"body", "password=ATTACHMENT_SECRET.pdf")
+        manifest = Manifest()
+
+        downloaded, errors = download_for_course(client, 44347, tmp_path, manifest)
+
+        assert errors == []
+        assert len(downloaded) == 1
+        assert downloaded[0]["filename"] == "attachment_1.pdf"
+        assert "ATTACHMENT_SECRET" not in json.dumps(downloaded)
+        manifest_entry = manifest.get("assignment_101_1")
+        assert manifest_entry is not None
+        assert manifest_entry["filename"] == "attachment_1.pdf"
+        assert "ATTACHMENT_SECRET" not in json.dumps(manifest_entry)
+        assert (tmp_path / "Assignments" / "Assignment 1" / "attachment_1.pdf").read_bytes() == b"body"
+        assert not any("ATTACHMENT_SECRET" in str(path) for path in tmp_path.rglob("*"))
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+
+    def test_sync_redacts_control_shaped_server_filename_in_path_and_manifest(
+        self, tmp_path: Path,
+    ):
+        folder = {
+            "Id": 101,
+            "Name": "unsafe\x1b[31mFOLDER_SENTINEL",
+            "Attachments": [{"Id": 1, "FileName": "listed.pdf", "Size": 4, "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (b"body", "unsafe\x1b[31m.pdf")
+        manifest = Manifest()
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, tmp_path, manifest,
+        )
+
+        assert skipped == []
+        assert updated == []
+        assert errors == []
+        assert downloaded[0]["filename"] == "attachment_1.pdf"
+        assert manifest.get("assignment_101_1")["filename"] == "attachment_1.pdf"
+        assert (tmp_path / "Assignments" / "Folder-101" / "attachment_1.pdf").read_bytes() == b"body"
+        assert not any("\x1b" in str(path) or "FOLDER_SENTINEL" in str(path) for path in tmp_path.rglob("*"))
+        assert "FOLDER_SENTINEL" not in json.dumps(manifest.entries)
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+
+    @pytest.mark.parametrize(
+        "course_name",
+        ["password=COURSE_SECRET", "unsafe\x1b[31mcourse"],
+        ids=["secret-shaped", "control-shaped"],
+    )
+    def test_single_attachment_redacts_server_filename_and_course_name(
+        self, tmp_path: Path, course_name, capsys,
+    ):
+        client = Mock(spec=LighthouseClient)
+        client.get_enrolled_courses.return_value = [{
+            "OrgUnitId": 44347,
+            "Name": course_name,
+        }]
+        client.get_dropbox_folder_detail.return_value = {
+            "Id": 101,
+            "Name": "password=FOLDER_SECRET",
+            "Attachments": [{"Id": 1, "FileName": "listed.pdf", "Size": 4, "Type": "File"}],
+        }
+        client.download_attachment.return_value = (
+            b"body",
+            "password=ATTACHMENT_SECRET.pdf",
+        )
+
+        rc = download_single_attachment(client, 44347, 101, 1, tmp_path, True)
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert rc == 0
+        assert payload["filename"] == "attachment_1.pdf"
+        assert "ATTACHMENT_SECRET" not in captured.out + captured.err
+        assert "COURSE_SECRET" not in captured.out + captured.err
+        assert "\x1b" not in captured.out + captured.err
+        assert "Course-44347" in payload["path"]
+        output_path = Path(payload["path"])
+        assert output_path.read_bytes() == b"body"
+        manifest = json.loads((output_path.parents[2] / MANIFEST_FILENAME).read_text())
+        assert manifest["assignment_101_1"]["filename"] == "attachment_1.pdf"
+        assert "ATTACHMENT_SECRET" not in json.dumps(manifest)
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+
     def test_assignment_symlink_is_rejected_before_attachment_write(self, tmp_path: Path):
         course_dir = tmp_path / "course"
         outside = tmp_path / "outside"
@@ -958,8 +1565,295 @@ class TestSyncDropboxAttachmentMetadata:
         )
 
         assert downloaded == []
-        assert errors and "symlink" in errors[0]["error"]
+        assert errors and errors[0]["error"]
         assert not (outside / "Assignment 1" / "q1.pdf").exists()
+
+    @pytest.mark.parametrize(
+        "forged_component",
+        ["password=LOCAL_SECRET", "unsafe\x1b[31m"],
+        ids=["secret-shaped", "control-shaped"],
+    )
+    def test_forged_manifest_label_is_not_skipped_and_is_replaced_safely(
+        self, tmp_path: Path, forged_component: str,
+    ):
+        course_dir = tmp_path / "course"
+        forged_dir = course_dir / "Assignments" / forged_component
+        forged_dir.mkdir(parents=True)
+        content = b"fresh"
+        forged_path = forged_dir / "x.pdf"
+        forged_path.write_bytes(content)
+        manifest = Manifest({
+            "assignment_101_1": {
+                "sha256": compute_sha256(content),
+                "filename": "x.pdf",
+                "path": f"Assignments/{forged_component}/x.pdf",
+                "size": len(content),
+                "downloaded_at": "2026-05-01T00:00:00Z",
+                "last_modified": "",
+            },
+        })
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "x.pdf", "Size": len(content), "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (content, "x.pdf")
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, course_dir, manifest,
+        )
+
+        assert errors == []
+        assert skipped == []
+        assert len(updated) == 1
+        assert updated[0]["path"] == "Assignments/Assignment 1/x.pdf"
+        assert forged_component not in json.dumps(updated)
+        manifest_entry = manifest.get("assignment_101_1")
+        assert manifest_entry is not None
+        assert manifest_entry["path"] == "Assignments/Assignment 1/x.pdf"
+        assert forged_component not in json.dumps(manifest.entries)
+        assert (course_dir / updated[0]["path"]).read_bytes() == content
+        assert forged_path.read_bytes() == content
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+
+    def test_download_replaces_secret_shaped_manifest_path_safely(self, tmp_path: Path):
+        course_dir = tmp_path / "course"
+        forged_dir = course_dir / "Assignments" / "password=LOCAL_SECRET"
+        forged_dir.mkdir(parents=True)
+        content = b"fresh"
+        forged_path = forged_dir / "x.pdf"
+        forged_path.write_bytes(content)
+        manifest = Manifest({
+            "assignment_101_1": {
+                "sha256": compute_sha256(content),
+                "filename": "x.pdf",
+                "path": "Assignments/password=LOCAL_SECRET/x.pdf",
+                "size": len(content),
+                "downloaded_at": "2026-05-01T00:00:00Z",
+                "last_modified": "",
+            },
+        })
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "x.pdf", "Size": len(content), "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (content, "x.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, course_dir, manifest,
+        )
+
+        assert errors == []
+        assert len(downloaded) == 1
+        assert downloaded[0]["path"] == "Assignments/Assignment 1/x.pdf"
+        assert "LOCAL_SECRET" not in json.dumps(downloaded)
+        assert "LOCAL_SECRET" not in json.dumps(manifest.entries)
+        assert (course_dir / downloaded[0]["path"]).read_bytes() == content
+        assert forged_path.read_bytes() == content
+        client.download_attachment.assert_called_once_with(44347, 101, 1)
+
+    def test_sync_replaces_cross_folder_manifest_path_without_overwriting_wrong_folder(
+        self, tmp_path: Path,
+    ):
+        course_dir = tmp_path / "course"
+        wrong_dir = course_dir / "Assignments" / "Other"
+        wrong_dir.mkdir(parents=True)
+        old_content = b"old!"
+        new_content = b"new!"
+        wrong_path = wrong_dir / "evil.pdf"
+        wrong_path.write_bytes(old_content)
+        manifest = Manifest({
+            "assignment_101_1": {
+                "sha256": compute_sha256(old_content),
+                "filename": "evil.pdf",
+                "path": "Assignments/Other/evil.pdf",
+                "size": len(old_content),
+                "downloaded_at": "2026-05-01T00:00:00Z",
+                "last_modified": "",
+            },
+        })
+        folder = {
+            "Id": 101,
+            "Name": "Folder 101",
+            "Attachments": [{"Id": 1, "FileName": "safe.pdf", "Size": len(new_content), "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (new_content, "safe.pdf")
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, course_dir, manifest,
+        )
+
+        assert downloaded == []
+        assert skipped == []
+        assert errors == []
+        assert updated == [{
+            "file_id": 1,
+            "folder_id": 101,
+            "filename": "safe.pdf",
+            "path": "Assignments/Folder 101/safe.pdf",
+            "size_kb": 0.0,
+        }]
+        assert wrong_path.read_bytes() == old_content
+        assert (course_dir / "Assignments" / "Folder 101" / "safe.pdf").read_bytes() == new_content
+        assert manifest.get("assignment_101_1")["path"] == "Assignments/Folder 101/safe.pdf"
+        assert "Other/evil.pdf" not in json.dumps(updated)
+        assert client.download_attachment.call_args_list == [
+            ((44347, 101, 1),),
+        ]
+
+    def test_invalid_manifest_path_is_redownloaded_without_escape(self, tmp_path: Path):
+        course_dir = tmp_path / "course"
+        course_dir.mkdir()
+        outside = tmp_path / "outside.pdf"
+        outside.write_bytes(b"keep")
+        content = b"fresh"
+        manifest = Manifest({
+            "assignment_101_1": {
+                "sha256": compute_sha256(b"stale"),
+                "filename": "outside.pdf",
+                "path": "Assignments/../../outside.pdf",
+                "size": len(b"stale"),
+                "downloaded_at": "2026-05-01T00:00:00Z",
+                "last_modified": "",
+            },
+        })
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": len(content), "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (content, "q1.pdf")
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, course_dir, manifest,
+        )
+
+        assert errors == []
+        assert skipped == []
+        assert len(updated) == 1
+        assert downloaded == []
+        assert outside.read_bytes() == b"keep"
+        assert updated[0]["path"].startswith("Assignments/")
+
+    def test_same_size_changed_attachment_is_not_skipped(self, tmp_path: Path):
+        course_dir = tmp_path / "course"
+        folder_dir = course_dir / "Assignments" / "Assignment 1"
+        folder_dir.mkdir(parents=True)
+        old_content = b"old!"
+        new_content = b"new!"
+        local_path = folder_dir / "q1.pdf"
+        local_path.write_bytes(new_content)
+        manifest = Manifest({
+            "assignment_101_1": {
+                "sha256": compute_sha256(old_content),
+                "filename": "q1.pdf",
+                "path": "Assignments/Assignment 1/q1.pdf",
+                "size": len(old_content),
+                "downloaded_at": "2026-05-01T00:00:00Z",
+                "last_modified": "",
+            },
+        })
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": len(new_content), "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (new_content, "q1.pdf")
+
+        downloaded, skipped, updated, errors = sync_for_course(
+            client, 44347, course_dir, manifest,
+        )
+
+        assert errors == []
+        assert skipped == []
+        assert len(updated) == 1
+        assert downloaded == []
+        assert local_path.read_bytes() == new_content
+
+    def test_filename_symlink_is_not_overwritten(self, tmp_path: Path):
+        course_dir = tmp_path / "course"
+        folder_dir = course_dir / "Assignments" / "Assignment 1"
+        folder_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.pdf"
+        outside.write_bytes(b"keep")
+        (folder_dir / "q1.pdf").symlink_to(outside)
+        folder = {
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": 5, "Type": "File"}],
+        }
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [folder]
+        client.download_attachment.return_value = (b"fresh", "q1.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, course_dir, Manifest(),
+        )
+
+        assert errors == []
+        assert downloaded[0]["filename"] == "q1_1.pdf"
+        assert outside.read_bytes() == b"keep"
+        assert (folder_dir / "q1.pdf").is_symlink()
+
+    def test_course_destination_symlink_is_rejected_before_attachment_write(self, tmp_path: Path):
+        outside = tmp_path / "outside-course"
+        outside.mkdir()
+        course_dir = tmp_path / "course-link"
+        course_dir.symlink_to(outside, target_is_directory=True)
+
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [{
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": 7, "Type": "File"}],
+        }]
+        client.download_attachment.return_value = (b"content", "q1.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, course_dir, Manifest()
+        )
+
+        assert downloaded == []
+        assert errors and errors[0]["error"]
+        client.download_attachment.assert_not_called()
+        assert list(outside.rglob("*")) == []
+
+    def test_assignment_folder_symlink_is_rejected_before_attachment_write(self, tmp_path: Path):
+        course_dir = tmp_path / "course"
+        course_dir.mkdir()
+        outside = tmp_path / "outside-folder"
+        outside.mkdir()
+        assignments_dir = course_dir / "Assignments"
+        assignments_dir.mkdir()
+        (assignments_dir / "Assignment 1").symlink_to(outside, target_is_directory=True)
+
+        client = Mock(spec=LighthouseClient)
+        client.get_dropbox_folders.return_value = [{
+            "Id": 101,
+            "Name": "Assignment 1",
+            "Attachments": [{"Id": 1, "FileName": "q1.pdf", "Size": 7, "Type": "File"}],
+        }]
+        client.download_attachment.return_value = (b"content", "q1.pdf")
+
+        downloaded, errors = download_for_course(
+            client, 44347, course_dir, Manifest()
+        )
+
+        assert downloaded == []
+        assert errors and errors[0]["error"]
+        client.download_attachment.assert_not_called()
+        assert list(outside.rglob("*")) == []
 
     def test_manifest_and_result_keep_disambiguated_path_on_update(
         self, tmp_path: Path,

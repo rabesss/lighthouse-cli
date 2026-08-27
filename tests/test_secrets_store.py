@@ -305,6 +305,38 @@ class TestSealedCookies:
         age = config_mod.get_cookie_age_days()
         assert age is not None and age < 1
 
+    def test_malformed_sealed_cookie_payload_is_ignored(self, store_dir: Path) -> None:
+        """A valid envelope must not make a malformed cookie object crash reads."""
+        store = CredentialStore()
+        store.write_artifact(
+            store.cookie_file,
+            metadata={"extracted_at": datetime.now(timezone.utc).isoformat()},
+            secret={"cookies": None},
+        )
+
+        assert load_cookies() == {}
+
+    def test_legacy_plaintext_upgrade_warning_drops_control_sentinels(
+        self,
+        store_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A failed legacy upgrade never echoes attacker-controlled metadata."""
+        legacy = {
+            "cookies": {"d2lSecureSessionVal": "cookie-control-sentinel"},
+            "extracted_at": "2026-01-01T00:00:00+00:00\x1b[31m",
+        }
+        cookies_path(store_dir).write_text(json.dumps(legacy))
+        monkeypatch.delenv("LIGHTHOUSE_SECRETS_PASSPHRASE", raising=False)
+        monkeypatch.setitem(sys.modules, "keyring", None)
+
+        assert load_cookies() == {}
+        warning = capsys.readouterr().err
+        assert "cookie-control-sentinel" not in warning
+        assert "\\x1b" not in warning
+        assert "LIGHTHOUSE_SECRETS_PASSPHRASE" in warning
+
 
 # ---------------------------------------------------------------------------
 # MFA pending checkpoint: compatibility policy + roundtrip matrix
@@ -332,6 +364,47 @@ class TestMfaPendingCompatibility:
         assert load_mfa_pending() is None
         assert not pending_path(store_dir).exists()
         assert "incompatible" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "document",
+        [
+            [],
+            {"version": "VERSION_SENTINEL\n\x1b[31m"},
+            {"version": {"secret": "VERSION_SECRET_SENTINEL"}},
+        ],
+    )
+    def test_malformed_pending_documents_are_cleared_without_echo(
+        self,
+        store_dir: Path,
+        document: object,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Malformed local state cannot crash or inject text into warnings."""
+        pending_path(store_dir).write_text(json.dumps(document))
+
+        assert load_mfa_pending() is None
+        assert not pending_path(store_dir).exists()
+        warning = capsys.readouterr().err
+        assert "VERSION_SENTINEL" not in warning
+        assert "VERSION_SECRET_SENTINEL" not in warning
+        assert "\\x1b" not in warning
+
+    def test_pending_metadata_control_values_are_not_reintroduced(
+        self, store_dir: Path
+    ) -> None:
+        save_mfa_pending(
+            {
+                "created_at": "2026-01-01T00:00:00+00:00\x1b[31m",
+                "mfa_method": "sms\nMETHOD_SENTINEL",
+                "begin": {"Success": True},
+            }
+        )
+
+        loaded = load_mfa_pending()
+        assert loaded is not None
+        assert "created_at" not in loaded
+        assert "mfa_method" not in loaded
+        assert "METHOD_SENTINEL" not in json.dumps(loaded)
 
     def test_legacy_v1_discard_json_purity(
         self, store_dir: Path, cli_runner: Any, monkeypatch: pytest.MonkeyPatch

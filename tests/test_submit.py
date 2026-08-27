@@ -34,7 +34,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+from lighthouse_cli.api import (
+    LighthouseClient,
+    NetworkError,
+    SessionExpiredError,
+    SubmissionOutcomeUnknownError,
+)
 
 
 class _TtyStringIO(io.StringIO):
@@ -223,8 +228,8 @@ class TestSubmitFile:
             )
         assert "not found" in str(exc_info.value)
 
-    def test_submit_file_500_raises_value_error_with_detail(self) -> None:
-        """VAL-SUBMIT-014: HTTP 500 raises ValueError with D2L error detail."""
+    def test_submit_file_500_raises_safe_value_error(self) -> None:
+        """VAL-SUBMIT-014: HTTP 500 never exposes the server response body."""
         client, _ = _make_client_with_mock_session(
             500, {"detail": "Submitted comments are too large."}
         )
@@ -236,7 +241,30 @@ class TestSubmitFile:
                 file_bytes=b"test content",
                 filename="test.pdf",
             )
-        assert "Submitted comments are too large" in str(exc_info.value)
+        assert str(exc_info.value) == (
+            "D2L API error (500): the remote server rejected the submission. "
+            "This may indicate malformed request body or submission window restrictions."
+        )
+        assert "Submitted comments are too large" not in str(exc_info.value)
+
+    def test_submit_file_unknown_response_raises_typed_error_without_retry(self) -> None:
+        """A successful POST with an unusable body is reported exactly once."""
+        client, captured = _make_client_with_mock_session(200)
+
+        with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
+            client.submit_file(
+                org_unit_id=44347,
+                folder_id=789,
+                file_bytes=b"test content",
+                filename="test.pdf",
+            )
+
+        assert str(exc_info.value) == (
+            "Submission outcome is unknown because the API returned an unsupported "
+            "result shape. Verify the assignment status before trying again."
+        )
+        assert len(captured) == 1
+        assert captured[0]["method"] == "POST"
 
     def test_submit_file_uses_correct_api_path(
         self, sample_submission_response: dict
@@ -371,6 +399,55 @@ class TestSubmitCommand:
             assert "File not found" in result.output
             mock_client_cls.assert_not_called()
 
+    def test_submit_path_resolution_failure_is_safe_json(self, cli_runner: CliRunner) -> None:
+        """A path-resolution failure stays one JSON document and makes no API call."""
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch.object(Path, "resolve", side_effect=RuntimeError("PATH_SENTINEL")),
+            patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls,
+        ):
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", "/tmp/input.pdf", "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {"error": "File not found."}
+        assert result.stdout.count('"error"') == 1
+        assert "PATH_SENTINEL" not in result.output
+        assert "/tmp/input.pdf" not in result.output
+        mock_client_cls.assert_not_called()
+
+    def test_submit_client_constructor_failure_is_safe_json(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+    ) -> None:
+        """Client setup failures emit one safe JSON result before file I/O."""
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch(
+                "lighthouse_cli.submit.LighthouseClient",
+                side_effect=RuntimeError("CLIENT_SECRET_SENTINEL"),
+            ) as mock_client_cls,
+            patch.object(Path, "read_bytes", autospec=True) as read_bytes_mock,
+        ):
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {
+            "error": "Could not initialize Lighthouse client."
+        }
+        assert result.stdout.count('"error"') == 1
+        assert "CLIENT_SECRET_SENTINEL" not in result.output
+        mock_client_cls.assert_called_once_with()
+        read_bytes_mock.assert_not_called()
+
     def test_submit_success_with_yes_flag_json_output(
         self,
         cli_runner: CliRunner,
@@ -436,6 +513,166 @@ class TestSubmitCommand:
             assert result.exit_code == 0
             assert "Submitted successfully" in result.output
 
+    @pytest.mark.parametrize("json_output", [False, True])
+    @pytest.mark.parametrize(
+        ("folder_name", "course_name", "fallbacks"),
+        [
+            ({"token": "SECRET"}, "Signals & Systems", {"folder": True, "course": False}),
+            ("Assignment\x1b[31m1", "Signals & Systems", {"folder": True, "course": False}),
+            ("Assignment 1", {"token": "SECRET"}, {"folder": False, "course": True}),
+        ],
+    )
+    def test_submit_output_projects_untrusted_course_and_folder_names(
+        self,
+        json_output: bool,
+        folder_name: object,
+        course_name: object,
+        fallbacks: dict[str, bool],
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        sample_submission_response: dict,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Malformed or control-bearing labels never reach output streams."""
+        from lighthouse_cli import submit as submit_module
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls,
+            patch.object(submit_module, "_get_course_name", return_value=course_name),
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": folder_name}
+            mock_client.submit_file.return_value = sample_submission_response
+
+            args = [
+                "submit",
+                "44347",
+                "789",
+                "--file",
+                str(temp_pdf_file),
+                "--yes",
+            ]
+            if json_output:
+                args.append("--json")
+            result = cli_runner.invoke(cli, args)
+
+        assert result.exit_code == 0
+        assert "SECRET" not in result.output
+        assert "\x1b" not in result.output
+        if json_output:
+            payload = json_module.loads(result.stdout)
+            assert payload["folder_name"] == (
+                "Unknown folder" if fallbacks["folder"] else folder_name
+            )
+            assert payload["course_name"] == (
+                "Unknown course" if fallbacks["course"] else course_name
+            )
+        else:
+            if fallbacks["folder"]:
+                assert "Folder: Unknown folder" in result.output
+            if fallbacks["course"]:
+                assert "Course: Unknown course" in result.output
+
+    @pytest.mark.parametrize("json_output", [False, True])
+    def test_submit_output_projects_untrusted_response_fields(
+        self,
+        json_output: bool,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Nested or control-bearing response fields never enter output."""
+        from lighthouse_cli.cli import cli
+
+        response = {
+            "submissionId": {"token": "RESPONSE_TOKEN_SENTINEL", "password": "RESPONSE_PASSWORD_SENTINEL"},
+            "submittedAt": {"token": "RESPONSE_TIMESTAMP_SENTINEL"},
+        }
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.return_value = response
+
+            args = [
+                "submit",
+                "44347",
+                "789",
+                "--file",
+                str(temp_pdf_file),
+                "--yes",
+            ]
+            if json_output:
+                args.append("--json")
+            result = cli_runner.invoke(cli, args)
+
+        assert result.exit_code == 0
+        assert "RESPONSE_TOKEN_SENTINEL" not in result.output
+        assert "RESPONSE_PASSWORD_SENTINEL" not in result.output
+        assert "RESPONSE_TIMESTAMP_SENTINEL" not in result.output
+        assert "\x1b" not in result.output
+        if json_output:
+            payload = json_module.loads(result.stdout)
+            assert payload["submission_id"] is None
+            assert isinstance(payload["submitted_at"], str)
+            assert payload["submitted_at"].isprintable()
+        else:
+            assert "Submission ID: None" in result.output
+
+    @pytest.mark.parametrize("json_output", [False, True])
+    def test_submit_preserves_remote_filename_but_hides_secret_shaped_label(
+        self,
+        json_output: bool,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+        sample_submission_response: dict,
+    ) -> None:
+        """The POST gets the real basename while displays use a safe fallback."""
+        from lighthouse_cli.cli import cli
+
+        filename = "password=FILENAME_SECRET_SENTINEL.pdf"
+        secret_file = temp_pdf_file.with_name(filename)
+        temp_pdf_file.rename(secret_file)
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.return_value = sample_submission_response
+
+            args = [
+                "submit",
+                "44347",
+                "789",
+                "--file",
+                str(secret_file),
+                "--yes",
+            ]
+            if json_output:
+                args.append("--json")
+            result = cli_runner.invoke(cli, args)
+
+        assert result.exit_code == 0
+        assert mock_client.submit_file.call_args.kwargs["filename"] == filename
+        assert "FILENAME_SECRET_SENTINEL" not in result.output
+        assert "password=" not in result.output.casefold()
+        if json_output:
+            assert json_module.loads(result.stdout)["file"]["name"] == "Unknown file"
+        else:
+            assert "File: Unknown file" in result.output
+
     def test_submit_course_name_substring_resolution(
         self,
         cli_runner: CliRunner,
@@ -452,6 +689,7 @@ class TestSubmitCommand:
             mock_client_cls.return_value = mock_client
 
             mock_client.get_courses.return_value = mock_courses
+            mock_client.get_enrolled_courses.return_value = mock_courses
             mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
             mock_client.cookies = {"d2lSecureSessionVal": "abc", "d2lSessionVal": "def"}
@@ -856,8 +1094,36 @@ class TestSubmitCommand:
             assert result.exit_code == 1
             # Error is on stderr
             assert "not found" in result.output.lower()
-            # Should list available folders
-            assert "789" in result.output
+            # Folder names and IDs come from the remote response and are not
+            # echoed in normal diagnostics.
+            assert "789" not in result.output
+            assert "Assignment 1 - Signals" not in result.output
+
+    def test_submit_malformed_matched_folder_id_fails_before_post(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+    ) -> None:
+        """A malformed matched folder record cannot reach the write endpoint."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = [
+                {"Id": 0, "Name": "Assignment 1 - Signals"},
+            ]
+
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "signals", "--file", str(temp_pdf_file), "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        assert "invalid" in json_module.loads(result.stdout)["error"].casefold()
+        mock_client.submit_file.assert_not_called()
 
     def test_submit_json_output_is_valid_parseable_json(
         self,
@@ -923,6 +1189,261 @@ class TestSubmitCommand:
             }
             assert "Session expired" in result.output
 
+    def test_submit_error_sanitizes_sensitive_transport_details(self) -> None:
+        """Both submit error streams use the centralized safe formatter."""
+        from lighthouse_cli import submit as submit_module
+
+        message = (
+            "HTTP 500 for https://lighthouse.manipal.edu/api?token=SUBMIT_TOKEN_SENTINEL "
+            "response_body=BODY_SENTINEL password hunter2 "
+            "Run: lighthouse auth login --pass PASSWORD_SENTINEL"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with (
+            patch.object(submit_module.sys, "stdout", stdout),
+            patch.object(submit_module.sys, "stderr", stderr),
+        ):
+            exit_code = submit_module._submit_error(message, json_output=True)
+
+        assert exit_code == 1
+        parsed = json_module.loads(stdout.getvalue())
+        assert parsed == {
+            "error": "Remote server error (HTTP 500). Run: lighthouse auth login"
+        }
+        combined = stdout.getvalue() + stderr.getvalue()
+        for sentinel in (
+            "SUBMIT_TOKEN_SENTINEL",
+            "BODY_SENTINEL",
+            "hunter2",
+            "PASSWORD_SENTINEL",
+            "https://lighthouse.manipal.edu",
+        ):
+            assert sentinel not in combined
+        assert "Remote server error (HTTP 500)." in stderr.getvalue()
+
+    def test_submit_json_error_sanitizes_transport_details_through_cli(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """The CLI-shaped submit failure remains parseable and secret-safe."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.side_effect = ValueError(
+                "HTTP 500 for https://lighthouse.manipal.edu/api?token=CLI_TOKEN_SENTINEL "
+                "response_body=CLI_BODY_SENTINEL password cli-password"
+            )
+
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {
+            "error": "Remote server error (HTTP 500)."
+        }
+        for sentinel in (
+            "CLI_TOKEN_SENTINEL",
+            "CLI_BODY_SENTINEL",
+            "cli-password",
+            "https://lighthouse.manipal.edu",
+        ):
+            assert sentinel not in result.output
+
+    @pytest.mark.parametrize(
+        ("remote_error", "safe_error"),
+        [
+            (
+                "HTTP 429 for https://lighthouse.manipal.edu/api?token=RATE_TOKEN_SENTINEL",
+                "Rate limited (HTTP 429).",
+            ),
+            (
+                "HTTP 401 for https://lighthouse.manipal.edu/api?token=AUTH_TOKEN_SENTINEL",
+                "Session expired (HTTP 401).",
+            ),
+        ],
+    )
+    def test_submit_transport_errors_are_single_safe_json_documents(
+        self,
+        remote_error: str,
+        safe_error: str,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """429/401 failures are not replayed and never expose URL credentials."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.side_effect = ValueError(remote_error)
+
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {"error": safe_error}
+        assert result.stdout.count('"error"') == 1
+        assert "TOKEN_SENTINEL" not in result.output
+        assert "https://lighthouse.manipal.edu" not in result.output
+        mock_client.submit_file.assert_called_once()
+
+    def test_submit_rate_limit_network_error_keeps_no_retry_context(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """A non-retried submission rate limit remains actionable and safe."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.side_effect = NetworkError(
+                "Submission request was rate limited; no retry was attempted."
+            )
+
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        error = json_module.loads(result.stdout)["error"].casefold()
+        assert "rate limited" in error
+        assert "no retry" in error
+        assert "check your connection and try again" not in error
+        mock_client.submit_file.assert_called_once()
+
+    @pytest.mark.parametrize("json_output", [False, True])
+    def test_submit_typed_unknown_outcome_is_actionable(
+        self,
+        json_output: bool,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Typed unknown outcomes stay actionable in both output modes."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.side_effect = SubmissionOutcomeUnknownError()
+
+            args = [
+                "submit",
+                "44347",
+                "789",
+                "--file",
+                str(temp_pdf_file),
+                "--yes",
+            ]
+            if json_output:
+                args.append("--json")
+            result = cli_runner.invoke(cli, args)
+
+        message = (
+            json_module.loads(result.stdout)["error"]
+            if json_output
+            else result.output
+        ).casefold()
+        assert result.exit_code == 1
+        assert "submission outcome is unknown" in message
+        assert "verify the assignment status before trying again" in message
+        assert "check your connection and try again" not in message
+        mock_client.submit_file.assert_called_once()
+
+    @pytest.mark.parametrize("invalid_response", [None, [], "unexpected response"])
+    def test_submit_invalid_response_is_safe_ambiguous_error_json(
+        self,
+        invalid_response: object,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Malformed accepted responses never become tracebacks or retry advice."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.return_value = invalid_response
+
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {
+            "error": (
+                "Submission outcome is unknown because the API returned an unsupported result shape. "
+                "Verify the assignment status before trying again."
+            )
+        }
+        assert "Traceback" not in result.output
+        assert "blindly" not in result.output.lower()
+
+    def test_submit_invalid_response_is_safe_ambiguous_error_human(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Human output warns about the unknown remote outcome without retrying."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.return_value = None
+
+            result = cli_runner.invoke(
+                cli,
+                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes"],
+            )
+
+        assert result.exit_code == 1
+        assert "Submission outcome is unknown" in result.output
+        assert "Verify the assignment status" in result.output
+        assert "Traceback" not in result.output
+
 
 class TestSubmitFolderResolution:
     """Tests for folder ID resolution by name substring."""
@@ -967,8 +1488,8 @@ class TestSubmitFolderResolution:
             _resolve_folder_id(mock_client, 44347, "assignment")
         assert "Ambiguous" in str(exc_info.value)
 
-    def test_folder_zero_match_raises_file_not_found(self) -> None:
-        """VAL-SUBMIT-005 (zero match): No match raises FileNotFoundError with available folders."""
+    def test_folder_zero_match_raises_safe_file_not_found(self) -> None:
+        """VAL-SUBMIT-005 (zero match): No match omits remote folder listings."""
         from lighthouse_cli.submit import _resolve_folder_id
 
         mock_client = MagicMock()
@@ -980,8 +1501,30 @@ class TestSubmitFolderResolution:
         with pytest.raises(FileNotFoundError) as exc_info:
             _resolve_folder_id(mock_client, 44347, "nonexistent")
         assert "not found" in str(exc_info.value)
-        assert "789" in str(exc_info.value)
-        assert "790" in str(exc_info.value)
+        assert "789" not in str(exc_info.value)
+        assert "790" not in str(exc_info.value)
+
+    @pytest.mark.parametrize("selector", ["0", "-1", "1.5", "/tmp/folder", "\\\\tmp\\\\folder"])
+    def test_malformed_numeric_or_path_selector_is_rejected(self, selector: str) -> None:
+        """Malformed selectors never get reinterpreted as a folder name."""
+        from lighthouse_cli.submit import _resolve_folder_id
+
+        mock_client = MagicMock()
+        with pytest.raises(ValueError):
+            _resolve_folder_id(mock_client, 44347, selector)
+        mock_client.get_dropbox_folders.assert_not_called()
+
+    @pytest.mark.parametrize("folder_id", [None, True, 0, -7, 1.5, "bad-id"])
+    def test_matching_folder_with_malformed_id_is_rejected(self, folder_id: object) -> None:
+        """A matched API folder with an invalid ID cannot reach submission."""
+        from lighthouse_cli.submit import _resolve_folder_id
+
+        mock_client = MagicMock()
+        mock_client.get_dropbox_folders.return_value = [
+            {"Id": folder_id, "Name": "Assignment 1 - Signals"},
+        ]
+        with pytest.raises(ValueError):
+            _resolve_folder_id(mock_client, 44347, "signals")
 
 
 class TestSubmitConfirmation:
@@ -1102,6 +1645,93 @@ class TestSubmitConfirmation:
         read_bytes_mock.assert_not_called()
         mock_client.submit_file.assert_not_called()
 
+    @pytest.mark.parametrize("json_output", [False, True])
+    @pytest.mark.parametrize("input_error", [EOFError(), KeyboardInterrupt()])
+    def test_confirmation_input_failure_cancels_cleanly(
+        self,
+        json_output: bool,
+        input_error: BaseException,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """EOF and Ctrl-C at confirmation never produce a traceback or POST."""
+        from lighthouse_cli import submit as submit_module
+
+        stdout = _TtyStringIO()
+        stderr = io.StringIO()
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+
+            with (
+                patch.object(submit_module.sys, "stdout", stdout),
+                patch.object(submit_module.sys, "stderr", stderr),
+                patch("builtins.input", side_effect=input_error),
+            ):
+                exit_code = submit_module.cmd_submit(
+                    course_id="44347",
+                    folder_id="789",
+                    file_path=str(temp_pdf_file),
+                    json_output=json_output,
+                )
+
+        assert exit_code == 0
+        assert "Traceback" not in stdout.getvalue() + stderr.getvalue()
+        if json_output:
+            assert "Submission cancelled." in stderr.getvalue()
+        else:
+            assert "Submission cancelled." in stdout.getvalue()
+        if json_output:
+            assert json_module.loads(stdout.getvalue()) == {"cancelled": True}
+        mock_client.submit_file.assert_not_called()
+
+    def test_json_confirmation_accepts_with_prompt_only_on_stderr(
+        self,
+        temp_pdf_file: Path,
+        sample_submission_response: dict,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Interactive JSON confirmation preserves a JSON-only stdout stream."""
+        from lighthouse_cli import submit as submit_module
+
+        stdout = _TtyStringIO()
+        stderr = io.StringIO()
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.return_value = sample_submission_response
+
+            with (
+                patch.object(submit_module.sys, "stdout", stdout),
+                patch.object(submit_module.sys, "stderr", stderr),
+                patch("builtins.input", return_value="yes") as input_mock,
+            ):
+                exit_code = submit_module.cmd_submit(
+                    course_id="44347",
+                    folder_id="789",
+                    file_path=str(temp_pdf_file),
+                    json_output=True,
+                )
+
+        assert exit_code == 0
+        parsed = json_module.loads(stdout.getvalue())
+        assert parsed["submission_id"] == 99999
+        assert "Submit to 'Assignment 1 - Signals'" not in stdout.getvalue()
+        assert "Submit to 'Assignment 1 - Signals'" in stderr.getvalue()
+        assert "Confirm [y/N]:" in stderr.getvalue()
+        input_mock.assert_called_once_with()
+        mock_client.submit_file.assert_called_once()
+
     def test_human_confirmation_decline_remains_friendly(
         self,
         temp_pdf_file: Path,
@@ -1144,23 +1774,19 @@ class TestSubmitConfirmation:
 
 
 # ---------------------------------------------------------------------------
-# Integration note tests
+# Multipart request invariants
 # ---------------------------------------------------------------------------
 
 class TestSubmissionIntegration:
-    """Notes about integration testing that requires live D2L session."""
+    """End-to-end invariants exercised with the HTTP transport mocked."""
 
-    def test_live_submission_requires_valid_session(self) -> None:
-        """VAL-SUBMIT-015: Learner POST capability needs live test with real cookies.
+    def test_multipart_boundary_is_unique(self, sample_submission_response: dict) -> None:
+        """Each submission gets a fresh multipart boundary."""
+        client, captured = _make_client_with_mock_session(200, sample_submission_response)
 
-        Live test procedure:
-        1. Ensure valid D2L session via `lighthouse auth login`
-        2. Find a dropbox folder: `lighthouse assignments <course_id>`
-        3. Run: lighthouse submit <course_id> <folder_id> --file test.pdf --yes
-        4. Expected: HTTP 200 with JSON containing submissionId
-        """
-        pass
+        client.submit_file(org_unit_id=44347, folder_id=789, file_bytes=b"x", filename="x.pdf")
+        client.submit_file(org_unit_id=44347, folder_id=789, file_bytes=b"x", filename="x.pdf")
 
-    def test_multipart_boundary_must_be_unique(self) -> None:
-        """The boundary string in multipart/mixed must be unique."""
-        pass
+        assert len(captured) == 2
+        boundaries = [request["headers"]["Content-Type"] for request in captured]
+        assert boundaries[0] != boundaries[1]

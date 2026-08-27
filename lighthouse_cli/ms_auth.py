@@ -37,7 +37,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -48,6 +48,7 @@ from lighthouse_cli.config import (
     cookie_domain_accepted,
     missing_cookie_names,
 )
+from lighthouse_cli.credential_store import CredentialStoreError
 
 # ---------------------------------------------------------------------------
 # Re-exports from sub-modules (preserve public API)
@@ -73,10 +74,14 @@ from lighthouse_cli.ms_errors import (
     MfaPendingError,
     MicrosoftSSOError,
     PlaywrightUnavailableError,
+    safe_diagnostic_text,
+    safe_upstream_text,
 )
 from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
     UserProof,
+    format_user_proof,
+    safe_proof_destination,
     _parse_user_proofs,
     _prompt_user_proof_choice as _prompt_user_proof_choice,
     _select_user_proof,
@@ -87,31 +92,144 @@ from lighthouse_cli.ms_parse import (
     _extract_error_code_and_msg,
 )
 from lighthouse_cli.ms_session import (
-    _absolute_url,
+    _absolute_url,  # noqa: F401 - preserved public re-export
     _export_session_cookies,
     _import_session_cookies,
-    _mask_phone_hint,
     _prune_stale_esctx_cookies,
+    _safe_absolute_url,
     _tenant_id_from_ms_url,
 )
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# Exact origins used by the Microsoft flow.  Do not turn these into substring
+# checks: the values come from untrusted redirects and embedded page config.
+_MICROSOFT_ALLOWED_HOSTS = frozenset({
+    "login.microsoftonline.com",
+    "login.live.com",
+    "autologon.microsoftazuread-sso.com",
+})
+_D2L_ALLOWED_HOSTS = frozenset({COOKIE_SETTING_HOST})
+_FLOW_ALLOWED_HOSTS = _MICROSOFT_ALLOWED_HOSTS | _D2L_ALLOWED_HOSTS
+_SAFE_FIELD_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
+
+
+def _trusted_url(
+    base_url: str,
+    candidate: str,
+    allowed_hosts: frozenset[str],
+    *,
+    step: str,
+    label: str,
+) -> str:
+    """Resolve an upstream URL without ever echoing it in an error."""
+    try:
+        return _safe_absolute_url(base_url, candidate, allowed_hosts)
+    except (TypeError, ValueError):
+        raise MicrosoftSSOError(
+            f"Microsoft returned an unsafe {label} endpoint.",
+            step=step,
+            recovery="Retry the sign-in; the upstream endpoint was not trusted.",
+        ) from None
+
+
+def _safe_flow_location(url: object) -> str:
+    """Render only a bounded hostname/path for the optional flow log."""
+    if not isinstance(url, str) or not url:
+        return "(no url)"
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except (TypeError, ValueError):
+        return "(no url)"
+    if not hostname or any(not char.isprintable() for char in hostname):
+        return "(no url)"
+    # ``hostname`` deliberately discards userinfo.  ``parsed.path`` already
+    # excludes literal query strings and fragments, but an upstream can encode
+    # those delimiters (and credential keys) one or more times.  Decode only a
+    # bounded number of rounds, then cut at the first query-like or sensitive
+    # marker before stripping controls and bounding the result.
+    path = parsed.path[:1024]
+    for _ in range(4):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    if any(not char.isprintable() for char in path):
+        path = ""
+    else:
+        delimiter = re.search(r"[?#]", path)
+        if delimiter:
+            path = path[:delimiter.start()]
+        marker = re.search(
+            r"(?i)(?<![a-z0-9])(?:password|passwd|passphrase|pass|otp|totp|"
+            r"token|canary|ctx|flow[\s_-]*token|cookie(?:value)?|"
+            r"session(?:val(?:ue)?|id)?|access[\s_-]*token|client[\s_-]*secret|"
+            r"api[\s_-]*key|bearer|saml[\s_-]*(?:response|request)|"
+            r"authorization)(?![a-z0-9])\s*(?:[:=/?]|\s+)",
+            path,
+        )
+        if marker:
+            path = path[:marker.start()].rstrip(";&,/")
+        path = "".join(char for char in path if char.isprintable())[:256]
+        if safe_diagnostic_text(path, fallback="") != path:
+            path = ""
+    return f"{hostname.lower()}{path}"
+
+
+def _safe_flow_field_names(field_names: object) -> list[str]:
+    """Keep only bounded HTML field identifiers, never key/value material."""
+    if not isinstance(field_names, list):
+        return ["(redacted)"]
+    safe: list[str] = []
+    redacted = False
+    for field_name in field_names:
+        if isinstance(field_name, str) and field_name in {"(redacted)", "(unparseable)"}:
+            safe.append(field_name)
+            continue
+        if not isinstance(field_name, str) or not _SAFE_FIELD_NAME_RE.fullmatch(field_name):
+            redacted = True
+            continue
+        if any(not char.isprintable() for char in field_name):
+            redacted = True
+            continue
+        safe.append(field_name)
+    if redacted:
+        safe.append("(redacted)")
+    return safe
 
 _MAX_POST_MFA_HOPS = 12
 _MAX_ENDAUTH_POLLS = 30
 # Never let an upstream-provided interval make a single MFA attempt sleep
 # indefinitely. The retry count above still bounds the total polling window.
 _MAX_ENDAUTH_POLL_SECONDS = 30.0
+# A finite wall-clock budget protects against an upstream that keeps returning
+# ``Retry``.  The poll count remains a second independent bound.
+_MAX_ENDAUTH_TOTAL_SECONDS = 120.0
+_SAFE_MFA_ENTROPY_RE = re.compile(r"[0-9]{1,3}\Z")
+_INVALID_ENTROPY_SENTINEL = "__invalid_entropy__"
 # Recovery text for errors that do not know which proof Microsoft selected.
 _MFA_RECOVERY_HINT = (
-    "Complete MFA with a supported method: use --mfa-method app --totp <code> "
-    "for an offline Authenticator code, --mfa-method sms then auth verify <code> "
-    "for a server-sent code, or --mfa-method call/push then auth verify ok for "
-    "an approval."
+    "Complete MFA with a supported method: run --mfa-method choose to select "
+    "SMS, Authenticator app, voice, or push, then use auth verify <code> for a "
+    "code or auth verify ok for an approval."
 )
 # Conservative client-side safety budget. The page's ``slMaxRetry`` belongs
 # to Microsoft's script loader, not to the session-pull form submission.
 _MAX_SSO_RELOADS = 2
+
+
+def _safe_mfa_entropy(value: object) -> str | None:
+    """Return a short number-match value, never arbitrary upstream text."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        candidate = str(value)
+    elif isinstance(value, str):
+        candidate = value
+    else:
+        return None
+    return candidate if _SAFE_MFA_ENTROPY_RE.fullmatch(candidate) else None
 
 
 # ---------------------------------------------------------------------------
@@ -232,10 +350,9 @@ def describe_page_shape(snapshot: ResponseSnapshot) -> str:
     HTML fragments or token values.
     """
     url = snapshot.url or ""
-    parsed = urlparse(url)
-    location = f"{parsed.netloc}{parsed.path}" if parsed.netloc else "(no url)"
+    location = _safe_flow_location(url)
     cfg = _extract_config_json(snapshot.html) or {}
-    pgid = str(cfg.get("pgid") or "-")
+    pgid = safe_diagnostic_text(cfg.get("pgid"), fallback="-")
     html = snapshot.html
     markers = {
         "arrUserProofs": bool(cfg.get("arrUserProofs")),
@@ -251,16 +368,53 @@ def describe_page_shape(snapshot: ResponseSnapshot) -> str:
     }
     flags = " ".join(f"{k}={int(v)}" for k, v in markers.items())
     title_match = re.search(r"<title[^>]*>([^<]{0,80})", html)
-    title = title_match.group(1).strip() if title_match else "-"
+    title = (
+        safe_diagnostic_text(title_match.group(1).strip(), fallback="-")
+        if title_match
+        else "-"
+    )
     return (
         f"page: status={snapshot.status_code} url={location} pgid={pgid} "
         f"title={title!r} {flags}"
     )
 
 
+_PAGE_SHAPE_RE = re.compile(
+    r"^page: status=\d{1,4} "
+    r"url=(?:\(no url\)|[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._~:/-]*)?) "
+    r"pgid=[A-Za-z0-9_.-]{1,80} title='[^'\r\n]{0,80}' "
+    r"arrUserProofs=[01] otc-input=[01] ProcessAuth-form=[01] "
+    r"KmsiInterrupt=[01] ConvergedTFA=[01] SAMLResponse=[01] "
+    r"sFT-present=[01] urlPost=[01] oPostParams=[01] sso_reload=[01]$"
+)
+
+
+def _safe_page_shape_message(value: object) -> str | None:
+    """Keep only the exact structural diagnostic generated by this module."""
+    if not isinstance(value, str) or not value.startswith("Unexpected response — "):
+        return None
+    summary = value.removeprefix("Unexpected response — ")
+    if not _PAGE_SHAPE_RE.fullmatch(summary):
+        return None
+    if safe_diagnostic_text(summary, fallback="") != summary:
+        return None
+    return value
+
+
 def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSSOError:
     """Build a descriptive MicrosoftSSOError from a Microsoft error code."""
-    description = MS_ERROR_CODES.get(code or 0, msg or "Unknown error")
+    # ``describe_page_shape`` is a deliberately sanitized structural
+    # diagnostic used for an unrecognized response.  Preserve only the exact
+    # shape emitted by this module; all other upstream text is filtered.
+    page_shape = _safe_page_shape_message(msg)
+    if code is None and page_shape is not None:
+        fallback_description = page_shape
+    else:
+        fallback_description = safe_upstream_text(msg, fallback="Unknown error")
+    description = MS_ERROR_CODES.get(
+        code or 0,
+        fallback_description,
+    )
     if code:
         description = f"[{code}] {description}"
 
@@ -393,7 +547,23 @@ def hiddenform_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
             step="MFA",
         )
     action = form.get("action")
-    post_url = _absolute_url(base_url, str(action)) if action else base_url
+    post_url = (
+        _trusted_url(
+            base_url,
+            str(action),
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="MFA interstitial",
+            label="hidden form",
+        )
+        if action
+        else _trusted_url(
+            base_url,
+            base_url,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="MFA interstitial",
+            label="hidden form",
+        )
+    )
     form_data: dict[str, str] = {}
     for inp in form.find_all("input"):
         name = inp.get("name")
@@ -448,13 +618,45 @@ def kmsi_transition(snapshot: ResponseSnapshot, base_url: str) -> Transition:
         kmsi_data["loginfmt"] = str(username)
 
     url_post = page_cfg.get("urlPost")
-    post_url = _absolute_url(base_url, str(url_post)) if url_post else base_url
+    post_url = (
+        _trusted_url(
+            base_url,
+            str(url_post),
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="MFA interstitial",
+            label="KMSI",
+        )
+        if url_post
+        else _trusted_url(
+            base_url,
+            base_url,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="MFA interstitial",
+            label="KMSI",
+        )
+    )
     if not kmsi_data.get(sft_name) or not kmsi_data.get("ctx"):
         soup = BeautifulSoup(snapshot.html, "html.parser")
         form = soup.find("form")
         if form:
             action = form.get("action")
-            post_url = _absolute_url(base_url, str(action)) if action else base_url
+            post_url = (
+                _trusted_url(
+                    base_url,
+                    str(action),
+                    _MICROSOFT_ALLOWED_HOSTS,
+                    step="MFA interstitial",
+                    label="KMSI",
+                )
+                if action
+                else _trusted_url(
+                    base_url,
+                    base_url,
+                    _MICROSOFT_ALLOWED_HOSTS,
+                    step="MFA interstitial",
+                    label="KMSI",
+                )
+            )
             kmsi_data = {}
             for hidden in form.find_all("input"):
                 name = hidden.get("name")
@@ -477,7 +679,10 @@ def is_sso_reload_page(snapshot: ResponseSnapshot) -> bool:
     cfg = _extract_config_json(snapshot.html) or {}
     url_post = str(cfg.get("urlPost") or "")
     params = cfg.get("oPostParams")
-    query = parse_qs(urlparse(url_post).query, keep_blank_values=True)
+    try:
+        query = parse_qs(urlparse(url_post).query, keep_blank_values=True)
+    except (TypeError, ValueError):
+        return False
     reload_values = [
         value
         for key, values in query.items()
@@ -503,27 +708,43 @@ def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
     cfg = _extract_config_json(snapshot.html) or {}
     url_post = str(cfg.get("urlPost") or "")
     params = cfg.get("oPostParams")
-    target = _absolute_url(base_url, url_post)
+    try:
+        target = _trusted_url(
+            base_url,
+            url_post,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="POST credentials",
+            label="session-pull",
+        )
+    except MicrosoftSSOError:
+        # Preserve the stable characterization without echoing the rejected
+        # upstream URL (which may contain flow or credential material).
+        raise MicrosoftSSOError(
+            "Microsoft session-pull requested an unsafe re-POST target.",
+            step="POST credentials",
+            recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
+        ) from None
     source_url = snapshot.url or base_url
 
-    def https_origin(url: str) -> tuple[str, int] | None:
-        parsed = urlparse(url)
-        try:
-            hostname = parsed.hostname
-            port = parsed.port
-        except ValueError:
-            return None
-        if (
-            parsed.scheme.lower() != "https"
-            or not hostname
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            return None
-        return hostname.lower(), port if port is not None else 443
-
-    source_origin = https_origin(source_url)
-    if source_origin is None or https_origin(target) != source_origin:
+    try:
+        trusted_source = _trusted_url(
+            base_url,
+            source_url,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="POST credentials",
+            label="session-pull source",
+        )
+    except MicrosoftSSOError:
+        raise MicrosoftSSOError(
+            "Microsoft session-pull requested an unsafe re-POST target.",
+            step="POST credentials",
+            recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
+        ) from None
+    source_parsed = urlparse(trusted_source)
+    target_parsed = urlparse(target)
+    source_origin = (source_parsed.hostname or "").lower(), source_parsed.port or 443
+    target_origin = (target_parsed.hostname or "").lower(), target_parsed.port or 443
+    if target_origin != source_origin:
         raise MicrosoftSSOError(
             "Microsoft session-pull requested an unsafe re-POST target.",
             step="POST credentials",
@@ -566,10 +787,12 @@ def classify_post_mfa(snapshot: ResponseSnapshot, base_url: str) -> Transition:
         return sso_reload_transition(snapshot, base_url)
 
     if snapshot.status_code in _REDIRECT_STATUSES and snapshot.location:
-        resolved = (
-            snapshot.location
-            if snapshot.location.startswith("http")
-            else _absolute_url(base_url, snapshot.location)
+        resolved = _trusted_url(
+            base_url,
+            snapshot.location,
+            _FLOW_ALLOWED_HOSTS,
+            step="SSO interstitial walk",
+            label="redirect",
         )
         return Transition(kind="redirect", url=resolved)
 
@@ -582,7 +805,16 @@ def classify_post_mfa(snapshot: ResponseSnapshot, base_url: str) -> Transition:
     if "SAMLRequest" in snapshot.html and "SAMLResponse" not in snapshot.html:
         url = find_saml_request_url(snapshot.html)
         if url:
-            return Transition(kind="samlrequest", url=url)
+            return Transition(
+                kind="samlrequest",
+                url=_trusted_url(
+                    base_url,
+                    url,
+                    _FLOW_ALLOWED_HOSTS,
+                    step="SSO interstitial walk",
+                    label="SAML request",
+                ),
+            )
 
     return Transition(kind="stop")
 
@@ -649,17 +881,18 @@ class MicrosoftSSOClient:
         if not self._flow_log:
             return
         try:
-            parsed = urlparse(url)
             entry: dict[str, Any] = {
                 "method": method,
-                "url": f"{parsed.netloc}{parsed.path}" if parsed.netloc else "(no url)",
+                "url": _safe_flow_location(url),
             }
             if status is not None:
                 entry["status"] = status
             if field_names is not None:
-                entry["form_fields"] = field_names  # names only, never values
+                entry["form_fields"] = _safe_flow_field_names(field_names)
             if page_shape:
-                entry["page"] = page_shape
+                safe_page = safe_diagnostic_text(page_shape, fallback="")
+                if safe_page:
+                    entry["page"] = safe_page
             with open(self._flow_log, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry) + "\n")
         except OSError:
@@ -691,17 +924,89 @@ class MicrosoftSSOClient:
         return resp
 
     def _post_with_redirects(self, url: str, **kwargs: Any) -> requests.Response:
-        """POST allowing redirects. Used for SAML ACS where the redirect chain sets cookies."""
-        resp = self._session.post(url, allow_redirects=True, timeout=self._timeout, **kwargs)
-        self._record_flow("POST*", url, resp.status_code)
-        return resp
+        """POST the D2L ACS and follow only exact-origin redirects.
+
+        ``requests`` follows 307/308 redirects with the original POST body,
+        which would leak the SAML assertion if an upstream supplied a hostile
+        Location.  Follow redirects explicitly so every destination is
+        validated before a body is transmitted.
+        """
+        current = _trusted_url(
+            BASE_URL,
+            url,
+            _D2L_ALLOWED_HOSTS,
+            step="POST SAML",
+            label="D2L ACS",
+        )
+        post_kwargs = dict(kwargs)
+        post_kwargs.pop("allow_redirects", None)
+        post_kwargs.pop("timeout", None)
+
+        def post_current() -> requests.Response:
+            data = post_kwargs.get("data")
+            if isinstance(data, dict):
+                self._record_flow("POST", current, field_names=sorted(data.keys()))
+            response = self._session.post(
+                current,
+                allow_redirects=False,
+                timeout=self._timeout,
+                **post_kwargs,
+            )
+            self._record_flow("POST", current, response.status_code)
+            return response
+
+        response = post_current()
+        post_mode = True
+        for _ in range(8):
+            if response.status_code not in _REDIRECT_STATUSES:
+                return response
+            location = response.headers.get("Location", "")
+            if not location:
+                return response
+            current = _trusted_url(
+                BASE_URL,
+                str(location),
+                _D2L_ALLOWED_HOSTS,
+                step="POST SAML",
+                label="D2L redirect",
+            )
+            d2l_cookies = {
+                cookie.name: str(cookie.value or "")
+                for cookie in self._session.cookies
+                if cookie.name.startswith("d2l")
+                and cookie_domain_accepted(cookie.domain or "")
+            }
+            if not missing_cookie_names(d2l_cookies):
+                return response
+            if response.status_code in (307, 308) and post_mode:
+                response = post_current()
+                continue
+            # 301/302/303 transitions are GETs; never carry the SAML body.
+            response = self._session.get(
+                current,
+                allow_redirects=False,
+                timeout=self._timeout,
+            )
+            self._record_flow("GET", current, response.status_code)
+            post_mode = False
+        raise MicrosoftSSOError(
+            "D2L ACS redirect limit exceeded.",
+            step="POST SAML",
+            recovery="Retry the login; the D2L sign-in redirect chain may be looping.",
+        )
 
     def _snapshot(self, resp: requests.Response) -> ResponseSnapshot:
         return ResponseSnapshot.from_response(resp)
 
     @staticmethod
     def _resolve_mfa_url(base_url: str, path: str) -> str:
-        return _absolute_url(base_url, path)
+        return _trusted_url(
+            base_url,
+            path,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="MFA",
+            label="MFA",
+        )
 
     # -- checkpointing -----------------------------------------------------------
 
@@ -803,7 +1108,21 @@ class MicrosoftSSOClient:
             clear_mfa_pending()
             return cookies
         except MicrosoftSSOError:
-            clear_mfa_pending()
+            # A rejected/expired code has no reusable EndAuth state and must
+            # be discarded.  Once EndAuth succeeds, however, the checkpoint
+            # contains the tokens needed to retry ProcessAuth/KMSI after a
+            # post-EndAuth failure; keep that checkpoint recoverable.  Reload
+            # the file here because ``_poll_end_auth`` writes those fields
+            # after the local ``pending`` snapshot was loaded.
+            resumable = False
+            with suppress(CredentialStoreError):
+                checkpoint = load_mfa_pending() or {}
+                resumable = bool(
+                    checkpoint.get("end_auth_flow")
+                    and checkpoint.get("end_auth_ctx")
+                )
+            if not resumable:
+                clear_mfa_pending()
             raise
 
     # -- auth flow ---------------------------------------------------------------
@@ -922,6 +1241,19 @@ class MicrosoftSSOClient:
         return cookies
 
     def probe_mfa_methods(self, username: str, password: str) -> MfaProbeResult:
+        """Discover MFA methods and normalize unexpected failures safely."""
+        try:
+            return self._probe_mfa_methods_impl(username, password)
+        except MicrosoftSSOError:
+            raise
+        except Exception:
+            raise MicrosoftSSOError(
+                "MFA method discovery failed.",
+                step="MFA discovery",
+                recovery="Retry the command and check your connection.",
+            ) from None
+
+    def _probe_mfa_methods_impl(self, username: str, password: str) -> MfaProbeResult:
         """Run the flow up to the MFA page and report registered methods.
 
         Stops before any code submission; never sends BeginAuth.  The result
@@ -967,10 +1299,13 @@ class MicrosoftSSOClient:
         resp = self._get(f"{BASE_URL}{LOGIN_PATH}")
         if resp.status_code in _REDIRECT_STATUSES:
             ms_url = resp.headers.get("Location", "")
-            if "microsoftonline.com" in ms_url or "login.microsoft" in ms_url:
-                return ms_url if ms_url.startswith("http") else (
-                    f"https://login.microsoftonline.com{ms_url}"
-                    if ms_url.startswith("/") else ms_url
+            if ms_url:
+                return _trusted_url(
+                    "https://login.microsoftonline.com",
+                    str(ms_url),
+                    _MICROSOFT_ALLOWED_HOSTS,
+                    step="initiate SAML",
+                    label="Microsoft redirect",
                 )
 
         # If we got a 200, the page might use a meta-refresh or JS redirect
@@ -984,11 +1319,23 @@ class MicrosoftSSOClient:
                 if isinstance(content, str):
                     m = re.search(r'url=(.+)', content, re.IGNORECASE)
                     if m:
-                        return m.group(1).strip("'\"")
+                        return _trusted_url(
+                            "https://login.microsoftonline.com",
+                            m.group(1).strip("'\""),
+                            _MICROSOFT_ALLOWED_HOSTS,
+                            step="initiate SAML",
+                            label="Microsoft meta-refresh",
+                        )
             # Look for a JavaScript redirect
             m = re.search(r'window\.location\s*=\s*["\'](.+?)["\']', resp.text)
             if m:
-                return m.group(1)
+                return _trusted_url(
+                    "https://login.microsoftonline.com",
+                    m.group(1),
+                    _MICROSOFT_ALLOWED_HOSTS,
+                    step="initiate SAML",
+                    label="Microsoft script redirect",
+                )
 
         raise MicrosoftSSOError(
             f"Failed to redirect to Microsoft SSO. Got HTTP {resp.status_code}",
@@ -998,12 +1345,33 @@ class MicrosoftSSOClient:
 
     def _step_get_ms_config(self, ms_url: str) -> dict[str, Any]:
         """Step 2: GET Microsoft login page, extract $Config JSON."""
-        resp = self._get(ms_url)
+        trusted_ms_url = _trusted_url(
+            "https://login.microsoftonline.com",
+            ms_url,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="get MS config",
+            label="Microsoft login",
+        )
+        resp = self._get(trusted_ms_url)
 
         # If we get a redirect from Microsoft (already authenticated at MS level),
         # follow it through to get the SAML response
         if resp.status_code in _REDIRECT_STATUSES:
-            return {"_redirect": True, "_location": resp.headers.get("Location", "")}
+            location = resp.headers.get("Location", "")
+            if location:
+                redirect_base = (
+                    BASE_URL
+                    if isinstance(location, str) and location.startswith("/d2l/")
+                    else trusted_ms_url
+                )
+                location = _trusted_url(
+                    redirect_base,
+                    str(location),
+                    _FLOW_ALLOWED_HOSTS,
+                    step="get MS config",
+                    label="Microsoft redirect",
+                )
+            return {"_redirect": True, "_location": location}
 
         # Microsoft login page has embedded $Config
         config = _extract_config_json(resp.text)
@@ -1016,7 +1384,17 @@ class MicrosoftSSOClient:
                 action = form.get("action", "")
                 action_str = str(action) if action else ""
                 config = {
-                    "urlPost": urljoin(resp.url, action_str) if action_str else resp.url,
+                    "urlPost": (
+                        _trusted_url(
+                            trusted_ms_url,
+                            action_str,
+                            _MICROSOFT_ALLOWED_HOSTS,
+                            step="get MS config",
+                            label="login form",
+                        )
+                        if action_str
+                        else trusted_ms_url
+                    ),
                 }
                 # Extract hidden inputs
                 for hidden in form.find_all("input", type="hidden"):
@@ -1032,7 +1410,14 @@ class MicrosoftSSOClient:
                 )
 
         # Store the MS page URL for later (needed for form action resolution)
-        config["_ms_url"] = resp.url
+        response_url = str(getattr(resp, "url", "") or trusted_ms_url)
+        config["_ms_url"] = _trusted_url(
+            trusted_ms_url,
+            response_url,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="get MS config",
+            label="Microsoft page",
+        )
         return self._hydrate_ms_flow_config(config)
 
     def _hydrate_ms_flow_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -1043,7 +1428,13 @@ class MicrosoftSSOClient:
         if not url_post:
             return config
         ms_base = str(config.get("_ms_url", "https://login.microsoftonline.com"))
-        post_page_url = _absolute_url(ms_base, str(url_post))
+        post_page_url = _trusted_url(
+            ms_base,
+            str(url_post),
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="hydrate MS config",
+            label="Microsoft flow",
+        )
         resp = self._get(post_page_url)
         if resp.status_code != 200:
             return config
@@ -1129,6 +1520,13 @@ class MicrosoftSSOClient:
                 "Missing Microsoft login page URL.",
                 step="prepare username",
             )
+        ms_url = _trusted_url(
+            "https://login.microsoftonline.com",
+            ms_url,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="prepare username",
+            label="Microsoft login",
+        )
 
         user_agent = self._session.headers.get("User-Agent", "")
         export_cookies: list[dict[str, Any]] = []
@@ -1182,7 +1580,13 @@ class MicrosoftSSOClient:
                         i19: $Config.i19
                     })"""
                 )
-                referer = page.url
+                referer = _trusted_url(
+                    ms_url,
+                    str(page.url),
+                    _MICROSOFT_ALLOWED_HOSTS,
+                    step="prepare username",
+                    label="Microsoft page",
+                )
                 pw_cookies = context.cookies()
             except Exception as exc:
                 raise MicrosoftSSOError(
@@ -1217,7 +1621,13 @@ class MicrosoftSSOClient:
         if not config.get("sFT") or not config.get("sCtx"):
             return config
 
-        referer = str(config.get("_ms_url", ""))
+        referer = _trusted_url(
+            "https://login.microsoftonline.com",
+            str(config.get("_ms_url", "")),
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="prepare username",
+            label="Microsoft referer",
+        )
         tenant_id = _tenant_id_from_ms_url(referer)
         client_request_id = str(config.get("correlationId") or "")
 
@@ -1287,7 +1697,14 @@ class MicrosoftSSOClient:
         if not gct_url or not config.get("sFT") or not config.get("sCtx"):
             return config
 
-        gct_full = _absolute_url(str(config.get("_ms_url", "")), str(gct_url))
+        gct_base = str(config.get("_ms_url", "https://login.microsoftonline.com"))
+        gct_full = _trusted_url(
+            gct_base,
+            str(gct_url),
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="prepare username",
+            label="GetCredentialType",
+        )
         payload = {
             "username": username,
             "isOtherIdpSupported": True,
@@ -1362,11 +1779,17 @@ class MicrosoftSSOClient:
         # When already authenticated at MS level, follow the redirect
         if config.get("_redirect"):
             location = config.get("_location", "")
-            if COOKIE_SETTING_HOST in location or location.startswith("/d2l/"):
-                resolved = location if location.startswith("http") else f"{BASE_URL}{location}"
-                return self._snapshot(self._get(resolved))
-            resolved = location if location.startswith("http") else urljoin(
-                "https://login.microsoftonline.com", location
+            if not isinstance(location, str) or not location:
+                raise MicrosoftSSOError(
+                    "Microsoft redirect was missing a destination.",
+                    step="POST credentials",
+                )
+            resolved = _trusted_url(
+                "https://login.microsoftonline.com",
+                location,
+                _FLOW_ALLOWED_HOSTS,
+                step="POST credentials",
+                label="Microsoft redirect",
             )
             return self._snapshot(self._get(resolved))
 
@@ -1389,8 +1812,21 @@ class MicrosoftSSOClient:
             )
 
         ms_base = str(config.get("_ms_url", "https://login.microsoftonline.com"))
-        login_url = _absolute_url(ms_base, str(url_post))
-        referer = str(config.get("_ms_url", ""))
+        url_post = config.get("urlPost", "")
+        login_url = _trusted_url(
+            ms_base,
+            str(url_post),
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="POST credentials",
+            label="login",
+        )
+        referer = _trusted_url(
+            "https://login.microsoftonline.com",
+            ms_base,
+            _MICROSOFT_ALLOWED_HOSTS,
+            step="POST credentials",
+            label="Microsoft referer",
+        )
 
         data = build_password_form_data(config, username, password)
 
@@ -1408,8 +1844,12 @@ class MicrosoftSSOClient:
         if resp.status_code in _REDIRECT_STATUSES:
             location = resp.headers.get("Location", "")
             if location:
-                resolved = location if location.startswith("http") else urljoin(
-                    login_url, location
+                resolved = _trusted_url(
+                    login_url,
+                    str(location),
+                    _FLOW_ALLOWED_HOSTS,
+                    step="POST credentials",
+                    label="Microsoft redirect",
                 )
                 return self._snapshot(self._get(resolved))
 
@@ -1430,13 +1870,13 @@ class MicrosoftSSOClient:
         print("Registered verification methods on your account:", flush=True, file=sys.stderr)
         for proof in proofs:
             marker = " (selected)" if proof.auth_method_id == selected.auth_method_id else ""
-            print(f"  • {proof.display}{marker}", flush=True, file=sys.stderr)
+            print(f"  • {format_user_proof(proof)}{marker}", flush=True, file=sys.stderr)
         hint = MFA_METHOD_INSTRUCTIONS.get(
             selected.auth_method_id,
             "Enter the verification code from the method shown above.",
         )
         if selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS and code_sent_on_begin:
-            phone = _mask_phone_hint(selected.data)
+            phone = safe_proof_destination(selected)
             print(f"\nA verification code was just sent to {phone}.", flush=True, file=sys.stderr)
             if selected.auth_method_id == MFA_AUTH_SMS:
                 print(
@@ -1585,7 +2025,10 @@ class MicrosoftSSOClient:
             ) from exc
 
         if not begin_data.get("Success"):
-            message = begin_data.get("Message") or begin_data.get("ResultValue") or "unknown error"
+            message = safe_upstream_text(
+                begin_data.get("Message") or begin_data.get("ResultValue"),
+                fallback="unknown error",
+            )
             raise MicrosoftSSOError(
                 f"MFA setup failed: {message}",
                 step="MFA BeginAuth",
@@ -1680,6 +2123,7 @@ class MicrosoftSSOClient:
     ) -> ResponseSnapshot:
         """EndAuth + ProcessAuth after a successful BeginAuth."""
         process_url = mfa_config.get("urlPost") or "/common/SAS/ProcessAuth"
+        process_endpoint = self._resolve_mfa_url(base_url, str(process_url))
 
         # Poll EndAuth until success or failure.
         flow_token, ctx, _end_data = self._poll_end_auth(
@@ -1695,7 +2139,7 @@ class MicrosoftSSOClient:
 
         # ProcessAuth: EndAuth already consumed the OTP; only pass tokens (saml2aws pattern).
         process_data = build_process_payload(mfa_config, flow_token, ctx, login_name)
-        resp = self._post(self._resolve_mfa_url(base_url, str(process_url)), data=process_data)
+        resp = self._post(process_endpoint, data=process_data)
         snap = self._snapshot(resp)
 
         page_cfg = _extract_config_json(snap.html) or {}
@@ -1711,7 +2155,7 @@ class MicrosoftSSOClient:
                 recovery="Request a new 2FA code and try again.",
             )
 
-        return self._advance_to_saml(snap, urljoin(snap.url, str(process_url)))
+        return self._advance_to_saml(snap, process_endpoint)
 
     def _poll_end_auth(
         self,
@@ -1752,6 +2196,7 @@ class MicrosoftSSOClient:
 
         end_data: dict[str, Any] = {}
         shown_entropy: str | None = None
+        deadline = time.monotonic() + _MAX_ENDAUTH_TOTAL_SECONDS
         if skip_end_auth and end_auth_flow and end_auth_ctx:
             end_flow = end_auth_flow
             end_ctx = end_auth_ctx
@@ -1759,6 +2204,12 @@ class MicrosoftSSOClient:
         for poll_index in range(_MAX_ENDAUTH_POLLS):
             if skip_end_auth:
                 break
+            if time.monotonic() >= deadline:
+                raise MicrosoftSSOError(
+                    "2FA verification timed out waiting for approval.",
+                    step="MFA",
+                    recovery="Try again and complete verification promptly.",
+                )
             end_resp = self._post(
                 self._resolve_mfa_url(base_url, str(end_url)),
                 json=build_end_payload(
@@ -1801,13 +2252,22 @@ class MicrosoftSSOClient:
                         step="MFA verify",
                         recovery="If login succeeded but cookies were not saved, run verify again once.",
                     )
+                detail = safe_upstream_text(
+                    result,
+                    fallback=(
+                        str(err_code)
+                        if isinstance(err_code, int) and not isinstance(err_code, bool)
+                        else "unknown error"
+                    ),
+                )
                 raise MicrosoftSSOError(
-                    f"2FA verification failed: {result or err_code or 'unknown'}",
+                    f"2FA verification failed: {detail}",
                     step="MFA",
                     recovery="Request a new code and try again.",
                 )
             if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
-                entropy = str(end_data.get("Entropy") or "")
+                raw_entropy = end_data.get("Entropy")
+                entropy = _safe_mfa_entropy(raw_entropy)
                 if entropy and entropy != shown_entropy:
                     shown_entropy = entropy
                     print(
@@ -1815,10 +2275,27 @@ class MicrosoftSSOClient:
                         flush=True,
                         file=sys.stderr,
                     )
+                elif (
+                    raw_entropy not in (None, "")
+                    and shown_entropy != _INVALID_ENTROPY_SENTINEL
+                ):
+                    shown_entropy = _INVALID_ENTROPY_SENTINEL
+                    print(
+                        "Approve sign-in in Authenticator to continue.",
+                        flush=True,
+                        file=sys.stderr,
+                    )
             end_flow = str(end_data.get("FlowToken") or end_flow)
             end_ctx = str(end_data.get("Ctx") or end_ctx)
             if poll_index + 1 < _MAX_ENDAUTH_POLLS:
-                time.sleep(poll_seconds)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MicrosoftSSOError(
+                        "2FA verification timed out waiting for approval.",
+                        step="MFA",
+                        recovery="Try again and complete verification promptly.",
+                    )
+                time.sleep(min(poll_seconds, remaining))
         else:
             raise MicrosoftSSOError(
                 "2FA verification timed out waiting for approval.",
@@ -1868,8 +2345,11 @@ class MicrosoftSSOClient:
             )
 
         action = form.get("action")
-        mfa_url = urljoin(mfa_snap.url, str(action)) if action else mfa_snap.url
-        mfa_url = str(mfa_url)
+        mfa_url = (
+            self._resolve_mfa_url(mfa_snap.url, str(action))
+            if action
+            else self._resolve_mfa_url(mfa_snap.url, mfa_snap.url)
+        )
 
         mfa_data: dict[str, str] = {"otc": totp_code.strip()}
         for hidden in form.find_all("input", attrs={"type": "hidden"}):
@@ -1989,7 +2469,13 @@ class MicrosoftSSOClient:
             if form:
                 action = form.get("action")
                 if action:
-                    acs_url = _absolute_url(BASE_URL, str(action))
+                    acs_url = _trusted_url(
+                        BASE_URL,
+                        str(action),
+                        _D2L_ALLOWED_HOSTS,
+                        step="POST SAML",
+                        label="D2L ACS",
+                    )
                 for inp in form.find_all("input"):
                     name = inp.get("name")
                     if name and name not in data:
@@ -1997,26 +2483,45 @@ class MicrosoftSSOClient:
 
         self._post_with_redirects(acs_url, data=data)
 
-        if any(
-            cookie.name.startswith("d2l")
-            and cookie_domain_accepted(cookie.domain or "")
+        d2l_cookies = {
+            cookie.name: str(cookie.value or "")
             for cookie in self._session.cookies
-        ):
+            if cookie.name.startswith("d2l")
+            and cookie_domain_accepted(cookie.domain or "")
+        }
+        if not missing_cookie_names(d2l_cookies):
             return
 
         # Some ACS flows set cookies only after landing on /d2l/home
         home_url = f"{BASE_URL}/d2l/home"
-        home_resp = self._session.get(
-            home_url,
-            allow_redirects=True,
-            timeout=self._timeout,
-        )
-        self._record_flow("GET", home_url, home_resp.status_code)
-        if home_resp.status_code < 400 and any(
-            cookie.name.startswith("d2l")
-            and cookie_domain_accepted(cookie.domain or "")
+        home_resp = self._get(home_url)
+        for _ in range(8):
+            if home_resp.status_code not in _REDIRECT_STATUSES:
+                break
+            location = home_resp.headers.get("Location", "")
+            if not location:
+                break
+            next_home = _trusted_url(
+                BASE_URL,
+                str(location),
+                _D2L_ALLOWED_HOSTS,
+                step="extract cookies",
+                label="D2L redirect",
+            )
+            home_resp = self._get(next_home)
+        else:
+            raise MicrosoftSSOError(
+                "D2L home redirect limit exceeded.",
+                step="extract cookies",
+                recovery="Retry the login; the D2L redirect chain may be looping.",
+            )
+        d2l_cookies = {
+            cookie.name: str(cookie.value or "")
             for cookie in self._session.cookies
-        ):
+            if cookie.name.startswith("d2l")
+            and cookie_domain_accepted(cookie.domain or "")
+        }
+        if home_resp.status_code < 400 and not missing_cookie_names(d2l_cookies):
             return
 
         raise MicrosoftSSOError(

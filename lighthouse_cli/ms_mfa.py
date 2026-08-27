@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,7 @@ from lighthouse_cli.ms_errors import (
     MFA_METHOD_CHOOSE,
     MicrosoftSSOError,
 )
+from lighthouse_cli.ms_session import _mask_phone_hint
 
 
 _PROOF_METHOD_LABELS = {
@@ -28,6 +30,9 @@ _PROOF_METHOD_LABELS = {
     MFA_AUTH_VOICE_ALT_MOBILE: "Voice call to alternate mobile",
     MFA_AUTH_VOICE_OFFICE: "Voice call to office phone",
 }
+
+_MAX_PROOF_DATA_LENGTH = 256
+_MASKED_PHONE_RE = re.compile(r"\*{3}\d{4}\Z")
 
 
 @dataclass(frozen=True)
@@ -73,15 +78,59 @@ def _parse_user_proofs(config: dict[str, Any]) -> list[UserProof]:
     return proofs
 
 
+def _proof_method_label(proof: UserProof) -> str:
+    """Return a static, safe label for a Microsoft auth method id."""
+    auth_id = proof.auth_method_id if isinstance(proof.auth_method_id, str) else ""
+    return _PROOF_METHOD_LABELS.get(
+        auth_id,
+        "Other verification method",
+    )
+
+
+def safe_auth_method_id(proof: UserProof) -> str:
+    """Return a known method id or the fixed ``other`` category."""
+    candidate = proof.auth_method_id if isinstance(proof.auth_method_id, str) else ""
+    for auth_id in _PROOF_METHOD_LABELS:
+        if candidate == auth_id:
+            return auth_id
+    return "other"
+
+
+def _masked_proof_destination(proof: UserProof) -> str | None:
+    """Return only the existing strong phone mask, never upstream display text.
+
+    ``UserProof.data`` is also upstream-controlled, so the shared phone helper
+    is accepted only when it produced its fixed ``***1234`` shape.  In
+    particular, the helper's short-input fallback is rejected rather than
+    echoed (which prevents malformed phone/email values from becoming output).
+    """
+    data = proof.data
+    if not isinstance(data, str) or not data or len(data) > _MAX_PROOF_DATA_LENGTH:
+        return None
+    digits = re.sub(r"\D", "", data)
+    if len(digits) < 4:
+        return None
+    masked = _mask_phone_hint(data)
+    return masked if _MASKED_PHONE_RE.fullmatch(masked) else None
+
+
+def safe_proof_destination(proof: UserProof) -> str:
+    """Return a fixed masked destination or a non-identifying placeholder."""
+    return _masked_proof_destination(proof) or "your phone"
+
+
 def format_user_proof(proof: UserProof) -> str:
-    """Describe an MFA proof by method and Microsoft-provided destination."""
-    method = _PROOF_METHOD_LABELS.get(proof.auth_method_id)
-    display = proof.display.strip()
-    if method is None:
-        return display or proof.auth_method_id
-    if not display or display == proof.auth_method_id:
-        return method
-    return f"{method}: {display}"
+    """Describe an MFA proof without rendering Microsoft-provided text.
+
+    ``arrUserProofs[].display`` is server-controlled and may contain a full
+    phone number, email address, or terminal-control sequence.  It is kept on
+    ``UserProof`` for flow compatibility, but all user-facing descriptions use
+    the static method label and, when possible, only a fixed last-four mask
+    derived from ``data``.
+    """
+    method = _proof_method_label(proof)
+    destination = _masked_proof_destination(proof)
+    return f"{method}: {destination}" if destination else method
 
 
 def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
@@ -123,7 +172,7 @@ def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
             for proof in proofs:
                 if proof.auth_method_id == auth_id:
                     return proof
-        available = ", ".join(p.display for p in proofs)
+        available = ", ".join(format_user_proof(proof) for proof in proofs)
         raise MicrosoftSSOError(
             f"Requested MFA method '{preference}' is not available. Options: {available}",
             step="MFA",

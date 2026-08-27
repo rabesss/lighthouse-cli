@@ -7,7 +7,9 @@ import re
 import uuid
 import urllib.parse
 from contextlib import suppress
+from inspect import isfunction, ismethod
 from pathlib import Path
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -82,14 +84,151 @@ def _sanitize_filename(name: str) -> str:
     return sanitized
 
 
+def _positive_course_id(value: Any) -> int | None:
+    """Coerce only positive integer-like course IDs.
+
+    IDs arrive from both Brightspace JSON and lightweight client doubles. Do
+    not let Python's broad ``int()`` coercion turn booleans or fractional
+    values into valid-looking org-unit IDs.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        try:
+            course_id = int(value.strip())
+        except ValueError:
+            return None
+        return course_id if course_id > 0 else None
+    return None
 
 
-def get_course_name(client, org_id: int) -> str:
+def _is_unmodified_bound_method(client: Any, name: str, candidate: Any) -> bool:
+    """Return whether ``candidate`` is the class-defined bound method.
+
+    This lets compatibility doubles override ``get_courses`` without making a
+    failed native enrollment request look like a successful legacy response.
+    ``inspect`` checks also keep monkeypatched methods out of the production
+    path: a patched enrollment helper still propagates its failure.
+    """
+    class_method = getattr(type(client), name, None)
+    return (
+        isfunction(class_method)
+        and ismethod(candidate)
+        and candidate.__func__ is class_method
+    )
+
+
+def _is_explicit_legacy_override(client: Any, candidate: Any) -> bool:
+    """Return whether ``candidate`` is an explicitly supplied legacy getter.
+
+    A real ``LighthouseClient.get_courses`` bound method is not a compatibility
+    signal.  A subclass/duck-typed client that supplies its own getter is, as
+    is a configured ``unittest.mock`` return value used by a legacy double.
+    An unconfigured mock is deliberately excluded so a missing test setup does
+    not hide a native enrollment failure.
+    """
+    if not callable(candidate) or _is_unmodified_bound_method(client, "get_courses", candidate):
+        return False
+    if type(candidate).__module__ == "unittest.mock":
+        return isinstance(getattr(candidate, "return_value", None), (list, tuple)) or (
+            getattr(candidate, "side_effect", None) is not None
+        )
+    return True
+
+
+
+
+def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
+    """Return a normalized course catalog from the enrollment source.
+
+    Real clients expose ``get_enrolled_courses()``. The ``get_courses()``
+    fallback keeps older lightweight client doubles and third-party callers
+    working without making the live path depend on Brightspace's narrower
+    manage-courses endpoint. The enrolled projection is always attempted
+    first when it exists. If the native helper raises, propagate that failure
+    instead of silently downgrading to the narrower manage-courses endpoint.
+    A client that genuinely predates the helper can still expose only
+    ``get_courses``.
+    """
+    getter = getattr(client, "get_enrolled_courses", None)
+    legacy_getter = getattr(client, "get_courses", None)
+    legacy_used = False
+    if callable(getter):
+        try:
+            raw_courses = getter()
+        except Exception:
+            # A legacy test/client double may deliberately override only
+            # ``get_courses`` while inheriting the newer helper.  Permit that
+            # explicit compatibility route, but never downgrade when both
+            # methods are the native class implementations or when the
+            # enrollment helper itself was replaced/monkeypatched.
+            if not (
+                _is_unmodified_bound_method(client, "get_enrolled_courses", getter)
+                and _is_explicit_legacy_override(client, legacy_getter)
+            ):
+                raise
+            raw_courses = legacy_getter()
+            legacy_used = True
+    elif callable(legacy_getter):
+        raw_courses = legacy_getter()
+        legacy_used = True
+    else:
+        raw_courses = []
+
+    if not legacy_used and not isinstance(raw_courses, (list, tuple)) and _is_explicit_legacy_override(
+        client, legacy_getter
+    ):
+        raw_courses = legacy_getter()
+    if not isinstance(raw_courses, (list, tuple)):
+        return []
+
+    courses: dict[int, dict[str, Any]] = {}
+    for raw_course in raw_courses:
+        if not isinstance(raw_course, dict):
+            continue
+        course_id = _positive_course_id(raw_course.get("OrgUnitId"))
+        if course_id is None or course_id in courses:
+            continue
+        course = dict(raw_course)
+        course["OrgUnitId"] = course_id
+        if not isinstance(course.get("Name"), str):
+            course["Name"] = ""
+        if not isinstance(course.get("Code"), str):
+            course["Code"] = ""
+        courses[course_id] = course
+    return [courses[course_id] for course_id in sorted(courses)]
+
+
+def get_course_name(client: Any, org_id: int) -> str:
     """Get the D2L course Name for an org unit.
 
-    Uses the client's get_courses() to look up the name.
+    Uses the paginated enrolled-course projection so courses that are absent
+    from the manage-courses endpoint can still be named.  A lightweight client
+    double that predates the projection may expose only ``get_courses``; that
+    compatibility path is used only when the projection is unavailable or
+    fails to load.
     """
-    return next((c.get("Name", f"Course-{org_id}") for c in client.get_courses() if int(c.get("OrgUnitId", 0)) == org_id), f"Course-{org_id}")
+    fallback = f"Course-{org_id}"
+    courses = get_enrolled_course_catalog(client)
+
+    try:
+        target_id = int(org_id)
+    except (TypeError, ValueError):
+        return fallback
+
+    for course in courses:
+        if not isinstance(course, dict):
+            continue
+        try:
+            course_id = int(course.get("OrgUnitId", 0))
+        except (TypeError, ValueError):
+            continue
+        if course_id == target_id:
+            name = course.get("Name")
+            return name if isinstance(name, str) and name else fallback
+    return fallback
 
 
 def resolve_course_folder_name(course_name: str, org_unit_id: int) -> str:

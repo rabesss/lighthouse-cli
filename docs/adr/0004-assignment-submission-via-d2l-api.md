@@ -25,6 +25,11 @@ Based on D2L Valence API documentation (`docs.valence.desire2learn.com/basic/fil
    - Part 1: JSON RichText object `{"Text": "...", "Html": "..."}` with `Content-Type: application/json`
    - Part 2: File binary data with `Content-Type: {mime-type}` and `Content-Disposition: form-data; name=""; filename="{filename}"`
 
+The same Brightspace RichText shape may appear in an assignment folder's
+`CustomInstructions` when folders are listed. The read path accepts either
+that object or a plain string, normalizes it to the extracted instruction
+string in JSON, and derives a short HTML-stripped preview for human output.
+
 3. **Critical format detail (from community):** The file part MUST include a `Content-Disposition` header with an empty `name` field and the actual filename:
    ```
    Content-Disposition: form-data; name=""; filename="testFile.jpg"

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,50 @@ class ManifestCorruptError(ManifestError):
 
 MANIFEST_FILENAME = ".lighthouse.json"
 REQUIRED_ENTRY_KEYS = frozenset({"sha256", "filename", "size", "downloaded_at", "last_modified"})
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+# Keep untrusted integer arithmetic bounded before deriving display metadata.
+MAX_MANIFEST_SIZE = (1 << 63) - 1
+
+
+def is_valid_sha256(value: Any) -> bool:
+    """Return whether *value* is a complete hexadecimal SHA-256 digest.
+
+    Older manifests may contain a non-empty, non-digest string in the
+    ``sha256`` field.  Those values remain loadable for compatibility and are
+    surfaced as metadata, but callers must not use them as content identity.
+    """
+    return isinstance(value, str) and bool(_SHA256_RE.fullmatch(value))
+
+
+def normalize_sha256(value: Any) -> str:
+    """Return a canonical SHA-256 digest or an empty string.
+
+    Digest values are case-insensitive on input, but normalizing accepted
+    values keeps duplicate keys and comparisons deterministic.  Unknown or
+    legacy hash text is intentionally not treated as content identity.
+    """
+    return value.lower() if is_valid_sha256(value) else ""
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    """Return whether *path* or one of its existing parents is a symlink.
+
+    Manifest paths are write targets.  Resolving a path before checking it is
+    unsafe because an existing course directory symlink would then become the
+    apparent trust root.  ``lstat`` preserves the lexical path boundary and
+    rejects symlink components before any read, mkdir, or atomic replace.
+    """
+    absolute = path.expanduser().absolute()
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            # A path that cannot be inspected is not a safe write target.
+            return True
+    return False
 
 
 def compute_sha256(content: bytes) -> str:
@@ -76,6 +121,9 @@ class Manifest:
         Raises:
             ManifestCorruptError: if file exists but is not valid JSON
         """
+        if _path_has_symlink_component(path):
+            raise ManifestCorruptError(f"Manifest at {path} is a symlinked path")
+
         if not path.exists():
             return Manifest()
 
@@ -87,7 +135,24 @@ class Manifest:
         if not isinstance(data, dict):
             raise ManifestCorruptError(f"Manifest at {path} is not a JSON object")
 
-        manifest = Manifest(data)
+        normalized_entries: dict[str, Any] = {}
+        for topic_id, entry in data.items():
+            if isinstance(entry, dict):
+                entry = dict(entry)
+                digest = normalize_sha256(entry.get("sha256"))
+                # Keep legacy records loadable, but never carry arbitrary
+                # strings forward as content identity.  A later save will
+                # persist the isolated empty value after the topic is
+                # reconciled.
+                if "sha256" in entry:
+                    entry["sha256"] = digest
+            normalized_entries[str(topic_id)] = entry
+        manifest = Manifest(normalized_entries)
+        if errors := manifest.validate():
+            detail = "; ".join(errors[:8])
+            if len(errors) > 8:
+                detail += f"; and {len(errors) - 8} more"
+            raise ManifestCorruptError(f"Invalid manifest at {path}: {detail}")
         manifest.path = path
         return manifest
 
@@ -110,15 +175,41 @@ class Manifest:
         type_map = {
             "sha256": str,
             "filename": str,
-            "size": (int, float),
             "downloaded_at": str,
             "last_modified": str,
+            "path": str,
         }
         for key, expected_type in type_map.items():
             if key in entry and not isinstance(entry[key], expected_type):
                 errors.append(
                     f"Entry for {topic_id}: {key} must be a {expected_type}"
                 )
+
+        if (
+            "sha256" in entry
+            and isinstance(entry["sha256"], str)
+            and entry["sha256"]
+            and not is_valid_sha256(entry["sha256"])
+        ):
+            errors.append(
+                f"Entry for {topic_id}: sha256 must be a 64-character hexadecimal digest"
+            )
+
+        if "size" in entry:
+            size = entry["size"]
+            invalid_size = (
+                isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 0
+                or size > MAX_MANIFEST_SIZE
+            )
+            if invalid_size:
+                errors.append(
+                    f"Entry for {topic_id}: size must be a finite non-negative number"
+                )
+
+        if "filename" in entry and isinstance(entry["filename"], str) and not entry["filename"]:
+            errors.append(f"Entry for {topic_id}: filename must not be empty")
 
         return errors
 
@@ -140,8 +231,27 @@ class Manifest:
         This ensures that a crash mid-write leaves the old manifest intact,
         never a partially-written file.
         """
+        if _path_has_symlink_component(path):
+            raise ManifestError(f"Refusing to write manifest through a symlinked path: {path}")
+        if errors := self.validate():
+            detail = "; ".join(errors[:8])
+            if len(errors) > 8:
+                detail += f"; and {len(errors) - 8} more"
+            raise ManifestError(f"Invalid manifest: {detail}")
+        entries_to_save: dict[str, Any] = {}
+        for topic_id, entry in self.entries.items():
+            if isinstance(entry, dict):
+                entry = dict(entry)
+                if "sha256" in entry:
+                    entry["sha256"] = normalize_sha256(entry.get("sha256"))
+            entries_to_save[str(topic_id)] = entry
+        self.entries = entries_to_save
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(path, json.dumps(self.entries, indent=2, ensure_ascii=False))
+        atomic_write(
+            path,
+            json.dumps(entries_to_save, indent=2, ensure_ascii=False, allow_nan=False),
+            mode=0o600,
+        )
         self.path = path
 
     # -- entry management --------------------------------------------------

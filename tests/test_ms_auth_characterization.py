@@ -21,6 +21,7 @@ import requests
 
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
+    MFA_METHOD_APP,
     MfaPendingError,
     MicrosoftSSOClient,
     MicrosoftSSOError,
@@ -399,6 +400,27 @@ class TestPasswordFlow:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err == ""
+
+    def test_probe_wraps_unexpected_transport_errors_without_echoing_details(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = MicrosoftSSOClient()
+        monkeypatch.setattr(
+            client,
+            "_probe_mfa_methods_impl",
+            lambda _username, _password: (_ for _ in ()).throw(
+                requests.ConnectionError(
+                    "POST https://login.microsoftonline.com/SAS?token=PROBE_SECRET"
+                )
+            ),
+        )
+        try:
+            with pytest.raises(MicrosoftSSOError, match="MFA method discovery failed") as exc:
+                client.probe_mfa_methods(USERNAME, PASSWORD)
+        finally:
+            client.close()
+        assert "PROBE_SECRET" not in str(exc.value)
+        assert "login.microsoftonline.com" not in str(exc.value)
 
     def test_probe_reports_converged_proofs(
         self, scripted: ScriptedSession, isolated_config: Path
@@ -970,6 +992,46 @@ class TestDeferAndResume:
         assert remaining.count(PROCESS_URL) == 1  # verify #1 only; verify #2 resumes at KMSI
         assert read_pending() is None
 
+    def test_post_endauth_microsoft_error_leaves_checkpoint_retryable(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """A ProcessAuth error after EndAuth success can be retried safely."""
+        self._defer_login(scripted)
+
+        # Verify attempt #1: EndAuth succeeds, then ProcessAuth returns a
+        # terminal Microsoft page rather than a transport exception.
+        scripted.enqueue(
+            end_success(), FakeResponse(200, html=ERROR_HTML, url=PROCESS_URL),
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="50126"):
+                client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        pending = read_pending()
+        assert pending is not None
+        assert pending.get("end_auth_flow")
+        assert pending.get("end_auth_ctx")
+
+        # Verify attempt #2 resumes at ProcessAuth and does not send EndAuth
+        # again, preserving the one-challenge semantics.
+        scripted.enqueue(
+            FakeResponse(200, html=SAML_HTML, url=PROCESS_URL),
+            FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
+        )
+        set_d2l_cookies(scripted)
+        client = make_client(scripted)
+        try:
+            cookies = client.complete_mfa_pending(TOTP_CODE)
+        finally:
+            client.close()
+
+        assert set(cookies.keys()) == set(COOKIE_NAMES)
+        assert [c for c in scripted.calls[3:] if c == ("POST", END_URL)].count(("POST", END_URL)) == 1
+        assert read_pending() is None
+
     def test_wrong_code_clears_pending(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """A rejected code clears the checkpoint (must request a fresh one)."""
         self._defer_login(scripted)
@@ -1074,9 +1136,159 @@ class TestDescribePageShape:
         out = describe_page_shape(self._snap("", url="", status=302))
         assert "status=302" in out and "(no url)" in out
 
+    def test_summary_masks_email_and_phone_pii(self):
+        from lighthouse_cli.ms_auth import describe_page_shape
+
+        snap = self._snap(
+            "<title>ravish.mitmpl2024@learner.manipal.edu +91 9876543210</title>",
+            url="https://login.microsoftonline.com/user/ravish%40learner.manipal.edu",
+        )
+        out = describe_page_shape(snap)
+
+        assert "ravish.mitmpl2024@learner.manipal.edu" not in out
+        assert "9876543210" not in out
+        assert "url=login.microsoftonline.com" in out
+
 
 class TestFlowRecorder:
     """LIGHTHOUSE_DEBUG_FLOW writes sanitized step records only."""
+
+    def test_direct_record_call_strips_userinfo_query_fragment_and_controls(
+        self, tmp_path
+    ) -> None:
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow-malicious.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        try:
+            client._record_flow(
+                "GET",
+                "https://user:PASSWORD_SENTINEL@login.microsoftonline.com/"
+                "path\x00\nwith-control?token=TOKEN_SENTINEL#fragment",
+                200,
+            )
+        finally:
+            client.close()
+
+        lines = log.read_text().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["url"] == "login.microsoftonline.com"
+        assert "PASSWORD_SENTINEL" not in lines[0]
+        assert "TOKEN_SENTINEL" not in lines[0]
+        assert "fragment" not in lines[0]
+
+    def test_direct_record_call_bounds_printable_path(self, tmp_path) -> None:
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow-long.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        try:
+            client._record_flow(
+                "GET",
+                "https://login.microsoftonline.com/" + ("x" * 1000),
+                200,
+            )
+        finally:
+            client.close()
+
+        record = json.loads(log.read_text())
+        assert len(record["url"].split("/", 1)[1]) == 255
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("/foo%3Ftoken=FLOW_SECRET", "login.microsoftonline.com/foo"),
+            ("/foo%3Fpassword=PASSWORD_SECRET", "login.microsoftonline.com/foo"),
+            (
+                "/foo%25253Ftoken%25253DFLOW_SECRET",
+                "login.microsoftonline.com/foo",
+            ),
+            (
+                "/foo%26flow_token%3DFLOW_SECRET",
+                "login.microsoftonline.com/foo",
+            ),
+            (
+                "/foo%3Fheaders%3D%7B%22Cookie%22%3A%22COOKIE_SECRET%22%7D",
+                "login.microsoftonline.com/foo",
+            ),
+        ],
+    )
+    def test_direct_record_call_removes_nested_encoded_secret_paths(
+        self, tmp_path, path: str, expected: str
+    ) -> None:
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow-encoded.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        try:
+            client._record_flow("GET", f"https://login.microsoftonline.com{path}", 200)
+        finally:
+            client.close()
+
+        record = json.loads(log.read_text())
+        assert record["url"] == expected
+        raw = log.read_text()
+        assert "FLOW_SECRET" not in raw
+        assert "PASSWORD_SECRET" not in raw
+        assert "COOKIE_SECRET" not in raw
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/user/ravish%40learner.manipal.edu",
+            "/phone/%2B919876543210",
+            "/user/ravish%40learner.manipal.edu%3Ftoken=SECRET",
+        ],
+    )
+    def test_direct_record_call_does_not_log_email_or_phone_pii(
+        self, tmp_path, path: str
+    ) -> None:
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow-pii.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        try:
+            client._record_flow("GET", f"https://login.microsoftonline.com{path}", 200)
+        finally:
+            client.close()
+
+        record = json.loads(log.read_text())
+        assert record["url"] == "login.microsoftonline.com"
+        raw = log.read_text()
+        assert "ravish" not in raw
+        assert "manipal.edu" not in raw
+        assert "9876543210" not in raw
+        assert "SECRET" not in raw
+
+    def test_direct_record_call_redacts_untrusted_field_names(self, tmp_path) -> None:
+        from lighthouse_cli.ms_auth import MicrosoftSSOClient
+
+        log = tmp_path / "flow-fields.jsonl"
+        client = MicrosoftSSOClient(flow_log=str(log))
+        try:
+            client._record_flow(
+                "POST",
+                "https://login.microsoftonline.com/common/login",
+                field_names=[
+                    "password=SECRET_SENTINEL",
+                    "password:OTHER_SECRET",
+                    "foo secret SECRET",
+                    "ravish@example.com",
+                    "passwd",
+                    "field\nwith-control",
+                ],
+            )
+        finally:
+            client.close()
+
+        record = json.loads(log.read_text())
+        assert record["form_fields"] == ["passwd", "(redacted)"]
+        raw = log.read_text()
+        assert "SECRET_SENTINEL" not in raw
+        assert "OTHER_SECRET" not in raw
+        assert "ravish@example.com" not in raw
+        assert "with-control" not in raw
 
     def test_records_are_sanitized(self, tmp_path):
         from lighthouse_cli.ms_auth import MicrosoftSSOClient
@@ -1293,6 +1505,182 @@ class TestSsoReloadInterstitial:
         )
         with pytest.raises(MicrosoftSSOError, match="unsafe re-POST target"):
             sso_reload_transition(self._snap(html), CREDS_POST_URL)
+
+    @pytest.mark.parametrize(
+        "url_post",
+        [
+            "//evil.example/login?sso_reload=True",
+            "http://login.microsoftonline.com/common/login?sso_reload=True",
+            "https://login.microsoftonline.com.evil.example/common/login?sso_reload=True",
+            "https://user:password@login.microsoftonline.com/common/login?sso_reload=True",
+            "https://login.microsoftonline.com:8443/common/login?sso_reload=True",
+        ],
+    )
+    def test_reload_rejects_unsafe_url_shapes_without_echoing_target(
+        self, url_post: str
+    ) -> None:
+        from lighthouse_cli.ms_auth import sso_reload_transition
+
+        html = sso_reload_html(url_post=url_post)
+        with pytest.raises(MicrosoftSSOError, match="unsafe re-POST target") as exc:
+            sso_reload_transition(self._snap(html), CREDS_POST_URL)
+        assert url_post not in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            "//evil.example/login",
+            "http://login.microsoftonline.com/common/login",
+            "https://login.microsoftonline.com.evil.example/common/login",
+            "https://user:password@login.microsoftonline.com/common/login",
+            "https://login.microsoftonline.com:8443/common/login",
+        ],
+    )
+    def test_initial_redirect_rejects_unsafe_url_before_next_request(
+        self,
+        scripted: ScriptedSession,
+        location: str,
+    ) -> None:
+        scripted.enqueue(
+            FakeResponse(
+                302,
+                url=LOGIN_INIT_URL,
+                headers={"Location": location},
+            )
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe Microsoft redirect") as exc:
+                client._step_initiate_saml()
+        finally:
+            client.close()
+        assert location not in str(exc.value)
+        assert scripted.calls == [("GET", LOGIN_INIT_URL)]
+
+    @pytest.mark.parametrize(
+        "url_post",
+        [
+            "//evil.example/common/login",
+            "http://login.microsoftonline.com/common/login",
+            "https://login.microsoftonline.com.evil.example/common/login",
+            "https://user:password@login.microsoftonline.com/common/login",
+            "https://login.microsoftonline.com:8443/common/login",
+        ],
+    )
+    def test_password_post_rejects_unsafe_config_endpoint(
+        self, scripted: ScriptedSession, url_post: str
+    ) -> None:
+        client = make_client(scripted)
+        config = {
+            "sFT": "FLOW-TOKEN",
+            "sCtx": "CTX-TOKEN",
+            "urlPost": url_post,
+            "_ms_url": MS_SSO_URL,
+        }
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe login endpoint") as exc:
+                client._step_post_credentials(config, USERNAME, PASSWORD)
+        finally:
+            client.close()
+        assert url_post not in str(exc.value)
+        assert scripted.calls == []
+
+    def test_password_redirect_rejects_unsafe_location_before_get(
+        self, scripted: ScriptedSession
+    ) -> None:
+        hostile = "https://login.microsoftonline.com.evil.example/after"
+        scripted.enqueue(
+            FakeResponse(
+                302,
+                url=CREDS_POST_URL,
+                headers={"Location": hostile},
+            )
+        )
+        client = make_client(scripted)
+        config = {
+            "sFT": "FLOW-TOKEN",
+            "sCtx": "CTX-TOKEN",
+            "urlPost": CREDS_POST_URL,
+            "_ms_url": MS_SSO_URL,
+        }
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe Microsoft redirect") as exc:
+                client._step_post_credentials(config, USERNAME, PASSWORD)
+        finally:
+            client.close()
+        assert hostile not in str(exc.value)
+        assert scripted.calls == [("POST", CREDS_POST_URL)]
+
+    @pytest.mark.parametrize("field", ["urlBeginAuth", "urlEndAuth", "urlPost"])
+    def test_mfa_json_endpoint_rejected_before_mfa_post(
+        self, scripted: ScriptedSession, field: str
+    ) -> None:
+        from lighthouse_cli.ms_auth import ResponseSnapshot
+
+        hostile = "https://evil.example/common/SAS/endpoint"
+        html = mfa_html().replace(
+            f'"{field}": "{BEGIN_URL if field == "urlBeginAuth" else END_URL if field == "urlEndAuth" else PROCESS_URL}"',
+            f'"{field}": "{hostile}"',
+        )
+        if field != "urlBeginAuth":
+            scripted.enqueue(begin_success())
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe MFA endpoint") as exc:
+                client._step_handle_mfa(
+                    ResponseSnapshot(
+                        url=MFA_PAGE_URL,
+                        status_code=200,
+                        location="",
+                        html=html,
+                    ),
+                    {"sFT": "FLOW", "sCtx": "CTX"},
+                    TOTP_CODE,
+                    mfa_method=MFA_METHOD_APP,
+                )
+        finally:
+            client.close()
+        assert hostile not in str(exc.value)
+        expected_calls = [] if field == "urlBeginAuth" else [("POST", BEGIN_URL)]
+        assert scripted.calls == expected_calls
+
+    def test_saml_form_action_rejected_before_assertion_post(
+        self, scripted: ScriptedSession
+    ) -> None:
+        hostile = "https://evil.example/d2l/lp/auth/saml/consume"
+        html = (
+            '<form method="POST" action="'
+            + hostile
+            + '"><input name="RelayState" value="state"></form>'
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe D2L ACS endpoint") as exc:
+                client._step_post_saml(SAML_TOKEN, html)
+        finally:
+            client.close()
+        assert hostile not in str(exc.value)
+        assert scripted.calls == []
+
+    def test_saml_307_redirect_rejected_before_assertion_repost(
+        self, scripted: ScriptedSession
+    ) -> None:
+        hostile = "https://evil.example/d2l/home"
+        scripted.enqueue(
+            FakeResponse(
+                307,
+                url=ACS_URL,
+                headers={"Location": hostile},
+            )
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe D2L redirect") as exc:
+                client._step_post_saml(SAML_TOKEN)
+        finally:
+            client.close()
+        assert hostile not in str(exc.value)
+        assert scripted.calls == [("POST", ACS_URL)]
 
     def test_explicit_default_https_port_is_same_origin(self) -> None:
         from lighthouse_cli.ms_auth import sso_reload_transition

@@ -20,7 +20,7 @@ from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _run_and_render_multi
 from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest, compute_sha256 as manifest_compute_sha256
-from lighthouse_cli.sync_engine import Mode, flatten_all_topics, run_course
+from lighthouse_cli.sync_engine import Mode, build_entry, flatten_all_topics, run_course
 from lighthouse_cli.utils import atomic_write as shared_atomic_write
 
 ORG_ID = 44347
@@ -133,7 +133,7 @@ def _std_toc(cid: int) -> dict:
     return _toc((cid * 10, "f.pdf", "File", LM_NEW))
 
 
-def _mentry(lm: str = LM_OLD, filename: str = "file.pdf", sha: str = "abc123", size: int = 1024) -> dict:
+def _mentry(lm: str = LM_OLD, filename: str = "file.pdf", sha: str = manifest_compute_sha256(b"content"), size: int = 1024) -> dict:
     return {"sha256": sha, "filename": filename, "size": size,
             "downloaded_at": "2026-01-01T00:00:00Z", "last_modified": lm}
 
@@ -173,6 +173,59 @@ def root(tmp_path: Path) -> Path:
 # SYNC decisions
 # ---------------------------------------------------------------------------
 
+class TestBuildEntry:
+    """Entry metadata keeps manifest hashes usable without rehashing bytes."""
+
+    def test_manifest_hash_is_reused_without_explicit_hash(self):
+        entry = build_entry(
+            "100", "file.pdf", "Mod/file.pdf",
+            {"size": 7, "sha256": "a" * 64},
+        )
+
+        assert entry["sha256"] == "a" * 64
+
+    def test_bytes_hash_is_computed_once(self):
+        with patch("lighthouse_cli.sync_engine.compute_sha256", wraps=manifest_compute_sha256) as hash_fn:
+            entry = build_entry("100", "file.pdf", "Mod/file.pdf", b"content")
+
+        assert entry["sha256"] == manifest_compute_sha256(b"content")
+        assert hash_fn.call_count == 1
+
+    @pytest.mark.parametrize("manifest_hash", [None, 12345, ["not-a-hash"]])
+    def test_non_string_manifest_hash_is_empty(self, manifest_hash):
+        entry = build_entry(
+            "100", "file.pdf", "Mod/file.pdf",
+            {"size": 7, "sha256": manifest_hash},
+        )
+
+        assert entry["sha256"] == ""
+
+    def test_arbitrary_manifest_hash_is_empty(self):
+        entry = build_entry(
+            "100", "file.pdf", "Mod/file.pdf",
+            {"size": 7, "sha256": "not-a-sha256"},
+        )
+
+        assert entry["sha256"] == ""
+
+    def test_uppercase_manifest_hash_is_normalized(self):
+        entry = build_entry(
+            "100", "file.pdf", "Mod/file.pdf",
+            {"size": 7, "sha256": "A" * 64},
+        )
+
+        assert entry["sha256"] == "a" * 64
+
+    @pytest.mark.parametrize("size", ["seven", float("nan"), 10**1000])
+    def test_malformed_manifest_size_is_safe(self, size):
+        entry = build_entry(
+            "100", "file.pdf", "Mod/file.pdf",
+            {"size": size, "sha256": "a" * 64},
+        )
+
+        assert entry["size"] == 0
+        assert entry["size_kb"] == 0
+
 class TestSyncDecisions:
     """Incremental decisions: skip / update / download / orphan / dedup."""
 
@@ -187,6 +240,7 @@ class TestSyncDecisions:
         _materialize(course_dir, "Mod/file.pdf", b"content")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert [e["topic_id"] for e in result["skipped"]] == ["100"]
+        assert result["skipped"][0]["sha256"] == manifest_compute_sha256(b"content")
         assert result["downloaded"] == [] and result["updated"] == []
         assert not client.body_calls()
         assert result["saved"] is False, "skip-only run must not rewrite the manifest"
@@ -212,6 +266,327 @@ class TestSyncDecisions:
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert [e["topic_id"] for e in result["downloaded"]] == ["300"]
         assert result["saved"] is True
+
+    @pytest.mark.parametrize("mode", [Mode.DOWNLOAD, Mode.FORCE], ids=["download", "force"])
+    def test_duplicate_topic_ids_use_first_occurrence_once(self, root, mode):
+        """Duplicate TOC IDs must not fetch, write, or overwrite twice."""
+        toc = {"Modules": [
+            {
+                "ModuleId": 1,
+                "Title": "M1",
+                "Modules": [],
+                "Topics": [{
+                    "TopicId": 1,
+                    "Title": "first.pdf",
+                    "TypeIdentifier": "File",
+                    "Url": "",
+                    "LastModifiedDate": LM_NEW,
+                }],
+            },
+            {
+                "ModuleId": 2,
+                "Title": "M2",
+                "Modules": [],
+                "Topics": [{
+                    "TopicId": 1,
+                    "Title": "second.pdf",
+                    "TypeIdentifier": "File",
+                    "Url": "",
+                    "LastModifiedDate": LM_NEW,
+                }],
+            },
+        ]}
+        client = FakeClient(
+            tocs={ORG_ID: toc},
+            names={ORG_ID: "Test"},
+            files={1: (b"first", "first.pdf")},
+        )
+
+        initial = run_course(client, ORG_ID, root, mode=mode)
+
+        assert initial["topic_count"] == 1
+        assert [entry["topic_id"] for entry in initial["downloaded"]] == ["1"]
+        assert initial["downloaded"][0]["path"] == "M1/first.pdf"
+        assert client.body_calls() == [("file", ORG_ID, 1)]
+        manifest_path = root / "Test-44347" / MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text())
+        assert list(manifest) == ["1"]
+        assert manifest["1"]["filename"] == "first.pdf"
+        assert not (root / "Test-44347" / "M2").exists()
+
+        synced = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [entry["topic_id"] for entry in synced["skipped"]] == ["1"]
+        assert synced["downloaded"] == [] and synced["updated"] == []
+        assert synced["orphaned"] == []
+        assert client.body_calls() == [("file", ORG_ID, 1)]
+
+    def test_malformed_toc_records_are_isolated_from_valid_siblings(self, root):
+        """Malformed modules/topics cannot abort valid sibling downloads."""
+        marker = "NESTED_TOPIC_SENTINEL"
+        toc = {"Modules": [
+            None,
+            "not-a-module",
+            {"Title": {"nested": marker}, "Modules": [], "Topics": []},
+            {
+                "Title": "Good",
+                "Modules": [],
+                "Topics": [
+                    None,
+                    "not-a-topic",
+                    {
+                        "TopicId": 2,
+                        "Title": {"nested": marker},
+                        "TypeIdentifier": "File",
+                        "Url": "",
+                        "LastModifiedDate": LM_NEW,
+                    },
+                    {
+                        "TopicId": 1,
+                        "Title": "good.pdf",
+                        "TypeIdentifier": "File",
+                        "Url": "",
+                        "LastModifiedDate": LM_NEW,
+                    },
+                ],
+            },
+        ]}
+        client = FakeClient(
+            tocs={ORG_ID: toc},
+            names={ORG_ID: "Test"},
+            files={1: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["topic_count"] == 1
+        assert [entry["topic_id"] for entry in result["downloaded"]] == ["1"]
+        assert client.body_calls() == [("file", ORG_ID, 1)]
+        assert result["errors"] and all(
+            error["type"] == "topic_data" for error in result["errors"]
+        )
+        assert marker not in json.dumps(result["errors"])
+        manifest = json.loads((root / "Test-44347" / MANIFEST_FILENAME).read_text())
+        assert list(manifest) == ["1"]
+
+    def test_deep_toc_walk_preserves_valid_siblings(self, root):
+        """A deeply nested module chain cannot exhaust the Python call stack."""
+        deep_root = {"Title": "Deep0", "Modules": [], "Topics": []}
+        cursor = deep_root
+        for depth in range(1, 1101):
+            child = {"Title": f"Deep{depth}", "Modules": [], "Topics": []}
+            cursor["Modules"] = [child]
+            cursor = child
+        good_module = {
+            "Title": "Good",
+            "Modules": [],
+            "Topics": [{
+                "TopicId": 1,
+                "Title": "good.pdf",
+                "TypeIdentifier": "File",
+                "Url": "",
+                "LastModifiedDate": LM_NEW,
+            }],
+        }
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": [deep_root, good_module]}},
+            names={ORG_ID: "Test"},
+            files={1: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["errors"] == []
+        assert [entry["topic_id"] for entry in result["downloaded"]] == ["1"]
+        assert client.body_calls() == [("file", ORG_ID, 1)]
+
+    def test_cyclic_toc_branch_is_bounded_and_siblings_continue(self, root):
+        """A self-referential module is reported without blocking siblings."""
+        cycle = {"Title": "Cycle", "Modules": [], "Topics": []}
+        cycle["Modules"] = [cycle]
+        good_module = {
+            "Title": "Good",
+            "Modules": [],
+            "Topics": [{
+                "TopicId": 1,
+                "Title": "good.pdf",
+                "TypeIdentifier": "File",
+                "Url": "",
+                "LastModifiedDate": LM_NEW,
+            }],
+        }
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": [cycle, good_module]}},
+            names={ORG_ID: "Test"},
+            files={1: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [entry["topic_id"] for entry in result["downloaded"]] == ["1"]
+        assert client.body_calls() == [("file", ORG_ID, 1)]
+        assert any(
+            error["type"] == "topic_data"
+            and error["error"] == "Content TOC exceeded safe traversal limits."
+            for error in result["errors"]
+        )
+        assert "Cycle" not in json.dumps(result["errors"])
+
+    @pytest.mark.parametrize(
+        "invalid_id",
+        [True, 0, -1, 1.5, "123", "../topic-id\x1b"],
+        ids=["bool", "zero", "negative", "float", "numeric-string", "path-control"],
+    )
+    def test_invalid_topic_ids_are_rejected_and_valid_siblings_continue(self, root, invalid_id):
+        """Malformed TOC IDs cannot trigger a request or local write."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (invalid_id, "bad.pdf", "File", LM_NEW),
+                (100, "good.pdf", "File", LM_NEW),
+            )},
+            names={ORG_ID: "Test"},
+            files={100: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["topic_count"] == 1
+        assert [entry["topic_id"] for entry in result["downloaded"]] == ["100"]
+        assert [call for call in client.calls if call[0] == "file"] == [
+            ("file", ORG_ID, 100),
+        ]
+        assert [error["type"] for error in result["errors"]] == ["topic_data"]
+        assert all(str(invalid_id) not in json.dumps(error) for error in result["errors"])
+        manifest = json.loads((root / "Test-44347" / MANIFEST_FILENAME).read_text())
+        assert list(manifest) == ["100"]
+
+    @pytest.mark.parametrize(
+        "invalid_last_modified",
+        [{"unexpected": "object"}, ["unexpected"], "bad\nvalue", "x" * 257],
+        ids=["dict", "list", "control", "overlong"],
+    )
+    def test_invalid_last_modified_is_rejected_without_partial_topic_write(
+        self, root, invalid_last_modified,
+    ):
+        """Malformed TOC metadata cannot fetch or mutate a topic entry."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (200, "bad.pdf", "File", invalid_last_modified),
+                (100, "good.pdf", "File", LM_NEW),
+            )},
+            names={ORG_ID: "Test"},
+            files={100: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["topic_count"] == 1
+        assert [entry["topic_id"] for entry in result["downloaded"]] == ["100"]
+        assert [call for call in client.calls if call[0] == "file"] == [
+            ("file", ORG_ID, 100),
+        ]
+        assert [error["type"] for error in result["errors"]] == ["topic_data"]
+        assert all(str(invalid_last_modified) not in json.dumps(error) for error in result["errors"])
+        manifest = json.loads((root / "Test-44347" / MANIFEST_FILENAME).read_text())
+        assert list(manifest) == ["100"]
+        assert not (root / "Test-44347" / "Mod" / "bad.pdf").exists()
+
+    def test_missing_last_modified_normalizes_to_empty(self, root):
+        """Older or incomplete TOCs may omit LastModifiedDate."""
+        toc = _toc((100, "good.pdf", "File", LM_NEW))
+        del toc["Modules"][0]["Topics"][0]["LastModifiedDate"]
+        client = FakeClient(
+            tocs={ORG_ID: toc},
+            names={ORG_ID: "Test"},
+            files={100: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["errors"] == []
+        manifest = json.loads((root / "Test-44347" / MANIFEST_FILENAME).read_text())
+        assert manifest["100"]["last_modified"] == ""
+
+    @pytest.mark.parametrize(
+        "invalid_content",
+        ["text body", bytearray(b"bytearray body"), object()],
+        ids=["string", "bytearray", "object"],
+    )
+    def test_non_bytes_topic_body_is_rejected_without_partial_write(self, root, invalid_content):
+        """Only byte bodies may reach filesystem writes or manifest hashing."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (200, "bad.pdf", "File", LM_NEW),
+                (100, "good.pdf", "File", LM_NEW),
+            )},
+            names={ORG_ID: "Test"},
+            files={
+                200: (invalid_content, "bad.pdf"),
+                100: (b"good", "good.pdf"),
+            },
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [entry["topic_id"] for entry in result["downloaded"]] == ["100"]
+        assert client.body_calls() == [
+            ("file", ORG_ID, 200),
+            ("file", ORG_ID, 100),
+        ]
+        assert [error["type"] for error in result["errors"]] == ["topic_data"]
+        assert result["errors"][0]["error"] == "Topic record has an invalid identifier."
+        manifest = json.loads((root / "Test-44347" / MANIFEST_FILENAME).read_text())
+        assert list(manifest) == ["100"]
+        assert not (root / "Test-44347" / "Mod" / "bad.pdf").exists()
+
+    def test_secret_topic_labels_use_safe_filenames_and_projections(self, root):
+        """TOC and server filenames containing secret-shaped labels stay hidden."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc((200, "password=TOPIC_TITLE_SENTINEL", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={200: (b"body", "token=FILENAME_SECRET_SENTINEL\x1b")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["downloaded"][0]["filename"] == "topic_200"
+        assert result["downloaded"][0]["path"] == "Mod/topic_200"
+        assert client.body_calls() == [("file", ORG_ID, 200)]
+        rendered = json.dumps(result, default=str)
+        assert "TOPIC_TITLE_SENTINEL" not in rendered
+        assert "FILENAME_SECRET_SENTINEL" not in rendered
+        course_dir = root / "Test-44347"
+        assert (course_dir / "Mod" / "topic_200").read_bytes() == b"body"
+        assert not (course_dir / "Mod" / "token=FILENAME_SECRET_SENTINEL\x1b").exists()
+
+    @pytest.mark.parametrize(
+        "bad_name",
+        [
+            None,
+            {"nested": "COURSE_NAME_SECRET_SENTINEL"},
+            ["nested"],
+            "Course\nNAME_CONTROL_SENTINEL",
+            "x" * 257,
+            "password=COURSE_NAME_SECRET_SENTINEL",
+        ],
+        ids=["none", "dict", "list", "control", "overlong", "secret-shaped"],
+    )
+    def test_malformed_course_name_uses_fixed_fallback(self, root, bad_name):
+        """Untrusted enrollment names cannot reach paths or result output."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "good.pdf", "File", LM_NEW))},
+            names={ORG_ID: bad_name},
+            files={100: (b"good", "good.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["course_name"] == "Course-44347"
+        assert result["dest"] == root / "Course-44347-44347"
+        assert result["downloaded"]
+        rendered = json.dumps(result, default=str)
+        assert "COURSE_NAME_SECRET_SENTINEL" not in rendered
+        assert "NAME_CONTROL_SENTINEL" not in rendered
 
     def test_download_hashes_body_once_and_reuses_manifest_entry(self, root):
         client = FakeClient(
@@ -256,6 +631,28 @@ class TestSyncDecisions:
         assert [e["topic_id"] for e in result["updated"]] == ["100"]
         assert (course_dir / "Mod" / "file.pdf").read_bytes() == b"content"
 
+    def test_matching_timestamp_redownloads_same_size_changed_bytes(self, root):
+        old_content = b"old!"
+        new_content = b"new!"
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+            files={100: (new_content, "file.pdf")},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {
+            "100": _mentry(
+                size=len(old_content),
+                sha=manifest_compute_sha256(old_content),
+            ),
+        })
+        _materialize(course_dir, "Mod/file.pdf", new_content)
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [e["topic_id"] for e in result["updated"]] == ["100"]
+        assert (course_dir / "Mod" / "file.pdf").read_bytes() == new_content
+
     def test_matching_timestamp_redownloads_when_local_file_is_symlink(self, root):
         client = FakeClient(
             tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
@@ -272,9 +669,9 @@ class TestSyncDecisions:
 
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
 
-        assert [e["topic_id"] for e in result["updated"]] == ["100"]
-        assert not local_file.is_symlink()
-        assert local_file.read_bytes() == b"content"
+        assert result["updated"] == []
+        assert result["errors"] and "symlink" in result["errors"][0]["error"]
+        assert local_file.is_symlink()
         assert symlink_target.read_bytes() == b"content"
 
     def test_topic_write_uses_atomic_0600(self, root):
@@ -305,6 +702,7 @@ class TestSyncDecisions:
         orphan_file.write_bytes(b"old")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert [e["topic_id"] for e in result["orphaned"]] == ["200"]
+        assert result["orphaned"][0]["sha256"] == manifest_compute_sha256(b"content")
         assert orphan_file.exists(), "orphaned file must not be deleted"
 
     def test_orphaned_output_is_sorted_by_manifest_key(self, root):
@@ -324,6 +722,60 @@ class TestSyncDecisions:
 
         assert [e["topic_id"] for e in result["orphaned"]] == ["10", "20"]
 
+    def test_unselected_live_topics_are_not_reported_as_orphaned(self, root):
+        """The type filter controls downloads, not TOC liveness."""
+        file_content = b"file"
+        html_content = b"<p>html</p>"
+        client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (100, "file.pdf", "File", LM_OLD),
+                (200, "page.html", "HTML", LM_OLD),
+            )},
+            names={ORG_ID: "Test"},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {
+            "100": _mentry(
+                filename="file.pdf",
+                sha=manifest_compute_sha256(file_content),
+                size=len(file_content),
+            ),
+            "200": _mentry(
+                filename="page.html",
+                sha=manifest_compute_sha256(html_content),
+                size=len(html_content),
+            ),
+        })
+        _materialize(course_dir, "Mod/page.html", html_content)
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC, types="html")
+
+        assert [entry["topic_id"] for entry in result["skipped"]] == ["200"]
+        assert result["orphaned"] == []
+        assert client.body_calls() == []
+
+    def test_empty_toc_reconciles_stale_manifest_entries(self, root):
+        """An empty live TOC still lets SYNC report stale manifest entries."""
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": []}},
+            names={ORG_ID: "Test"},
+        )
+        course_dir = root / "Test-44347"
+        manifest_path = _seed_manifest(course_dir, {
+            "200": _mentry(filename="gone.pdf"),
+            "assignment_7_8": _mentry(filename="hw.pdf"),
+        })
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["empty"] is True
+        assert [entry["topic_id"] for entry in result["orphaned"]] == [
+            "200", "assignment_7_8",
+        ]
+        assert result["manifest_total"] == 2
+        assert json.loads(manifest_path.read_text())
+        assert client.body_calls() == []
+
     def test_corrupt_manifest_warns_records_and_recovers(self, root):
         client = FakeClient(
             tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
@@ -333,7 +785,7 @@ class TestSyncDecisions:
         _seed_manifest(root / "Test-44347", {})
         (root / "Test-44347" / MANIFEST_FILENAME).write_text("not valid json{")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
-        assert len(result["warnings"]) == 1 and "Corrupt manifest" in result["warnings"][0]
+        assert result["warnings"] == ["Corrupt manifest; performing full sync."]
         assert any(e.get("type") == "manifest_corrupt" for e in result["errors"])
         assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
         assert result["saved"] is True
@@ -468,6 +920,125 @@ class TestAssignmentContract:
             attachments={(ORG_ID, 8): (b"hw bytes", "hw.pdf")},
         )
 
+    @pytest.mark.parametrize(
+        ("assignment_id", "expected_downloads"),
+        [(7, 1), (0, 0), (-1, 0)],
+    )
+    def test_assignment_selector_stays_scoped_when_engine_called_directly(
+        self, root, assignment_id, expected_downloads
+    ):
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": []}},
+            names={ORG_ID: "Test"},
+            folders={
+                ORG_ID: [{
+                    "Id": 7,
+                    "Name": "HW1",
+                    "Attachments": [{
+                        "Id": 8,
+                        "FileName": "hw.pdf",
+                        "Size": 10,
+                        "Type": "File",
+                    }],
+                }],
+            },
+            attachments={(ORG_ID, 8): (b"hw bytes", "hw.pdf")},
+        )
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.DOWNLOAD,
+            include_assignments=True,
+            assignment_id=assignment_id,
+        )
+
+        assert len(result["assignments"]["downloaded"]) == expected_downloads
+        attachment_calls = [call for call in client.calls if call[0] == "attachment"]
+        assert len(attachment_calls) == expected_downloads
+
+    def test_missing_assignment_selector_does_not_create_course_directory(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": []}},
+            names={ORG_ID: "Test"},
+            folders={ORG_ID: [{
+                "Id": 7,
+                "Name": "HW1",
+                "Attachments": [{"Id": 8, "FileName": "hw.pdf", "Size": 10, "Type": "File"}],
+            }]},
+        )
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.DOWNLOAD,
+            include_assignments=True,
+            assignment_id=999,
+        )
+
+        assert result["assignments"]["downloaded"] == []
+        assert result["assignments"]["errors"] == [{
+            "error": "Requested assignment folder was not found.",
+            "type": "assignment_not_found",
+        }]
+        assert not (root / "Test-44347").exists()
+        assert client.body_calls() == []
+        assert not any(call[0] == "attachment" for call in client.calls)
+
+    def test_missing_assignment_selector_preflights_before_nonempty_toc(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "lecture.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"lecture", "lecture.pdf")},
+            folders={ORG_ID: [{
+                "Id": 101,
+                "Name": "HW1",
+                "Attachments": [{"Id": 1, "FileName": "hw.pdf", "Size": 4, "Type": "File"}],
+            }]},
+        )
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.DOWNLOAD,
+            include_assignments=True,
+            assignment_id=999,
+        )
+
+        assert result["assignments"]["errors"] == [{
+            "error": "Requested assignment folder was not found.",
+            "type": "assignment_not_found",
+        }]
+        assert client.calls == [("folders", ORG_ID)]
+        assert not (root / "Test-44347").exists()
+
+    def test_malformed_assignment_snapshot_preflights_before_toc(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "lecture.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"lecture", "lecture.pdf")},
+        )
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.DOWNLOAD,
+            include_assignments=True,
+            assignment_id=101,
+            assignment_folders={"malformed": True},  # type: ignore[arg-type]
+        )
+
+        assert result["assignments"]["errors"] == [{
+            "error": "Assignment folders have an invalid response shape.",
+            "type": "assignment_list",
+        }]
+        assert client.calls == []
+        assert not (root / "Test-44347").exists()
+
     def test_topics_and_attachments_share_one_manifest_saved_once(self, root, monkeypatch):
         client = self._client_with_assignments()
         saves: list[Path] = []
@@ -554,7 +1125,7 @@ class TestExitMatrix:
         with _scoped_client(download=_boom):
             result = runner.invoke(cli, ["download", "111", "-o", str(output_dir), "--json"])
         assert result.exit_code == 1, result.output
-        assert json.loads(result.output)["errors"][0]["error"] == "Network error"
+        assert json.loads(result.stdout)["errors"][0]["error"].startswith("Network error")
 
     def test_multi_human_topic_error_exit_1(self, runner, tmp_path):
         output_dir = tmp_path / "dl"
@@ -576,9 +1147,50 @@ class TestExitMatrix:
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg), _scoped_client(download=download):
             result = runner.invoke(cli, ["download", "--semester", "100", "-o", str(output_dir), "--json"])
         assert result.exit_code == 1, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         failed = next(c for c in data["courses"] if c["course_id"] == 222)
         assert "Network error" in failed["errors"][0]["error"]
+
+    def test_multi_json_preserves_malformed_toc_error_type_without_extra_fields(
+        self, runner, tmp_path,
+    ):
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        cfg = self._multi_config(tmp_path)
+        sentinel = "MALFORMED_TOC_PRIVATE_SENTINEL"
+
+        def toc(cid):
+            if cid == 111:
+                return {"Modules": [{
+                    "ModuleId": 1,
+                    "Title": sentinel,
+                    "Modules": [],
+                    "Topics": [{
+                        "TopicId": True,
+                        "Title": "bad.pdf",
+                        "TypeIdentifier": "File",
+                        "Url": "https://example.invalid/private",
+                        "LastModifiedDate": LM_NEW,
+                        "extra": sentinel,
+                    }],
+                }]}
+            return _std_toc(cid)
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg), \
+             _scoped_client(toc=toc):
+            result = runner.invoke(cli, [
+                "download", "--semester", "100", "-o", str(output_dir), "--json",
+            ])
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)
+        malformed = next(course for course in payload["courses"] if course["course_id"] == 111)
+        assert malformed["errors"] == [{
+            "type": "topic_data",
+            "error": "Command failed.",
+        }]
+        assert sentinel not in result.stdout + result.stderr
+        assert "extra" not in result.stdout
 
     def test_assignment_error_exits_1(self, runner, tmp_path):
         output_dir = tmp_path / "dl"
@@ -592,6 +1204,121 @@ class TestExitMatrix:
         data = json.loads(result.stdout)  # stderr carries the FAILED attachment line
         assert data["assignment_errors"][0]["error"] == "att fail"
 
+    @pytest.mark.parametrize("json_output", [True, False])
+    def test_missing_assignment_selector_is_typed_actionable_and_does_not_write(
+        self, runner, tmp_path, json_output,
+    ):
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        folders = [{
+            "Id": 101,
+            "Name": "HW1",
+            "Attachments": [{"Id": 1, "FileName": "hw.pdf", "Size": 10, "Type": "File"}],
+        }]
+        args = [
+            "download", "123", "--assignment", "999", "--include-assignments",
+            "-o", str(output_dir),
+        ]
+        if json_output:
+            args.append("--json")
+
+        with _scoped_client(), patch.object(
+            LighthouseClient, "get_dropbox_folders", return_value=folders,
+        ), patch.object(LighthouseClient, "get_content_toc", return_value=_std_toc(123)) as toc_mock, \
+             patch.object(LighthouseClient, "download_topic_file") as topic_download_mock:
+            result = runner.invoke(cli, args)
+
+        assert result.exit_code == 1, result.output
+        assert "999" not in result.stdout + result.stderr
+        assert not (output_dir / "Course-123-123").exists()
+        assert list(output_dir.iterdir()) == []
+        toc_mock.assert_not_called()
+        topic_download_mock.assert_not_called()
+        if json_output:
+            payload = json.loads(result.stdout)
+            assert payload["assignment_errors"] == [{
+                "error": "Assignment folder not found. Run: lighthouse assignments",
+                "type": "assignment_not_found",
+            }]
+        else:
+            assert "Assignment folder not found. Run: lighthouse assignments" in result.stderr
+
+    def test_assignment_preflight_snapshot_is_reused_after_topic_download(
+        self, runner, tmp_path,
+    ):
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        folders = [{
+            "Id": 101,
+            "Name": "HW1",
+            "Attachments": [{"Id": 1, "FileName": "hw.pdf", "Size": 4, "Type": "File"}],
+        }]
+
+        with _scoped_client(), \
+             patch.object(
+                 LighthouseClient,
+                 "get_dropbox_folders",
+                 side_effect=[folders, {"malformed": True}],
+             ) as folders_mock, \
+             patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value=_std_toc(123),
+             ) as toc_mock, \
+             patch.object(
+                 LighthouseClient,
+                 "download_topic_file",
+                 return_value=(b"topic", "topic.pdf"),
+             ) as topic_download_mock, \
+             patch.object(
+                 LighthouseClient,
+                 "download_attachment",
+                 return_value=(b"hw!!", "hw.pdf"),
+             ) as attachment_download_mock:
+            result = runner.invoke(cli, [
+                "download", "123", "--assignment", "101",
+                "--include-assignments", "-o", str(output_dir), "--json",
+            ])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["assignment_errors"] == []
+        assert len(payload["downloaded"]) == 1
+        assert len(payload["assignments_downloaded"]) == 1
+        folders_mock.assert_called_once_with(123)
+        toc_mock.assert_called_once_with(123)
+        topic_download_mock.assert_called_once_with(123, 1230)
+        attachment_download_mock.assert_called_once_with(123, 101, 1)
+
+    def test_assignment_preflight_malformed_shape_stops_before_content(
+        self, runner, tmp_path,
+    ):
+        output_dir = tmp_path / "dl"
+        output_dir.mkdir()
+        with _scoped_client(), \
+             patch.object(
+                 LighthouseClient,
+                 "get_dropbox_folders",
+                 return_value={"malformed": True},
+             ) as folders_mock, \
+             patch.object(LighthouseClient, "get_content_toc") as toc_mock, \
+             patch.object(LighthouseClient, "download_topic_file") as topic_download_mock:
+            result = runner.invoke(cli, [
+                "download", "123", "--assignment", "101",
+                "--include-assignments", "-o", str(output_dir), "--json",
+            ])
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)
+        assert payload["assignment_errors"] == [{
+            "error": "Assignment response has an invalid shape.",
+            "type": "assignment_list",
+        }]
+        folders_mock.assert_called_once_with(123)
+        toc_mock.assert_not_called()
+        topic_download_mock.assert_not_called()
+        assert list(output_dir.iterdir()) == []
+
     def test_corrupt_manifest_exits_1_single_human(self, runner, tmp_path):
         output_dir = tmp_path / "dl"
         output_dir.mkdir()
@@ -602,6 +1329,23 @@ class TestExitMatrix:
             result = runner.invoke(cli, ["sync", "111", "-o", str(output_dir)])
         assert result.exit_code == 1, result.output
         assert "Warning" in result.output and "Corrupt manifest" in result.output
+
+    def test_corrupt_manifest_warning_does_not_echo_path_or_controls(self, runner, tmp_path):
+        """Direct stderr warnings must not expose an untrusted output path."""
+        output_dir = tmp_path / "sync-SYNC_MANIFEST_PATH_SENTINEL\x1b[31m"
+        output_dir.mkdir()
+        course_dir = output_dir / "Course A-111"
+        course_dir.mkdir(parents=True)
+        (course_dir / MANIFEST_FILENAME).write_text("garbage{")
+
+        with _scoped_client():
+            result = runner.invoke(cli, ["sync", "111", "-o", str(output_dir)])
+
+        diagnostics = result.stdout + result.stderr
+        assert result.exit_code == 1, result.output
+        assert "Corrupt manifest; performing full sync." in result.stderr
+        assert "SYNC_MANIFEST_PATH_SENTINEL" not in diagnostics
+        assert "\x1b" not in diagnostics
 
     def test_corrupt_manifest_exits_1_multi_json(self, runner, tmp_path):
         output_dir = tmp_path / "dl"
@@ -625,7 +1369,10 @@ class TestExitMatrix:
             with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg), _scoped_client():
                 result = runner.invoke(cli, ["download", "--semester", "100", "--also", "99999", "-o", str(output_dir), *extra])
             assert result.exit_code == 0, f"extra={extra}: {result.output}"
-            assert "99999" in result.output  # reported, but lenient
+            if extra:
+                assert json.loads(result.stdout)["also_errors"]
+            else:
+                assert "Course not found" in result.output
 
     def test_empty_results_exit_0_both_modes(self, runner, tmp_path):
         output_dir = tmp_path / "dl"
@@ -741,15 +1488,35 @@ class TestReviewFixRegressions:
         )
         course_dir = root / "Test-44347"
         _seed_manifest(course_dir, {
-            "100": _mentry(filename="a.pdf", sha="same", size=4),
-            "200": _mentry(filename="b.pdf", sha="same", size=4),
+            "100": _mentry(filename="a.pdf", sha=manifest_compute_sha256(b"same"), size=4),
+            "200": _mentry(filename="b.pdf", sha=manifest_compute_sha256(b"same"), size=4),
         })
         _materialize(course_dir, "Mod/a.pdf", b"same")
         _materialize(course_dir, "Mod/b.pdf", b"same")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert len(result["skipped"]) == 2
+        assert [e["sha256"] for e in result["skipped"]] == [manifest_compute_sha256(b"same")] * 2
         assert len(result["duplicates"]) == 2
         assert result["skipped"][0]["path"] == "Mod/a.pdf"
+
+    def test_malformed_manifest_hashes_are_empty_and_not_duplicates(self, root):
+        """Non-string manifest hashes do not leak into metadata or dedup output."""
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "live.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {
+            "100": _mentry(filename="live.pdf", sha=manifest_compute_sha256(b"live"), size=4),
+            "200": _mentry(filename="gone.pdf", sha=["not-a-hash"]),
+        })
+        _materialize(course_dir, "Mod/live.pdf", b"live")
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["skipped"][0]["sha256"] == manifest_compute_sha256(b"live")
+        assert result["orphaned"][0]["sha256"] == ""
+        assert result["duplicates"] == []
 
     def test_multi_json_unknown_types_warning_goes_to_stderr(self, tmp_path):
         """Multi-course --json renders engine warnings on stderr; stdout stays pure JSON."""
@@ -766,6 +1533,28 @@ class TestReviewFixRegressions:
         data = json.loads(result.stdout)  # stdout parses as JSON only
         assert data["summary"]["courses_checked"] == 1
         assert any("Unknown content type" in w for w in result.stderr.splitlines())
+
+    def test_unknown_type_warning_does_not_echo_control_sentinel(self, tmp_path):
+        """Unsupported type diagnostics must not echo arbitrary option text."""
+        sentinel = "TYPE_SENTINEL\x1b[31m"
+        for extra in ([], ["--json"]):
+            output_dir = tmp_path / ("json" if extra else "human")
+            output_dir.mkdir()
+            with _scoped_client():
+                result = CliRunner().invoke(
+                    cli,
+                    [
+                        "download", "111", "-o", str(output_dir),
+                        "--types", sentinel, *extra,
+                    ],
+                )
+            diagnostics = result.stdout + result.stderr
+            assert result.exit_code == 0, result.output
+            if extra:
+                json.loads(result.stdout)
+            assert "Ignored unsupported content type." in result.stderr
+            assert sentinel not in diagnostics
+            assert "\x1b" not in diagnostics
 
     def test_empty_course_human_exits_1_on_recorded_errors(self, runner, tmp_path):
         """Empty branch follows the uniform policy: recorded errors → exit 1."""
@@ -866,6 +1655,115 @@ class TestPathContainment:
         assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
         for p in (root / "Test-44347").rglob("*"):
             assert p.resolve().is_relative_to((root / "Test-44347").resolve())
+
+    def test_course_directory_symlink_outside_root_is_rejected(self, root, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "Test-44347").symlink_to(outside, target_is_directory=True)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["downloaded"] == []
+        assert result["errors"] and result["errors"][0]["type"] == "path"
+        assert not list(outside.iterdir())
+        assert client.body_calls() == []
+
+    def test_module_directory_symlink_outside_course_is_rejected(self, root, tmp_path):
+        course_dir = root / "Test-44347"
+        course_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (course_dir / "Mod").symlink_to(outside, target_is_directory=True)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["downloaded"] == []
+        assert result["errors"] and "symlink" in result["errors"][0]["error"]
+        assert not list(outside.iterdir())
+        assert client.body_calls() == []
+
+    def test_filename_symlink_is_not_overwritten(self, root, tmp_path):
+        course_dir = root / "Test-44347"
+        (course_dir / "Mod").mkdir(parents=True)
+        outside = tmp_path / "outside.pdf"
+        outside.write_bytes(b"keep")
+        (course_dir / "Mod" / "f.pdf").symlink_to(outside)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"new!", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["downloaded"] == []
+        assert result["errors"]
+        assert outside.read_bytes() == b"keep"
+        assert (course_dir / "Mod" / "f.pdf").is_symlink()
+
+    def test_existing_course_destination_symlink_is_rejected(self, root, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        course_dir = root / "Test-44347"
+        course_dir.symlink_to(outside, target_is_directory=True)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.DOWNLOAD)
+
+        assert result["errors"] and any(
+            marker in result["errors"][0]["error"] for marker in ("symlink", "escapes")
+        )
+        assert client.body_calls() == []
+        assert list(outside.rglob("*")) == []
+
+    def test_symlinked_topic_directory_is_rejected(self, root, tmp_path):
+        course_dir = root / "Test-44347"
+        course_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (course_dir / "Mod").symlink_to(outside, target_is_directory=True)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.DOWNLOAD)
+
+        assert result["errors"] and "symlink" in result["errors"][0]["error"]
+        assert client.body_calls() == []
+        assert list(outside.rglob("*")) == []
+
+    def test_symlinked_manifest_is_rejected_before_force_unlink(self, root, tmp_path):
+        course_dir = root / "Test-44347"
+        course_dir.mkdir()
+        outside_manifest = tmp_path / "outside-manifest.json"
+        outside_manifest.write_text('{"sentinel": true}', encoding="utf-8")
+        (course_dir / MANIFEST_FILENAME).symlink_to(outside_manifest)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.FORCE)
+
+        assert result["errors"] and "symlink" in result["errors"][0]["error"]
+        assert outside_manifest.read_text(encoding="utf-8") == '{"sentinel": true}'
 
     def test_clamp_branch_fires_on_preassembled_escape_path(self, root, tmp_path):
         """Direct clamp coverage: a hostile *pre-assembled* topic path that

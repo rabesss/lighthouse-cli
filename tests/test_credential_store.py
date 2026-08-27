@@ -207,6 +207,120 @@ def test_config_dir_env_var_respected(
     assert not (tmp_path / ".config" / "lighthouse-cli" / "credentials.json").exists()
 
 
+def test_save_rejects_symlinked_config_dir_without_touching_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config-directory symlink cannot redirect a credential write."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "credentials.json"
+    sentinel.write_text("outside-sentinel", encoding="utf-8")
+    config_link = tmp_path / "cfg"
+    config_link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_link))
+
+    with pytest.raises(CredentialStoreError) as exc_info:
+        CredentialStore().save("user@manipal.edu", "secret")
+
+    assert str(exc_info.value) == (
+        "Credential storage path contains a symlink and cannot be used."
+    )
+    assert sentinel.read_text(encoding="utf-8") == "outside-sentinel"
+    assert list(outside.iterdir()) == [sentinel]
+
+
+def test_write_artifact_rejects_symlinked_target_without_touching_target(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An artifact symlink is rejected before atomic replacement."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside-sentinel", encoding="utf-8")
+    artifact = config_dir / "credentials.json"
+    artifact.symlink_to(outside)
+
+    with pytest.raises(CredentialStoreError, match="symlink"):
+        CredentialStore().write_artifact(
+            artifact,
+            metadata={},
+            secret={"username": "user", "password": "secret"},
+        )
+
+    assert artifact.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "outside-sentinel"
+
+
+def test_load_rejects_symlinked_artifact_without_reading_target(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Credential reads do not follow an artifact symlink outside config."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    outside = tmp_path / "outside.json"
+    outside.write_text("not-a-credential-document", encoding="utf-8")
+    (config_dir / "credentials.json").symlink_to(outside)
+
+    with pytest.raises(CredentialStoreError, match="symlink"):
+        CredentialStore().load()
+
+    assert outside.read_text(encoding="utf-8") == "not-a-credential-document"
+
+
+def test_legacy_migration_rejects_symlinked_config_dir_without_resealing(
+    tmp_path: Path,
+    fake_keyring: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy migration cannot read or replace through a config symlink."""
+    from cryptography.fernet import Fernet
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    key = Fernet.generate_key()
+    fake_keyring.backend.set_password(
+        "lighthouse-cli", "credential-key", key.decode("ascii")
+    )
+    legacy = Fernet(key).encrypt(
+        json.dumps({"username": "user@manipal.edu", "password": "secret"}).encode()
+    )
+    outside_file = outside / "credentials.json"
+    outside_file.write_bytes(legacy)
+    config_link = tmp_path / "cfg"
+    config_link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_link))
+
+    with pytest.raises(CredentialStoreError, match="symlink"):
+        CredentialStore().load()
+
+    assert outside_file.read_bytes() == legacy
+
+
+def test_ensure_config_dir_rejects_symlink_without_chmod_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory setup does not chmod through a config-directory symlink."""
+    from lighthouse_cli.config import ensure_config_dir
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    before_mode = outside.stat().st_mode & 0o777
+    config_link = tmp_path / "cfg"
+    config_link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_link))
+
+    with pytest.raises(CredentialStoreError, match="symlink"):
+        ensure_config_dir()
+
+    assert outside.stat().st_mode & 0o777 == before_mode
+    assert config_link.is_symlink()
+
+
 # ---------------------------------------------------------------------------
 # Additional tests for CredentialStore
 # ---------------------------------------------------------------------------
@@ -219,6 +333,48 @@ def test_store_no_credentials_file_returns_none(monkeypatch: pytest.MonkeyPatch,
 
     store = CredentialStore()
     assert store.load() is None
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        {"username": {"value": "USERNAME_SENTINEL"}, "password": "pw"},
+        {"username": "user@manipal.edu", "password": ["PASSWORD_SENTINEL"]},
+        {"username": "", "password": "pw"},
+        {"username": "user@manipal.edu", "password": ""},
+    ],
+)
+def test_malformed_stored_credentials_raise_without_echoing_values(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    secret: dict[str, object],
+) -> None:
+    """Malformed decrypted values fail closed with a generic local error."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    store = CredentialStore()
+    store.write_artifact(store.credentials_file, metadata={}, secret=secret)
+
+    with pytest.raises(CredentialStoreError) as exc_info:
+        store.load()
+    message = str(exc_info.value)
+    assert message == "Credentials file is corrupted."
+    assert "USERNAME_SENTINEL" not in message
+    assert "PASSWORD_SENTINEL" not in message
+
+
+def test_non_finite_secret_data_is_rejected_without_raw_exception(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential envelopes never persist JSON NaN/Infinity extensions."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    with pytest.raises(CredentialStoreError, match="malformed"):
+        CredentialStore().write_artifact(
+            config_dir / "credentials.json",
+            metadata={},
+            secret={"value": float("nan")},
+        )
 
 
 # ---------------------------------------------------------------------------

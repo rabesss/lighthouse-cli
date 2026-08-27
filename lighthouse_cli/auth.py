@@ -18,6 +18,7 @@ import functools
 import getpass
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from contextlib import suppress
@@ -25,7 +26,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .api import LighthouseClient, refresh_auth_from_browser
-from .config import ensure_config_dir, load_mfa_pending, missing_cookie_names, save_cookies
+from .config import (
+    clear_mfa_pending,
+    ensure_config_dir,
+    load_mfa_pending,
+    missing_cookie_names,
+    save_cookies,
+)
 from .credential_store import CredentialStore, CredentialStoreError
 from .ms_auth import (
     MFA_METHOD_APP,
@@ -40,7 +47,7 @@ from .ms_auth import (
     MicrosoftSSOClient,
     MicrosoftSSOError,
 )
-from .ms_mfa import format_user_proof
+from .ms_mfa import format_user_proof, safe_auth_method_id
 
 # ---------------------------------------------------------------------------
 # Exceptions and uniform exits
@@ -50,12 +57,176 @@ class _PromptUnavailable(Exception):
     """A credential is missing and stdin cannot be prompted."""
 
 
+_AUTH_ERROR_FALLBACK = "Authentication failed. Check your credentials and try again."
+_EMAIL_RE = re.compile(r"(?i)\b[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+\b")
+_PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{5,}\d)(?!\w)")
+_AUTH_SECRET_FIELD_RE = re.compile(
+    r"(?ix)(?<![a-z0-9_])"
+    r"[\"']?(?:password|passwd|passphrase|pass|secret|token|"
+    r"flow[\s_-]*token|cookie(?:s|value)?|session(?:val(?:ue)?|id)|"
+    r"access[\s_-]*token|client[\s_-]*secret|api[\s_-]*key|"
+    r"authorization|bearer|saml[\s_-]*(?:response|request))[\"']?"
+    r"(?![a-z0-9])\s*(?:[:=]|\b(?:is|was|has)\b|\s+)"
+    r"(?!(?:is|was|has|required|incorrect|expired|invalid|accepted|reset)\b)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;{}\[\]]+)"
+)
+_AUTH_CODE_FIELD_RE = re.compile(
+    r"(?ix)(?<![a-z0-9_])[\"']?(?:otp|totp|canary|ctx)[\"']?"
+    r"(?![a-z0-9])\s*(?:[:=]|\b(?:is|was)\b)\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;{}\[\]]+)"
+)
+_AUTH_SECRET_SHAPED_RE = re.compile(
+    r"(?i)\b[a-z][a-z0-9]*(?:password|passwd|passphrase|secret|token|"
+    r"cookie|cookies|samlresponse|samlrequest|otp|totp|canary|session)"
+    r"[a-z0-9_-]*\b\s*[:=]"
+)
+_AUTH_SECRET_FLAG_RE = re.compile(
+    r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;{}\[\]]+"
+)
+_AUTH_CODE_RE = re.compile(r"(?:^|:\s*)\[(\d{3,8})\]\s*")
+_AUTH_UNSAFE_BRACKET_RE = re.compile(r"[{}]|\[(?!\d{3,8}\])|(?<!\])\]")
+_AUTH_SAFE_TYPE_RE = re.compile(r"^Unexpected error \([A-Za-z0-9_.]+\)\.")
+
+_SAFE_CREDENTIALS_ERROR = (
+    "Credentials required. Provide --user/--pass, "
+    "LIGHTHOUSE_USERNAME/LIGHTHOUSE_PASSWORD env vars, or run interactively."
+)
+_SAFE_MFA_RECOVERY_COMMANDS = (
+    "lighthouse auth login --mfa-method sms",
+    "lighthouse auth login",
+    "lighthouse auth verify <code>",
+    "lighthouse auth verify <current-app-code>",
+    "lighthouse auth verify ok",
+)
+
+
+def _safe_mfa_recovery(value: object) -> str | None:
+    """Return only a fixed MFA recovery command, never pasted arguments."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if ":" in text and text.casefold().split(":", 1)[0] in {"run", "try", "use"}:
+        text = text.split(":", 1)[1].strip()
+    for command in _SAFE_MFA_RECOVERY_COMMANDS:
+        if text == command or text.startswith(f"{command} "):
+            return command
+    return None
+
+
+def _safe_auth_category(text: str, code: str | None) -> str:
+    """Map an auth error to a fixed, non-upstream diagnostic."""
+    lowered = text.casefold()
+    if lowered.startswith("authentication failed"):
+        return f"Authentication failed ({code})." if code else _AUTH_ERROR_FALLBACK
+    if lowered.startswith("login completed but session verification failed"):
+        return "Login completed but session verification failed. Try: lighthouse auth login"
+    if lowered.startswith("credentials required"):
+        return _SAFE_CREDENTIALS_ERROR
+    if lowered.startswith("username and password are required"):
+        return "Username and password are required."
+    if lowered.startswith("username cannot be empty"):
+        return "Username cannot be empty."
+    if lowered.startswith("password cannot be empty"):
+        return "Password cannot be empty."
+    if lowered.startswith("no pending mfa session"):
+        return "No pending MFA session. Run: lighthouse auth login --mfa-method sms"
+    if lowered.startswith("pending mfa session is corrupted"):
+        return "Pending MFA session is corrupted. Run: lighthouse auth login --mfa-method sms"
+    if lowered.startswith("no encryption key source"):
+        return (
+            "No encryption key source is available. Set LIGHTHOUSE_SECRETS_PASSPHRASE "
+            "or configure a system keyring backend."
+        )
+    if lowered.startswith("browser session is missing required d2l cookies"):
+        return "Browser session is missing required D2L cookies."
+    if lowered.startswith("cdp port must be an integer"):
+        return "CDP port must be an integer from 1 to 65535"
+    if lowered.startswith("invalid mfa method"):
+        return "Invalid MFA method. Use auto, sms, app, call, push, or choose."
+    if lowered.startswith("requested mfa method"):
+        return "Requested MFA method is not available. Use --mfa-method auto or choose."
+    if lowered.startswith("multiple mfa methods"):
+        return "Multiple MFA methods are available; choose one with --mfa-method."
+    if lowered.startswith("no mfa methods"):
+        return "No MFA methods are registered on this account."
+    if lowered.startswith("2fa code cannot be empty"):
+        return "2FA code cannot be empty."
+    if lowered.startswith("2fa code is required"):
+        return "2FA code is required. Provide a code when prompted or use auth verify."
+    if lowered.startswith("2fa verification failed"):
+        return "2FA verification failed. Request a new code and try again."
+    if lowered.startswith("mfa setup failed"):
+        return "MFA setup failed. Try a different --mfa-method."
+    if lowered.startswith("failed to redirect"):
+        return "Failed to redirect to Microsoft SSO."
+    if lowered.startswith("could not find microsoft"):
+        return "Could not find Microsoft login configuration on the page."
+    if lowered.startswith("microsoft returned"):
+        return "Microsoft returned an unexpected response."
+    if lowered.startswith("verification code sent"):
+        return "Verification code sent."
+    if lowered.startswith("authenticator approval requested"):
+        return "Authenticator approval requested."
+    if lowered.startswith("authenticator code required"):
+        return "Authenticator code required."
+    if lowered.startswith("voice approval call started"):
+        return "Voice approval call started."
+    if lowered.startswith("--totp"):
+        return "--totp cannot be used with the selected MFA method."
+    if "codeless" in lowered and "--totp" in lowered:
+        return "--mfa-method is codeless; do not use --totp."
+    if safe_type := _AUTH_SAFE_TYPE_RE.match(text):
+        return safe_type.group(0)
+    if lowered == "invalid username or password.":
+        return text
+    if code and "invalid username or password" in lowered:
+        return f"Authentication failed ({code})."
+    return _AUTH_ERROR_FALLBACK
+
+
+def _safe_auth_error_message(msg: object) -> str:
+    """Keep auth diagnostics bounded and free of upstream secret material.
+
+    Auth exceptions include a detailed ``Step``/``Fix`` rendering, and their
+    first line may contain an upstream value.  Only fixed categories are
+    retained; structured or option-bearing text is discarded as a whole.
+    """
+    if not isinstance(msg, str) or not msg:
+        return _AUTH_ERROR_FALLBACK
+    text = " ".join(msg.split())
+    if (
+        not text
+        or len(text) > 512
+        or any(not char.isprintable() for char in text)
+    ):
+        return _AUTH_ERROR_FALLBACK
+    code_match = _AUTH_CODE_RE.search(text)
+    code = code_match.group(1) if code_match else None
+    if code_match:
+        text = text[:code_match.start()] + text[code_match.end():]
+    if (
+        _AUTH_UNSAFE_BRACKET_RE.search(text)
+        or _AUTH_SECRET_FIELD_RE.search(text)
+        or _AUTH_CODE_FIELD_RE.search(text)
+        or _AUTH_SECRET_SHAPED_RE.search(text)
+        or _AUTH_SECRET_FLAG_RE.search(text)
+        or _EMAIL_RE.search(text)
+        or _PHONE_RE.search(text)
+        or "http://" in text.casefold()
+        or "https://" in text.casefold()
+    ):
+        return _AUTH_ERROR_FALLBACK
+    return _safe_auth_category(text, code)
+
+
 def _auth_error(msg: str, json_output: bool, code: int = 1) -> int:
     """Print an auth error and return an exit code."""
+    safe_msg = _safe_auth_error_message(msg)
     if json_output:
-        print(json.dumps({"success": False, "error": msg}))
+        print(json.dumps({"success": False, "error": safe_msg}))
+        print(f"Error: {safe_msg}", file=sys.stderr)
     else:
-        print(f"Error: {msg}", file=sys.stderr)
+        print(f"Error: {safe_msg}", file=sys.stderr)
     return code
 
 
@@ -63,6 +234,7 @@ def _interrupted(json_output: bool) -> int:
     """Uniform Ctrl+C exit (130)."""
     if json_output:
         print(json.dumps({"success": False, "error": "Interrupted by user"}))
+        print("Error: Interrupted by user", file=sys.stderr)
     else:
         print("\nInterrupted.", file=sys.stderr)
     return 130
@@ -280,7 +452,11 @@ def _persist_check_report(
         try:
             CredentialStore().save(stored_username, stored_password)
         except CredentialStoreError as exc:
-            print(f"Warning: Could not save credentials: {exc}", file=sys.stderr)
+            print(
+                "Warning: Could not save credentials: "
+                f"{_safe_auth_error_message(str(exc))}",
+                file=sys.stderr,
+            )
 
     if json_output:
         print(json.dumps({"success": True, "cookies": list(cookies.keys())}))
@@ -450,13 +626,14 @@ def cmd_auth_mfa_methods(
     finally:
         sso_client.close()
 
-    # Report ids + the masked display strings only; `proof.data` can carry
-    # raw phone numbers and never leaves the probe.
+    # Report allowlisted method ids + descriptions derived from static labels
+    # and a fixed last-four mask; neither upstream display nor raw data leaves
+    # the probe.
     methods = [
         {
-            "id": proof.auth_method_id,
+            "id": safe_auth_method_id(proof),
             "method": _cli_method_for_auth_id(proof.auth_method_id),
-            "display": proof.display,
+            "display": format_user_proof(proof),
             "is_default": proof.is_default,
         }
         for proof in result.proofs
@@ -485,7 +662,7 @@ def cmd_auth_mfa_methods(
         )
         print(
             f"  • {format_user_proof(proof)} — "
-            f"{proof.auth_method_id}; {advice}{marker}"
+            f"{safe_auth_method_id(proof)}; {advice}{marker}"
         )
     return 0
 
@@ -601,7 +778,8 @@ def cmd_auth_login(
             pending = load_mfa_pending()
         except CredentialStoreError as exc:
             print(
-                f"Warning: ignoring an unreadable MFA pending session ({exc}).",
+                "Warning: ignoring an unreadable MFA pending session ("
+                f"{_safe_auth_error_message(str(exc))}).",
                 file=sys.stderr,
             )
     plan = plan_login(
@@ -643,15 +821,20 @@ def cmd_auth_login(
             defer_mfa_to_pending=plan.defer_mfa_to_pending,
         )
     except MfaPendingError as exc:
+        safe_message = _safe_auth_error_message(str(exc))
+        safe_recovery = _safe_mfa_recovery(exc.recovery)
         if json_output:
             print(json.dumps({
                 "success": False,
                 "mfa_pending": True,
-                "message": str(exc),
-                "recovery": exc.recovery,
+                "message": safe_message,
+                "recovery": safe_recovery,
             }))
+            print(f"Error: {safe_message}", file=sys.stderr)
         else:
-            print(str(exc), flush=True)
+            print(safe_message, flush=True)
+            if safe_recovery:
+                print(f"Fix: {safe_recovery}", flush=True)
         return 0
     except MicrosoftSSOError as exc:
         return _auth_error(str(exc), json_output)
@@ -659,6 +842,15 @@ def cmd_auth_login(
         return _auth_error(str(exc), json_output)
     finally:
         sso_client.close()
+
+    # ``MicrosoftSSOClient.login`` normally clears its own checkpoint after
+    # extracting the D2L cookies.  Keep that lifecycle guarantee at the
+    # command boundary too: a successful inline login must never leave a
+    # previous deferred challenge eligible for the next ``auth login``.
+    # This is deliberately after ``login`` returns; deferred MFA and any
+    # post-EndAuth failure raise before reaching this point and therefore keep
+    # their recovery checkpoint intact.
+    clear_mfa_pending()
 
     return _persist_check_report(
         cookies,

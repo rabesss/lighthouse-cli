@@ -472,7 +472,16 @@ class TestNoCourseIdDownloadsLatestSemester:
                 {"OrgUnitId": 222, "Name": "Course B", "Code": "B"},
             ]
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", side_effect=get_courses), \
              patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
@@ -492,6 +501,63 @@ class TestNoCourseIdDownloadsLatestSemester:
 
 class TestDownloadAssignmentValidation:
     """Invalid assignment flag combinations fail before any side effects."""
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("--assignment", "0"),
+            ("--assignment", "-1"),
+            ("--attachment", "0"),
+            ("--attachment", "-1"),
+        ],
+    )
+    def test_nonpositive_selector_is_rejected_before_any_side_effects(
+        self, cli_runner, tmp_path, option, value
+    ):
+        output_dir = tmp_path / "downloads"
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
+             patch("lighthouse_cli.commands._download_single_attachment") as attachment, \
+             patch("lighthouse_cli.commands._run_and_render_single") as run:
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "download", "44347", option, value,
+                    "--json", "-o", str(output_dir),
+                ],
+            )
+
+        assert result.exit_code == 2, result.output
+        assert json.loads(result.stdout)["error"]
+        client_cls.assert_not_called()
+        attachment.assert_not_called()
+        run.assert_not_called()
+        assert not output_dir.exists()
+
+    @pytest.mark.parametrize(
+        ("assignment_id", "attachment_id"),
+        [(0, None), (-1, None), (None, 0), (None, -1)],
+    )
+    def test_command_boundary_rejects_nonpositive_selector_before_client_or_path(
+        self, tmp_path, capsys, assignment_id, attachment_id
+    ):
+        output_dir = tmp_path / "downloads"
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
+             patch("lighthouse_cli.commands._download_single_attachment") as attachment, \
+             patch("lighthouse_cli.commands._run_and_render_single") as run:
+            result = cmd_download(
+                course_id="44347",
+                output_dir=str(output_dir),
+                assignment_id=assignment_id,
+                attachment_id=attachment_id,
+                json_output=True,
+            )
+
+        assert result == 1
+        assert json.loads(capsys.readouterr().out)["error"]
+        client_cls.assert_not_called()
+        attachment.assert_not_called()
+        run.assert_not_called()
+        assert not output_dir.exists()
 
     @pytest.mark.parametrize(
         ("args", "message"),
@@ -558,9 +624,24 @@ class TestDownloadAssignmentValidation:
         with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
              patch("lighthouse_cli.commands.resolve_course_id", return_value=44347), \
              patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run:
+            client_cls.return_value.get_dropbox_folders.return_value = [{"Id": 101}]
             result = cmd_download(course_id="44347", assignment_id=101)
 
         assert result == 0
-        client_cls.assert_called_once_with()
+        client_cls.assert_called_once_with(read_only_auth=False)
         assert run.call_args.kwargs["include_assignments"] is True
         assert run.call_args.kwargs["assignment_id"] == 101
+
+    def test_download_dry_run_constructs_read_only_client(self, cli_runner, tmp_path):
+        output_dir = tmp_path / "downloads"
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
+             patch("lighthouse_cli.commands.resolve_course_id", return_value=44347), \
+             patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run:
+            result = cli_runner.invoke(
+                cli,
+                ["download", "44347", "--dry-run", "-o", str(output_dir)],
+            )
+
+        assert result.exit_code == 0, result.output
+        client_cls.assert_called_once_with(read_only_auth=True)
+        assert run.call_args.args[3].value == "plan"

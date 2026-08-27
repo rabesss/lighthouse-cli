@@ -40,7 +40,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -64,6 +64,11 @@ _SUPPORTED_KDF_ITERATIONS = frozenset({_LEGACY_KDF_ITERATIONS, _KDF_ITERATIONS})
 #: Envelope header keys — never treated as artifact metadata.
 _ENVELOPE_KEYS = frozenset({"v", "key_source", "kdf_salt", "kdf_iterations", "ciphertext"})
 
+# Do not include the configured path in this error.  It may contain terminal
+# controls or other untrusted text supplied through the environment, and a
+# fixed message keeps this storage boundary safe for CLI diagnostics.
+_UNTRUSTED_PATH_MSG = "Credential storage path contains a symlink and cannot be used."
+
 
 class CredentialStoreError(Exception):
     """Raised when key resolution, sealing, or unsealing fails.
@@ -71,6 +76,46 @@ class CredentialStoreError(Exception):
     Messages are always actionable and never contain secret material or raw
     cryptography tracebacks.
     """
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    """Return whether *path* or an existing lexical parent is a symlink.
+
+    This deliberately walks the lexical path before any ``resolve()`` call.
+    Resolving first would hide a symlinked config directory behind its target
+    and make a path such as ``cfg/credentials.json`` appear trusted.  Missing
+    components are allowed so normal first-run directory creation continues;
+    an inspection failure is treated as unsafe.
+    """
+    try:
+        absolute = path.expanduser().absolute()
+    except (OSError, RuntimeError, ValueError):
+        return True
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            if current.is_symlink():
+                return True
+        except (OSError, ValueError):
+            return True
+    return False
+
+
+def _validate_credential_path(path: Path) -> None:
+    """Reject symlinked config/artifact paths with a fixed safe error."""
+    if _path_has_symlink_component(path):
+        raise CredentialStoreError(_UNTRUSTED_PATH_MSG)
+
+
+def _reject_non_finite_json(value: str) -> NoReturn:
+    """Reject Python's non-standard ``NaN``/``Infinity`` JSON extensions."""
+    raise ValueError("non-finite JSON number")
+
+
+def _loads_strict(value: str | bytes) -> Any:
+    """Decode JSON without accepting non-finite numbers."""
+    return json.loads(value, parse_constant=_reject_non_finite_json)
 
 
 # ---------------------------------------------------------------------------
@@ -154,13 +199,19 @@ def _decode_kdf_salt(salt_b64: str) -> bytes:
 def _keyring_read_entry(keyring_mod: Any) -> str | None:
     """Read the existing keyring entry; None when absent."""
     try:
-        return keyring_mod.get_password(SERVICE_NAME, KEY_NAME)
+        stored = keyring_mod.get_password(SERVICE_NAME, KEY_NAME)
     except Exception as exc:
         raise CredentialStoreError(
             "System keyring is not readable "
             f"({exc.__class__.__name__}). Unlock your keyring or set "
             f"{PASSPHRASE_ENV} instead."
         ) from None
+    if stored is not None and not isinstance(stored, str):
+        raise CredentialStoreError(
+            "System keyring returned an invalid encryption key. Unlock your "
+            f"keyring or set {PASSPHRASE_ENV} instead."
+        )
+    return stored
 
 
 def _keyring_key(*, create: bool) -> bytes:
@@ -244,6 +295,7 @@ class CredentialStore:
             CredentialStoreError: With an actionable message when neither key
                 source is available.
         """
+        _validate_credential_path(self.config_dir)
         if _passphrase_from_env() is not None:
             return "passphrase"
         keyring_mod = _load_keyring_module()
@@ -270,13 +322,41 @@ class CredentialStore:
         mode: int = 0o600,
     ) -> None:
         """Atomically write ``metadata`` (plaintext) + sealed ``secret``."""
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        if not isinstance(metadata, dict) or not isinstance(secret, dict):
+            raise CredentialStoreError(
+                "Credential data is malformed and cannot be sealed."
+            )
+        # Check both the directory and final target lexically before any
+        # mkdir/chmod or atomic replacement.  In particular, os.replace() is
+        # safe for a symlink target itself but a read would follow it, while a
+        # symlinked parent would redirect the temporary file outside the
+        # configured storage boundary.
+        _validate_credential_path(self.config_dir)
+        _validate_credential_path(path)
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CredentialStoreError(
+                f"Credential storage directory could not be created "
+                f"({exc.__class__.__name__})."
+            ) from None
         try:
             self.config_dir.chmod(0o700)
         except OSError:
             pass
-        doc = self._build_document(metadata, json.dumps(secret).encode("utf-8"))
-        atomic_write(path, doc, mode=mode)
+        try:
+            plaintext = json.dumps(secret, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            raise CredentialStoreError(
+                "Secret data is malformed and cannot be sealed."
+            ) from None
+        doc = self._build_document(metadata, plaintext)
+        try:
+            atomic_write(path, doc, mode=mode)
+        except OSError as exc:
+            raise CredentialStoreError(
+                f"Credential data could not be stored ({exc.__class__.__name__})."
+            ) from None
 
     def read_artifact(self, path: Path) -> tuple[dict[str, Any], dict[str, Any]] | None:
         """Read a sealed artifact.
@@ -288,11 +368,13 @@ class CredentialStore:
             CredentialStoreError: When the document is malformed or cannot be
                 decrypted with its recorded key source.
         """
+        _validate_credential_path(self.config_dir)
+        _validate_credential_path(path)
         if not path.exists():
             return None
         try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            doc = _loads_strict(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"{path.name} is corrupted ({exc.__class__.__name__})."
             ) from None
@@ -301,8 +383,8 @@ class CredentialStore:
         metadata = {k: v for k, v in doc.items() if k not in _ENVELOPE_KEYS}
         plaintext = self._open_envelope(doc)
         try:
-            secret = json.loads(plaintext.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            secret = _loads_strict(plaintext.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"{path.name} decrypted to invalid data ({exc.__class__.__name__})."
             ) from None
@@ -318,9 +400,9 @@ class CredentialStore:
         Raises:
             CredentialStoreError: If credentials are empty or sealing fails.
         """
-        if not username or not username.strip():
+        if not isinstance(username, str) or not username.strip():
             raise CredentialStoreError("Username cannot be empty")
-        if not password or not password.strip():
+        if not isinstance(password, str) or not password.strip():
             raise CredentialStoreError("Password cannot be empty")
 
         self.write_artifact(
@@ -339,6 +421,8 @@ class CredentialStore:
             CredentialStoreError: When decryption fails or the key source for
                 the recorded/legacy format is unavailable.
         """
+        _validate_credential_path(self.config_dir)
+        _validate_credential_path(self.credentials_file)
         try:
             if not self.credentials_file.exists():
                 return None
@@ -351,14 +435,23 @@ class CredentialStore:
         if not blob.lstrip().startswith(b"{"):
             return self._load_and_migrate_legacy(blob)
         try:
-            data = json.loads(self.open_bytes(blob).decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            data = _loads_strict(self.open_bytes(blob).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"Credentials file is corrupted ({exc.__class__.__name__})."
             ) from None
         if not isinstance(data, dict):
             raise CredentialStoreError("Credentials file is corrupted.")
-        return data.get("username", ""), data.get("password", "")
+        username = data.get("username")
+        password = data.get("password")
+        if (
+            not isinstance(username, str)
+            or not isinstance(password, str)
+            or not username.strip()
+            or not password.strip()
+        ):
+            raise CredentialStoreError("Credentials file is corrupted.")
+        return username, password
 
     def _load_and_migrate_legacy(self, blob: bytes) -> tuple[str, str]:
         """Decrypt legacy raw-Fernet credentials with the keyring key, then
@@ -366,30 +459,47 @@ class CredentialStore:
 
         The legacy file is left untouched when the keyring is unavailable.
         """
+        # Recheck immediately before the migration write as well as in
+        # ``load``.  This keeps this helper safe if called directly and avoids
+        # replacing a target whose lexical path became symlinked meanwhile.
+        _validate_credential_path(self.config_dir)
+        _validate_credential_path(self.credentials_file)
         key = _keyring_key(create=False)
         try:
             plaintext = _fernet_from_key(key).decrypt(blob)
-            data = json.loads(plaintext.decode("utf-8"))
+            data = _loads_strict(plaintext.decode("utf-8"))
         except InvalidToken:
             raise CredentialStoreError(
                 "Stored credentials could not be decrypted — the keyring key "
                 "does not match. Re-run 'lighthouse auth login "
                 "--save-credentials' to replace them."
             ) from None
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (ValueError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"Credentials file is corrupted ({exc.__class__.__name__})."
             ) from None
 
         if not isinstance(data, dict):
             raise CredentialStoreError("Credentials file is corrupted.")
-        username, password = data.get("username", ""), data.get("password", "")
+        username, password = data.get("username"), data.get("password")
+        if (
+            not isinstance(username, str)
+            or not isinstance(password, str)
+            or not username.strip()
+            or not password.strip()
+        ):
+            raise CredentialStoreError("Credentials file is corrupted.")
         # Migration re-seals under the provider that just decrypted the data —
         # never the current env-first selection.
         doc = self._build_document(
             {}, plaintext, force_source="keyring",
         )
-        atomic_write(self.credentials_file, doc, mode=0o600)
+        try:
+            atomic_write(self.credentials_file, doc, mode=0o600)
+        except OSError as exc:
+            raise CredentialStoreError(
+                f"Credentials file could not be migrated ({exc.__class__.__name__})."
+            ) from None
         return username, password
 
     # -- internals --------------------------------------------------------------
@@ -410,6 +520,8 @@ class CredentialStore:
         force_source: str | None = None,
     ) -> bytes:
         source = force_source or self._select_source()
+        if source not in {"passphrase", "keyring"}:
+            raise CredentialStoreError("Unknown credential key source.")
         doc: dict[str, Any] = dict(metadata)
         doc["v"] = FORMAT_VERSION
         doc["key_source"] = source
@@ -429,7 +541,12 @@ class CredentialStore:
         else:
             fernet = _fernet_from_key(_keyring_key(create=True))
         doc["ciphertext"] = fernet.encrypt(plaintext).decode("ascii")
-        return json.dumps(doc, indent=2).encode("utf-8")
+        try:
+            return json.dumps(doc, indent=2, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            raise CredentialStoreError(
+                "Credential metadata is malformed and cannot be stored."
+            ) from None
 
     def _open_envelope(self, envelope: dict[str, Any]) -> bytes:
         """Decrypt a parsed envelope; every failure is a clean error.
@@ -500,8 +617,8 @@ class CredentialStore:
 def _parse_envelope(blob: bytes) -> dict[str, Any]:
     """Validate a sealed envelope's shape; raise cleanly when malformed."""
     try:
-        envelope = json.loads(blob.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        envelope = _loads_strict(blob.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
         raise CredentialStoreError(
             f"Sealed data is corrupted ({exc.__class__.__name__})."
         ) from None

@@ -12,8 +12,9 @@ from __future__ import annotations
 import os
 import sys
 
+from lighthouse_cli.auth import _safe_auth_error_message
 from lighthouse_cli.ms_auth import MicrosoftSSOClient, MicrosoftSSOError
-from lighthouse_cli.ms_mfa import MfaProbeResult
+from lighthouse_cli.ms_mfa import MfaProbeResult, format_user_proof
 
 
 def _print_proofs(result: MfaProbeResult) -> None:
@@ -26,7 +27,7 @@ def _print_proofs(result: MfaProbeResult) -> None:
         return
     for p in result.proofs:
         default = " [default]" if p.is_default else ""
-        print(f"  - {p.auth_method_id}: {p.display}{default}")
+        print(f"  - {format_user_proof(p)}{default}")
 
 
 def main() -> int:
@@ -45,7 +46,15 @@ def main() -> int:
         _print_proofs(result)
         return 0
     except MicrosoftSSOError as exc:
-        print(exc, file=sys.stderr)
+        print(_safe_auth_error_message(str(exc)), file=sys.stderr)
+        return 1
+    except Exception:
+        # The probe is a diagnostic convenience; transport and unexpected
+        # failures must never surface a traceback or upstream URL/secret.
+        print(
+            "MFA method discovery failed. Check your connection and try again.",
+            file=sys.stderr,
+        )
         return 1
     finally:
         client.close()

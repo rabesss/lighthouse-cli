@@ -7,4 +7,8 @@ Status: accepted
 Consequences:
 - Users must learn two commands, but the mental model is clear: download once, sync ongoing
 - Both commands share the same manifest format, so switching between them is seamless
-- `--force` flag on either command resets the manifest for a full re-download
+- `--force` on either command replaces the course's local manifest metadata and
+  re-downloads matching content; existing files at those target paths may be
+  overwritten, while unrelated files are not deleted
+- `download --dry-run` is a read-only plan: it writes no files, directories, or
+  manifest metadata. `sync` has no dry-run option.

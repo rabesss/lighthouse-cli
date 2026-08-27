@@ -14,6 +14,7 @@ from lighthouse_cli.ms_auth import (
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    MfaProbeResult,
     MS_ERROR_CODES,
     VALID_MFA_METHODS,
     MicrosoftSSOClient,
@@ -179,10 +180,114 @@ class TestMfaMethodSelection:
         output = capsys.readouterr().err
 
         assert selected.auth_method_id == "OneWaySMS"
-        assert "Text code (SMS or WhatsApp): +XX XXXXXXXX04" in output
-        assert "Voice call to mobile: +XX XXXXXXXX04" in output
+        assert "Text code (SMS or WhatsApp): ***7804" in output
+        assert "Voice call to mobile: ***7804" in output
         assert "Microsoft default" in output
         assert "+001234567804" not in output
+
+    def test_untrusted_display_never_reaches_selection_error_or_banner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        malicious = (
+            "FULL-DISPLAY-SENTINEL user@example.com +919876541234\x1b[31m"
+        )
+        proofs = [
+            UserProof("OneWaySMS", malicious, "+919876541234", True),
+            UserProof("TwoWayVoiceMobile", malicious, "+919876541234", False),
+        ]
+        with pytest.raises(MicrosoftSSOError) as error:
+            _select_user_proof(proofs, MFA_METHOD_APP)
+        assert malicious not in str(error.value)
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda: "1")
+
+        _select_user_proof(proofs, MFA_METHOD_CHOOSE)
+        selection_output = capsys.readouterr().err
+
+        client = MicrosoftSSOClient()
+        try:
+            client._print_mfa_phase_banner(
+                proofs, proofs[0], code_sent_on_begin=False
+            )
+        finally:
+            client.close()
+        banner_output = capsys.readouterr().err
+        output = selection_output + banner_output
+
+        assert "FULL-DISPLAY-SENTINEL" not in output
+        assert "user@example.com" not in output
+        assert "+919876541234" not in output
+        assert "Text code (SMS or WhatsApp): ***1234" in output
+        assert "Voice call to mobile: ***1234" in output
+
+    def test_short_phone_data_uses_placeholder_in_sms_banner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        proof = UserProof("OneWaySMS", "ignored", "REAL_SECRET", True)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        client = MicrosoftSSOClient()
+        try:
+            client._print_mfa_phase_banner(
+                [proof], proof, code_sent_on_begin=True
+            )
+        finally:
+            client.close()
+        output = capsys.readouterr().err
+
+        assert "REAL_SECRET" not in output
+        assert "A verification code was just sent to your phone." in output
+
+    def test_probe_script_does_not_render_untrusted_display(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.probe_mfa_methods import _print_proofs
+
+        proof = UserProof(
+            "OneWaySMS",
+            "FULL-DISPLAY-SENTINEL user@example.com +919876541234",
+            "+919876541234",
+            True,
+        )
+        _print_proofs(MfaProbeResult(page="converged", proofs=[proof]))
+        output = capsys.readouterr().out
+
+        assert "Text code (SMS or WhatsApp): ***1234" in output
+        assert "FULL-DISPLAY-SENTINEL" not in output
+        assert "user@example.com" not in output
+        assert "+919876541234" not in output
+
+    def test_probe_script_wraps_unexpected_error_without_traceback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from scripts import probe_mfa_methods as probe
+
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@example.com")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "PASSWORD_SENTINEL")
+        monkeypatch.setattr(
+            probe.MicrosoftSSOClient,
+            "probe_mfa_methods",
+            lambda _self, _username, _password: (_ for _ in ()).throw(
+                RuntimeError(
+                    "GET https://login.microsoftonline.com/?token=PROBE_SECRET"
+                )
+            ),
+        )
+
+        assert probe.main() == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "MFA method discovery failed" in captured.err
+        assert "PROBE_SECRET" not in captured.err
+        assert "PASSWORD_SENTINEL" not in captured.err
+        assert "Traceback" not in captured.err
 
     def test_choose_single_proof_skips_prompt(self) -> None:
         single = [UserProof("OneWaySMS", "SMS", "+91", True)]
@@ -637,14 +742,176 @@ class TestBuildSsoError:
         err = build_sso_error(None, "Password is incorrect", "POST credentials")
         assert "Password is incorrect" in str(err)
 
-    def test_mfa_required_recovery_describes_each_supported_flow(self) -> None:
+    def test_mfa_required_recovery_does_not_assume_code_channel(self) -> None:
         err = build_sso_error(50076, None, "POST credentials")
         recovery = err.recovery or ""
 
-        assert "--mfa-method app --totp <code>" in recovery
-        assert "--mfa-method sms then auth verify <code>" in recovery
-        assert "--mfa-method call/push then auth verify ok" in recovery
-        assert "Use --totp flag" not in recovery
+        assert "--mfa-method choose" in recovery
+        assert "auth verify <code>" in recovery
+        assert "auth verify ok" in recovery
+        assert "--totp" not in recovery
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "responseBody=BODY_SENTINEL",
+            "flow_token=FLOW_SENTINEL",
+            'oPostParams={"password":"PASSWORD_SENTINEL"}',
+            "cookieValue=COOKIE_SENTINEL",
+            "sessionVal=SESSION_SENTINEL",
+            "access_token=ACCESS_SENTINEL",
+            "client_secret=CLIENT_SENTINEL",
+            'headers={"Cookie":"COOKIE_SENTINEL"}',
+            '{"password":"PASSWORD_SENTINEL"}',
+            '{"X-Api-Key":"API_SENTINEL"}',
+            'error: {"password":"REAL_PASSWORD"}',
+            'error={"apiKey":"REAL_KEY"}',
+            "Unexpected response — page: responseBody=BODY_SENTINEL",
+            "OTP 123456",
+            "TOTP 123456",
+            "token abc123",
+            "canary abc123",
+            "error: OTP 123456",
+            "error: TOTP 123456",
+            "error: token abc123",
+            "error: canary abc123",
+            "api key: APISECRET",
+            "apikey: APISECRET",
+            "passphrase: SECRET",
+            "bearer REAL",
+            "session: REAL",
+            "error: api key: APISECRET",
+            "error: apikey: APISECRET",
+            "error: passphrase: SECRET",
+            "error: bearer REAL",
+            "error: session: REAL",
+            "password is PASSWORD_SENTINEL",
+            "token is TOKEN_SENTINEL",
+            "canary: CANARY_SENTINEL",
+            "otp: OTP_SENTINEL",
+            "password-hash: SECRET",
+            "passwordValue: SECRET",
+            "foo secret SECRET",
+            "secret: SECRET",
+            "error: password-hash: SECRET",
+            "error: passwordValue: SECRET",
+            "error: foo secret SECRET",
+            "error: secret: SECRET",
+            "password hunter2",
+            "Run: lighthouse auth login --pass PASSWORD_SENTINEL",
+        ],
+    )
+    def test_sso_error_never_echoes_secret_shaped_upstream_text(self, raw: str) -> None:
+        err = build_sso_error(None, raw, "MFA")
+        rendered = str(err)
+
+        assert "SENTINEL" not in rendered
+        assert "hunter2" not in rendered
+        assert "REAL_PASSWORD" not in rendered
+        assert "REAL_KEY" not in rendered
+        assert "123456" not in rendered
+        assert "abc123" not in rendered
+        assert "APISECRET" not in rendered
+        assert "SECRET" not in rendered
+        assert "REAL" not in rendered
+        assert "PASSWORD_SENTINEL" not in rendered
+        assert "TOKEN_SENTINEL" not in rendered
+        assert "CANARY_SENTINEL" not in rendered
+        assert "OTP_SENTINEL" not in rendered
+
+
+def test_endauth_total_deadline_skips_sleep_when_budget_is_exhausted() -> None:
+    client = MicrosoftSSOClient()
+    response = MagicMock()
+    response.json.return_value = {
+        "Retry": True,
+        "FlowToken": "flow",
+        "Ctx": "ctx",
+    }
+    client._post = MagicMock(return_value=response)
+    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
+
+    try:
+        with patch("lighthouse_cli.ms_auth.time.monotonic", side_effect=[0.0, 0.0, 121.0]):
+            with patch("lighthouse_cli.ms_auth.time.sleep") as sleep:
+                with pytest.raises(MicrosoftSSOError, match="timed out"):
+                    client._poll_end_auth(
+                        MS_SSO_URL,
+                        {
+                            "urlEndAuth": "/common/SAS/EndAuth",
+                            "oPerAuthPollingInterval": {"OneWaySMS": 999999},
+                        },
+                        proof,
+                        {"FlowToken": "flow", "Ctx": "ctx"},
+                        "123456",
+                    )
+    finally:
+        client.close()
+
+    assert client._post.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_safe_upstream_text_rejects_prefixed_credential_values() -> None:
+    from lighthouse_cli.ms_auth import safe_upstream_text
+
+    for raw in (
+        "error: api key: APISECRET",
+        "error: apikey: APISECRET",
+        "error: passphrase: SECRET",
+        "error: bearer REAL",
+        "error: session: REAL",
+        "error: password is PASSWORD_SENTINEL",
+        "error: token is TOKEN_SENTINEL",
+        "error: canary: CANARY_SENTINEL",
+        "error: otp: OTP_SENTINEL",
+        "error: password-hash: SECRET",
+        "error: passwordValue: SECRET",
+        "error: foo secret SECRET",
+        "error: secret: SECRET",
+    ):
+        assert safe_upstream_text(raw, fallback="FALLBACK") == "FALLBACK"
+
+
+@pytest.mark.parametrize(
+    ("entropy", "leaked"),
+    [
+        ("password=ENTROPY_SECRET", "ENTROPY_SECRET"),
+        ("42\nwith-control", "with-control"),
+        ("1234567", "1234567"),
+        ({"password": "ENTROPY_SECRET"}, "ENTROPY_SECRET"),
+    ],
+)
+def test_invalid_mfa_entropy_uses_fixed_approval_instruction(
+    entropy: object,
+    leaked: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = MicrosoftSSOClient()
+    retry = MagicMock()
+    retry.json.return_value = {"Retry": True, "Entropy": entropy}
+    success = MagicMock()
+    success.json.return_value = {"Success": True, "FlowToken": "flow", "Ctx": "ctx"}
+    client._post = MagicMock(side_effect=[retry, success])
+    client._checkpoint_mfa_pending = MagicMock()
+    proof = UserProof("PhoneAppNotification", "Authenticator", "", True)
+
+    try:
+        with patch("lighthouse_cli.ms_auth.time.sleep"):
+            client._poll_end_auth(
+                MS_SSO_URL,
+                {"urlEndAuth": "/common/SAS/EndAuth"},
+                proof,
+                {"FlowToken": "flow", "Ctx": "ctx"},
+                "",
+            )
+    finally:
+        client.close()
+
+    captured = capsys.readouterr()
+    assert leaked not in captured.err
+    assert "Approve sign-in in Authenticator to continue." in captured.err
+    assert captured.out == ""
 
 
 def test_endauth_poll_interval_is_capped_and_final_retry_does_not_sleep() -> None:
