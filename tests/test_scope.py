@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, CourseNotFoundError
 from lighthouse_cli.cli import cli
+from lighthouse_cli.commands import _resolve_course_scope
 
 
 @pytest.fixture
@@ -36,6 +38,46 @@ def _config_for(semesters, enrollments):
                 break
         tracked[oid] = {"name": name, "semester": sem_label}
     return {"tracked_courses": tracked}
+
+
+def test_course_scope_order_is_deterministic_and_does_not_mutate_inputs() -> None:
+    """Semester IDs sort numerically while extras retain input order and dedupe."""
+    semesters = [{"OrgUnitId": 200, "Name": "Sem II"}]
+    enrollments = [
+        {"OrgUnit": {"Id": 302, "Name": "Course C"}},
+        {"OrgUnit": {"Id": 300, "Name": "Course A"}},
+        {"OrgUnit": {"Id": 301, "Name": "Course B"}},
+        {"OrgUnit": {"Id": 300, "Name": "Course A"}},
+    ]
+    courses = [
+        {"OrgUnitId": 304, "Name": "Course D"},
+        {"OrgUnitId": 305, "Name": "Course E"},
+        {"OrgUnitId": 300, "Name": "Course A"},
+        {"OrgUnitId": 301, "Name": "Course B"},
+        {"OrgUnitId": 302, "Name": "Course C"},
+    ]
+    config = {
+        "300": {"semester": "Sem II"},
+        "301": {"semester": "Sem II"},
+        "302": {"semester": "Sem II"},
+    }
+    also_courses = ["305", "304", "305", "Course A"]
+    original_semesters = deepcopy(semesters)
+    original_enrollments = deepcopy(enrollments)
+    original_also_courses = list(also_courses)
+
+    client = MagicMock(spec=LighthouseClient)
+    client.get_semesters.return_value = semesters
+    client.get_course_enrollments.return_value = enrollments
+    client.get_courses.return_value = courses
+
+    with patch("lighthouse_cli.commands._load_course_config", return_value=config):
+        result = _resolve_course_scope(client, "200", also_courses)
+
+    assert result == ([300, 301, 302, 305, 304], "Sem II", 200, [])
+    assert semesters == original_semesters
+    assert enrollments == original_enrollments
+    assert also_courses == original_also_courses
 
 
 # ---------------------------------------------------------------------------

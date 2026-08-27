@@ -26,6 +26,7 @@ Covers:
 
 from __future__ import annotations
 
+import io
 import json as json_module
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -34,6 +35,13 @@ import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+
+
+class _TtyStringIO(io.StringIO):
+    """In-memory text stream that behaves like an interactive terminal."""
+
+    def isatty(self) -> bool:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +144,7 @@ class TestSubmitFile:
         """VAL-SUBMIT-016: Multipart/mixed body has JSON part + file part with correct Content-Disposition."""
         client, captured = _make_client_with_mock_session(200, sample_submission_response)
 
-        result = client.submit_file(
+        client.submit_file(
             org_unit_id=44347,
             folder_id=789,
             file_bytes=b"test file content",
@@ -361,6 +369,7 @@ class TestSubmitCommand:
 
             assert result.exit_code == 1
             assert "File not found" in result.output
+            mock_client_cls.assert_not_called()
 
     def test_submit_success_with_yes_flag_json_output(
         self,
@@ -701,6 +710,34 @@ class TestSubmitCommand:
             assert result.exit_code == 1
             assert "--yes" in result.output
 
+    def test_submit_non_tty_json_refusal_is_parseable_and_avoids_api(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+    ) -> None:
+        """A non-interactive JSON refusal keeps stdout machine-readable."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {
+            "error": "Refusing to submit without --yes in non-interactive mode. "
+            "Use --yes flag to confirm."
+        }
+        mock_client_cls.assert_not_called()
+
     def test_submit_yes_plus_json_only_json_on_stdout(
         self,
         cli_runner: CliRunner,
@@ -881,7 +918,9 @@ class TestSubmitCommand:
             )
 
             assert result.exit_code == 1
-            # Error is on stderr, not JSON on stdout (that's OK per spec)
+            assert json_module.loads(result.stdout) == {
+                "error": "Session expired. Run: lighthouse auth login"
+            }
             assert "Session expired" in result.output
 
 
@@ -984,22 +1023,124 @@ class TestSubmitConfirmation:
             assert result.exit_code == 1
             assert "--yes" in result.output
 
-    def test_confirmation_accepts_yes(self) -> None:
+    def test_confirmation_accepts_yes(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        sample_submission_response: dict,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
         """VAL-SUBMIT-007: --yes flag bypasses confirmation prompt.
 
-        This test verifies that when --yes is provided, the confirmation prompt
-        is skipped entirely (no input() call), which is the primary agent use case.
+        The command should submit successfully without trying to read an
+        interactive response, which is the primary agent use case.
         """
-        # Covered by test_submit_success_with_yes_flag_json_output
-        pass
+        from lighthouse_cli.cli import cli
 
-    def test_confirmation_empty_input_aborts(self) -> None:
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.return_value = sample_submission_response
+
+            with patch("builtins.input", side_effect=AssertionError("unexpected prompt")) as input_mock:
+                result = cli_runner.invoke(
+                    cli,
+                    ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
+                )
+
+        assert result.exit_code == 0
+        input_mock.assert_not_called()
+        mock_client.submit_file.assert_called_once()
+
+    def test_confirmation_empty_input_aborts(
+        self,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
         """VAL-SUBMIT-006: Empty input at confirmation aborts.
 
-        Note: Testing interactive prompts in CliRunner is complex.
-        The non-interactive refusal (without --yes) is tested in other tests.
+        JSON mode keeps the prompt and friendly cancellation message on stderr,
+        while stdout contains exactly one structured JSON result. The file body
+        is not read because the submission was declined.
         """
-        pass
+        from lighthouse_cli import submit as submit_module
+
+        stdout = _TtyStringIO()
+        stderr = io.StringIO()
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+
+            with (
+                patch.object(submit_module.sys, "stdout", stdout),
+                patch.object(submit_module.sys, "stderr", stderr),
+                patch("builtins.input", return_value="") as input_mock,
+                patch.object(Path, "read_bytes", autospec=True) as read_bytes_mock,
+            ):
+                exit_code = submit_module.cmd_submit(
+                    course_id="44347",
+                    folder_id="789",
+                    file_path=str(temp_pdf_file),
+                    json_output=True,
+                )
+
+        assert exit_code == 0
+        assert json_module.loads(stdout.getvalue()) == {"cancelled": True}
+        assert "Submit to 'Assignment 1 - Signals'" in stderr.getvalue()
+        assert "Confirm [y/N]:" in stderr.getvalue()
+        assert "Submission cancelled." in stderr.getvalue()
+        input_mock.assert_called_once_with()
+        read_bytes_mock.assert_not_called()
+        mock_client.submit_file.assert_not_called()
+
+    def test_human_confirmation_decline_remains_friendly(
+        self,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """A human-mode decline keeps the existing friendly text output."""
+        from lighthouse_cli import submit as submit_module
+
+        stdout = _TtyStringIO()
+        stderr = io.StringIO()
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+
+            with (
+                patch.object(submit_module.sys, "stdout", stdout),
+                patch.object(submit_module.sys, "stderr", stderr),
+                patch("builtins.input", return_value="n") as input_mock,
+                patch.object(Path, "read_bytes", autospec=True) as read_bytes_mock,
+            ):
+                exit_code = submit_module.cmd_submit(
+                    course_id="44347",
+                    folder_id="789",
+                    file_path=str(temp_pdf_file),
+                )
+
+        assert exit_code == 0
+        assert "Submit to 'Assignment 1 - Signals'" in stdout.getvalue()
+        assert "Confirm [y/N]:" in stdout.getvalue()
+        assert "Submission cancelled." in stdout.getvalue()
+        assert stderr.getvalue() == ""
+        input_mock.assert_called_once_with()
+        read_bytes_mock.assert_not_called()
+        mock_client.submit_file.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

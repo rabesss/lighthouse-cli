@@ -585,6 +585,7 @@ class TestConvergedMfa:
         assert ("POST", BEGIN_URL) in scripted.calls
         assert ("POST", END_URL) in scripted.calls
         assert ("POST", PROCESS_URL) in scripted.calls
+        assert read_pending() is None
 
     def test_app_notification_polls_until_approval(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """PhoneAppNotification polls EndAuth while Retry=true, then finishes."""

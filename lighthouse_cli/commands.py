@@ -123,6 +123,34 @@ def _multi_course_json(result: dict[str, Any], *, sem_name: str, action: str) ->
     return course
 
 
+def _multi_course_failure_json(
+    course_id: int,
+    *,
+    root: Path,
+    sem_name: str,
+    action: str,
+    error: Exception,
+) -> dict[str, Any]:
+    """Keep a failed scoped course visible in the multi-course JSON envelope."""
+    course: dict[str, Any] = {
+        "course_id": course_id,
+        "course_name": "",
+        "semester": sem_name,
+        "root": str(root),
+        "manifest_total": 0,
+        "downloaded": [],
+        "skipped": [],
+        "updated": [],
+        "duplicates": [],
+        "errors": [{"error": str(error) or error.__class__.__name__}],
+        "assignments_downloaded": [],
+        "assignment_errors": [],
+    }
+    if action == "sync":
+        course.update(orphaned=[], assignments_skipped=[], assignments_updated=[])
+    return course
+
+
 def _render_course_human(result: dict[str, Any], *, action: str, include_assignments: bool) -> int:
     """Render one engine result as human-readable text. Returns per-course exit code."""
     if result["mode"] is Mode.PLAN:
@@ -208,15 +236,25 @@ def _run_and_render_multi(
 ) -> int:
     """Run every scoped course through the sync engine and render the batch."""
     results: list[dict[str, Any]] = []
+    failed_courses: list[dict[str, Any]] = []
     rc = 0
     for cid in course_ids:
         try:
             results.append(run_course(client, cid, root, mode=mode, types=types, include_assignments=include_assignments))
         except Exception as e:
             rc = _error(str(e))
+            failed_courses.append(
+                _multi_course_failure_json(
+                    cid,
+                    root=root,
+                    sem_name=sem_name,
+                    action=action,
+                    error=e,
+                )
+            )
 
     if json_output:
-        courses = []
+        courses = list(failed_courses)
         for result in results:
             # Engine warnings reach stderr in every mode — an unknown
             # --types value must never change the downloaded set silently.
@@ -232,6 +270,7 @@ def _run_and_render_multi(
             courses.append(_multi_course_json(result, sem_name=sem_name, action=action))
             if result["errors"] or result["assignments"]["errors"]:
                 rc = 1
+        courses.sort(key=lambda course: course["course_id"])
         _output_multi_course_json(sem_id, sem_name, courses, also_errors)
         return rc
 
@@ -268,13 +307,20 @@ def cmd_download(
 
     Supports --semester, --also, --include-assignments, --assignment/--attachment.
     Creates sanitized folder per course with .lighthouse.json manifest."""
+    # Assignment-specific operations are intentionally single-course only.
+    # Validate before constructing a client so malformed combinations cannot
+    # touch credentials, make API calls, or enter a write-capable path.
+    if attachment_id is not None and assignment_id is None:
+        return _error("--attachment requires --assignment")
+    if (assignment_id is not None or attachment_id is not None) and course_id is None:
+        return _error("COURSE_ID is required when using --assignment or --attachment")
+    if dry_run and assignment_id is not None:
+        return _error("--dry-run cannot be used with --assignment")
+
     client = LighthouseClient()
     root = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_DOWNLOAD_DIR
     also_courses = also_courses or []
     mode = Mode.PLAN if dry_run else (Mode.FORCE if force else Mode.DOWNLOAD)
-
-    if assignment_id is not None and attachment_id is not None and course_id is None:
-        return _error("COURSE_ID is required when using --assignment and --attachment")
 
     if course_id is not None:
         try:
@@ -285,7 +331,8 @@ def cmd_download(
             return _download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
         return _run_and_render_single(
             client, org_id, root, mode, "download", types, json_output,
-            include_assignments=include_assignments, assignment_id=assignment_id,
+            include_assignments=include_assignments or assignment_id is not None,
+            assignment_id=assignment_id,
         )
 
     scope = _resolve_course_scope(client, semester, also_courses, "download")
@@ -463,9 +510,9 @@ def _resolve_course_scope(
 
     if not (config := _load_course_config()):
         print("Warning: No course config found. All courses will be included.\nRun: lighthouse config courses to set up tracking.", file=sys.stderr)
-    semester_course_ids = set(_filter_courses_by_semester(
+    semester_course_ids = sorted(set(_filter_courses_by_semester(
         enrollments, sem, semester_filter=semester_filter, config=config or None,
-    ))
+    )))
 
     also_errors, also_ids = [], []
     for ident in also_courses:
@@ -474,7 +521,14 @@ def _resolve_course_scope(
         except CourseNotFoundError as e:
             also_errors.append(str(e))
 
-    if not (all_course_ids := list(semester_course_ids) + [cid for cid in also_ids if cid not in semester_course_ids]):
+    all_course_ids = list(semester_course_ids)
+    seen_course_ids = set(semester_course_ids)
+    for cid in also_ids:
+        if cid not in seen_course_ids:
+            all_course_ids.append(cid)
+            seen_course_ids.add(cid)
+
+    if not all_course_ids:
         return _error(f"No courses to {action_label}.")
 
     return all_course_ids, sem.get("Name", "Unknown Semester"), int(sem["OrgUnitId"]), also_errors

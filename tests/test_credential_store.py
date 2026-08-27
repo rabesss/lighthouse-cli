@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
-
 import pytest
 
 from lighthouse_cli.auth import CredentialStore, CredentialStoreError
@@ -186,37 +184,6 @@ def test_empty_username_rejected_in_store(
     with pytest.raises(CredentialStoreError) as exc_info:
         store.save("", "secret")
     assert "username" in str(exc_info.value).lower()
-
-
-# ---------------------------------------------------------------------------
-# VAL-AUTH-035: --save-credentials without credentials is an error
-# ---------------------------------------------------------------------------
-
-def test_save_credentials_only_with_successful_login(
-    config_dir: Path,
-    credentials_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--save-credentials only saves on successful login."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    # Save credentials first
-    store = CredentialStore()
-    store.save("user@manipal.edu", "secret_password")
-
-    # Verify file exists
-    assert credentials_path.exists()
-    original_content = credentials_path.read_text()
-
-    # Simulate failed login - should NOT overwrite credentials
-    from lighthouse_cli.auth import AuthenticationError
-
-    with patch("lighthouse_cli.auth.CredentialStore.save", side_effect=AuthenticationError("Login failed")):
-        # Failed login attempt
-        pass
-
-    # Credentials file should be unchanged
-    assert credentials_path.read_text() == original_content
 
 
 # ---------------------------------------------------------------------------

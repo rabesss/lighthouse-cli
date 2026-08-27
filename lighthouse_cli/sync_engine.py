@@ -22,12 +22,13 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from .api import LighthouseClient
 from .assignments import assignment_key, download_for_course, sync_for_course
 from .manifest import MANIFEST_FILENAME, Manifest, ManifestCorruptError, compute_sha256
-from .utils import _sanitize_filename, get_course_name, resolve_course_folder_name
+from .utils import atomic_write, _sanitize_filename, get_course_name, resolve_course_folder_name
 
 
 class Mode(Enum):
@@ -86,7 +87,7 @@ def download_and_persist_topic(
         file_dest = dest
     file_dest.mkdir(parents=True, exist_ok=True)
     filepath = file_dest / sanitized_name
-    filepath.write_bytes(content)
+    atomic_write(filepath, content, mode=0o600)
     manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=topic.get("last_modified") or "")
     return content, sanitized_name, filepath
 
@@ -162,6 +163,36 @@ def _track_duplicate(sha_hashes: dict[str, list[dict]], file_hash: str, tid: str
     sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": filename})
 
 
+def _matching_local_topic_file(dest: Path, topic: dict[str, Any], entry: dict[str, Any]) -> Path | None:
+    """Return the manifest path when it is a contained, regular file of the expected size.
+
+    A matching TOC timestamp alone is not sufficient to skip a topic: the
+    local file may have been removed, replaced by a symlink, or truncated
+    since the manifest was written.  ``lstat`` deliberately rejects symlinks
+    while the resolved-path check also rejects symlinked parent directories
+    that would point outside the course root.
+    """
+    filename = entry.get("filename", "")
+    if not isinstance(filename, str) or not filename:
+        return None
+
+    try:
+        file_dest = dest / Path(topic["path"]).parent
+        if not file_dest.resolve().is_relative_to(dest.resolve()):
+            # Match the containment clamp in ``download_and_persist_topic``.
+            file_dest = dest
+        candidate = file_dest / filename
+        if not candidate.resolve(strict=False).is_relative_to(dest.resolve()):
+            return None
+        file_stat = candidate.lstat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    if not S_ISREG(file_stat.st_mode) or file_stat.st_size != entry.get("size"):
+        return None
+    return candidate
+
+
 def run_course(
     client: LighthouseClient,
     org_id: int,
@@ -221,24 +252,29 @@ def run_course(
         if mode is Mode.SYNC and existing is not None:
             if existing.get("last_modified") == (topic.get("last_modified") or ""):
                 filename = existing.get("filename", "")
-                # Strip a leading separator from display-only skipped paths.
-                # Download writes have their own resolved-path containment clamp.
-                rel_path = str(Path(topic["path"]).parent / filename).lstrip("/\\")
-                skipped.append(build_entry(tid, filename, rel_path, existing))
-                if file_hash := existing.get("sha256", ""):
-                    _track_duplicate(sha_hashes, file_hash, tid, filename)
-                continue
+                if _matching_local_topic_file(dest, topic, existing) is not None:
+                    # Strip a leading separator from display-only skipped paths.
+                    # Download writes have their own resolved-path containment clamp.
+                    rel_path = str(Path(topic["path"]).parent / filename).lstrip("/\\")
+                    skipped.append(build_entry(tid, filename, rel_path, existing))
+                    if file_hash := existing.get("sha256", ""):
+                        _track_duplicate(sha_hashes, file_hash, tid, filename)
+                    continue
             target_list = updated
         else:
             target_list = downloaded
 
         try:
-            content, sanitized_name, filepath = download_and_persist_topic(
+            _, sanitized_name, filepath = download_and_persist_topic(
                 client, org_id, topic, dest, manifest, warnings=result["warnings"],
             )
-            file_hash = compute_sha256(content)
-            _track_duplicate(sha_hashes, file_hash, tid, sanitized_name)
-            target_list.append(build_entry(tid, sanitized_name, str(filepath.relative_to(dest)), content, file_hash))
+            entry = manifest.get(tid)
+            if entry is None:
+                raise RuntimeError(f"Manifest entry missing for downloaded topic {tid}")
+            file_hash = entry.get("sha256", "")
+            if file_hash:
+                _track_duplicate(sha_hashes, file_hash, tid, sanitized_name)
+            target_list.append(build_entry(tid, sanitized_name, str(filepath.relative_to(dest)), entry, file_hash))
         except Exception as e:
             errors.append({"topic_id": tid, "filename": topic.get("title", ""), "error": str(e)})
 
@@ -250,7 +286,10 @@ def run_course(
             assignments.update(downloaded=downloaded_a, skipped=skipped_a, updated=updated_a, errors=errors_a)
             for entry in skipped_a + updated_a + downloaded_a:
                 live_orphans.pop(assignment_key(entry.get("folder_id", 0), entry.get("file_id", 0)), None)
-        result["orphaned"] = [build_entry(tid, e.get("filename", ""), "", e) for tid, e in live_orphans.items()]
+        result["orphaned"] = [
+            build_entry(tid, e.get("filename", ""), "", e)
+            for tid, e in sorted(live_orphans.items(), key=lambda item: str(item[0]))
+        ]
     elif include_assignments:
         downloaded_a, errors_a = download_for_course(
             client, org_id, dest, manifest, folder_ids=[assignment_id] if assignment_id else None,

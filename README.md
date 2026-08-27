@@ -52,17 +52,17 @@ lighthouse submit -f my_homework.pdf "signals" "Homework 1" --yes
 graph TD
     subgraph Auth
         A1["lighthouse auth login<br/>(HTTP SSO + optional Playwright)"]
-        A2["lighthouse auth verify<br/>(complete SMS MFA)"]
+        A2["lighthouse auth verify<br/>(complete pending MFA)"]
     end
     A1 -->|BeginAuth / pending| PENDING["mfa_pending.json"]
     A2 -->|EndAuth + SAML| COOKIES["~/.config/lighthouse-cli/cookies.json"]
     PENDING --> A2
 
     CLI["lighthouse CLI<br/>(Click)"] -->|lazy-loads| COOKIES
-    CLI -->|REST requests| API["D2L Brightspace API<br/>LE v1.93 / LP v1.59"]
+    CLI -->|REST requests| API["D2L Brightspace API<br/>LE v1.93 / LP v1.47"]
 
     CLI --> MANIFEST[".lighthouse.json<br/>(SHA-256 manifest per course)"]
-    CLI --> DOWNLOADS["~/Downloads/lighthouse/{course-name}/"]
+    CLI --> DOWNLOADS["~/Downloads/lighthouse/{course-name}-{course-id}/"]
 
     subgraph Security
         CRED["CredentialStore<br/>(Fernet + keyring)"]
@@ -74,26 +74,27 @@ graph TD
 - **Auth (SSO — primary):** Pure-HTTP Microsoft Entra (Azure AD) SSO
   (`ms_auth.py`, split across `ms_parse`/`ms_session`/`ms_mfa`/`ms_errors`),
   with optional Playwright for the username "Next" step only (falls back to
-  the mirrored HTTP sequence when the browser cannot launch). SMS and
-  voice-call MFA use `auth login` then `auth verify` so the code matches the
-  same `BeginAuth` session; offline Authenticator TOTP completes in one step
-  with `--mfa-method app --totp <code>`; push approval is codeless
-  (`--mfa-method push`). `auth mfa-methods` lists what the account supports.
+  the mirrored HTTP sequence when the browser cannot launch). SMS/WhatsApp
+  uses `auth login` then `auth verify <code>`; codeless voice-call and push
+  approvals use `auth login` then `auth verify ok`, all against the same
+  `BeginAuth` session. Offline Authenticator TOTP completes in one step with
+  `--mfa-method app --totp <code>`. `auth mfa-methods` lists what the account
+  supports.
   See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 - **Auth (CDP — `auth refresh` only):** Session cookies
   (`d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
   `d2lSameSiteCanaryB`) can also be extracted from a running browser via
-  Chrome DevTools Protocol — through `browser-harness`, Python websockets,
-  or a Node.js fallback.
-- **API:** D2L REST API — LE v1.93, LP v1.59.
+  Chrome DevTools Protocol through `browser-harness` or Python websockets.
+- **API:** D2L REST API — LE v1.93, LP v1.47.
 - **Secret storage:** All session secrets are encrypted at rest by
   `CredentialStore` (Fernet): `cookies.json`, `mfa_pending.json`, and
   `credentials.json` in `~/.config/lighthouse-cli/` (permissions `0600`;
   override the directory with `LIGHTHOUSE_CONFIG_DIR`). Only non-secret
   metadata (timestamps, MFA method) is stored unencrypted beside the
   ciphertext. See "Encryption key sources" below.
-- **Download directory:** `~/Downloads/lighthouse/{course-name}/`. Downloads
-  create course-name subdirectories. Override with `--output-dir` / `-o`.
+- **Download directory:** `~/Downloads/lighthouse/{course-name}-{course-id}/`.
+  Downloads create sanitized course-name subdirectories with the OrgUnitId
+  suffix. Override the root with `--output-dir` / `-o`.
 - **Manifest files:** `.lighthouse.json` files stored in download directories
   track SHA-256 hashes of previously downloaded files for incremental sync
   and deduplication.
@@ -189,10 +190,12 @@ never orphans data sealed under the other source. Legacy plaintext
 `cookies.json` / raw-Fernet `credentials.json` files are upgraded to the
 sealed format automatically on first successful read.
 
-### `lighthouse auth verify <CODE> [--json]`
+### `lighthouse auth verify <CODE|ok> [--json]`
 
 Complete MFA using the pending session from `auth login` (same `BeginAuth` —
-do not run `login` again before verifying). Required for non-TTY / agent workflows.
+do not run `login` again before verifying). Pass the SMS/WhatsApp code, or the
+literal `ok` after a codeless voice-call or push approval. Required for non-TTY
+/ agent workflows.
 
 ### `lighthouse auth mfa-methods [--user EMAIL] [--pass PASSWORD] [--json]`
 
@@ -236,7 +239,6 @@ Also accepts `--json`.
 
 1. `browser-harness` CLI tool (if installed)
 2. Direct CDP via Python `websockets` library
-3. Node.js one-liner fallback
 
 **API call:** `GET /d2l/api/versions/` (verification after extraction)
 
@@ -248,7 +250,7 @@ Auth refreshed and verified. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2
 **JSON output (`--json`):**
 ```json
 {
-  "valid": true,
+  "success": true,
   "cookies": ["d2lSameSiteCanaryA", "d2lSameSiteCanaryB", "d2lSecureSessionVal", "d2lSessionVal"]
 }
 ```
@@ -414,7 +416,7 @@ with `Modules` containing sub-`Modules` and `Topics`.
 
 ---
 
-### `lighthouse download COURSE_ID [-o DIR] [--dry-run] [--include-assignments] [--types TYPES] [--json]`
+### `lighthouse download [COURSE_ID] [OPTIONS]`
 
 Download files from a course.
 
@@ -422,17 +424,22 @@ Download files from a course.
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `COURSE_ID` | Yes | Numeric OrgUnitId or name substring |
+| `COURSE_ID` | No | Numeric OrgUnitId or name substring; omit to process the latest semester's scope |
 
 **Flags:**
 
 | Flag | Description |
 |------|-------------|
-| `-o`, `--output-dir` | Custom download directory (default: `~/Downloads/lighthouse/{course-name}/`) |
+| `-o`, `--output-dir` | Root download directory (default: `~/Downloads/lighthouse/`; each course gets a subdirectory) |
 | `--dry-run` | List files that would be downloaded without actually downloading |
+| `--json` | Output raw JSON (a plan array in dry-run mode, or a result object) |
+| `--force` | Wipe the manifest and re-download everything |
+| `--types` | Content types to download: `file`, `html`, or both (comma-separated; default: `file`) |
+| `-s`, `--semester` | Filter multi-course scope by semester name or ID |
+| `--also` | Add another course by name or ID; may be repeated |
 | `--include-assignments` | Also download assignment attachments from dropbox folders |
-| `--types` | Filter by file type (comma-separated, e.g. `--types pdf,docx`) |
-| `--json` | Output structured JSON (download plan or result) |
+| `--assignment ID` | Download attachments from one assignment folder; requires `COURSE_ID` |
+| `--attachment ID` | Download one attachment from the selected `--assignment`; requires `COURSE_ID` |
 
 **API calls:**
 - `GET /d2l/api/le/1.93/{orgId}/content/toc` (to enumerate topics)
@@ -440,15 +447,16 @@ Download files from a course.
 - `GET /d2l/api/le/1.93/{orgId}/dropbox/folders/` (when `--include-assignments`)
 - `GET /d2l/api/le/1.93/{orgId}/dropbox/folders/{folderId}/attachments/{fileId}` (assignment attachments)
 
-Downloads preserve the module path structure from the content tree. Only
-topics with `TypeIdentifier == "File"` are downloaded (links are skipped).
+Downloads preserve the module path structure from the content tree. By default
+file topics (`TypeIdentifier == "File"`) are downloaded; use `--types html` to
+include HTML topics. Links are skipped.
 Downloads create course-name subdirectories (e.g.
-`~/Downloads/lighthouse/Introduction to CS/` instead of
+`~/Downloads/lighthouse/Introduction to CS-1001/` instead of
 `~/Downloads/lighthouse/1001/`).
 
 **Human output (all files, `--dry-run`):**
 ```
-Would download 12 files to ~/Downloads/lighthouse/Introduction to CS/
+Would download 12 files to ~/Downloads/lighthouse/Introduction to CS-1001/
 
   [2345] L1-L2 Introduction to computing.pdf
   [2346] L3 Signal Classification.pdf
@@ -464,9 +472,26 @@ Would download 12 files to ~/Downloads/lighthouse/Introduction to CS/
 ]
 ```
 
+**JSON output (`--json`, normal download):**
+```json
+{
+  "course_id": 1001,
+  "course_name": "Introduction to CS",
+  "folder": "/tmp/lighthouse/Introduction to CS-1001",
+  "manifest": "/tmp/lighthouse/Introduction to CS-1001/.lighthouse.json",
+  "downloaded": [
+    {"topic_id": "2345", "filename": "L1-L2 Introduction to computing.pdf", "size": 250880, "path": "Unit 1/L1-L2 Introduction to computing.pdf"}
+  ],
+  "errors": []
+}
+```
+
+Without `COURSE_ID`, the JSON result is a multi-course envelope with
+`semester`, `synced_at`, `summary`, `courses`, and `also_errors` keys.
+
 ---
 
-### `lighthouse sync COURSE_ID [-o DIR] [--semester FILTER] [--also COURSE] [--force] [--json]`
+### `lighthouse sync [COURSE_ID] [OPTIONS]`
 
 Incremental sync command that downloads only new or changed files using
 manifest-based tracking with SHA-256 dedup.
@@ -475,17 +500,19 @@ manifest-based tracking with SHA-256 dedup.
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `COURSE_ID` | Yes | Numeric OrgUnitId or name substring |
+| `COURSE_ID` | No | Numeric OrgUnitId or name substring; omit to process the latest semester's scope |
 
 **Flags:**
 
 | Flag | Description |
 |------|-------------|
-| `-o`, `--output-dir` | Custom download directory (default: `~/Downloads/lighthouse/{course-name}/`) |
-| `--semester` | Resolve to latest semester and sync all its courses |
-| `--also` | Additional courses to sync (can be specified multiple times) |
+| `-o`, `--output-dir` | Root download directory (default: `~/Downloads/lighthouse/`; each course gets a subdirectory) |
+| `--json` | Output raw JSON |
 | `--force` | Force re-download of all files, ignoring manifest |
-| `--json` | Output structured JSON result |
+| `--types` | Content types to sync: `file`, `html`, or both (comma-separated; default: `file`) |
+| `-s`, `--semester` | Filter multi-course scope by semester name or ID |
+| `--also` | Add another course by name or ID; may be repeated |
+| `--include-assignments` | Also sync assignment attachments |
 
 **How it works:**
 
@@ -513,33 +540,31 @@ Contains a mapping of topic IDs to their SHA-256 hashes:
 ```
 
 **Multi-course scope:**
-- `--semester` resolves to the latest semester and syncs all its courses
+- Omitting `COURSE_ID` resolves the latest semester; `--semester` selects a
+  semester by name or ID and syncs its courses
 - `--also` adds additional courses (by ID or name) to the sync scope
 - Each course gets its own subdirectory and manifest file
 
 **Human output:**
 ```
-Syncing Introduction to CS...
-  New:      3 files
-  Updated:  1 file
-  Unchanged: 8 files
-  Orphaned:  2 topics (files no longer in content tree)
-  Downloaded: 4.2 MB
+Synced Introduction to CS: 3 new, 1 updated, 8 skipped, 2 orphaned, 0 errors
 ```
 
 **JSON output (`--json`):**
 ```json
 {
   "course_id": 1001,
-  "new": 3,
-  "updated": 1,
-  "unchanged": 8,
-  "orphaned": 2,
-  "downloaded_bytes": 4404019,
-  "files": [
-    {"path": "Unit 2/New Notes.pdf", "status": "new", "size_kb": 312.5},
-    {"path": "Unit 1/Updated Slides.pdf", "status": "updated", "size_kb": 156.8}
-  ]
+  "course_name": "Introduction to CS",
+  "folder": "/tmp/lighthouse/Introduction to CS-1001",
+  "downloaded": [
+    {"topic_id": "2345", "filename": "New Notes.pdf", "path": "Unit 2/New Notes.pdf", "size_kb": 312.5, "sha256": "...", "extension": ".pdf"}
+  ],
+  "skipped": [
+    {"topic_id": "2346", "filename": "Existing Notes.pdf", "path": "Unit 1/Existing Notes.pdf", "size_kb": 156.8, "sha256": "", "extension": ".pdf"}
+  ],
+  "updated": [],
+  "orphaned": [],
+  "errors": []
 }
 ```
 
@@ -652,7 +677,7 @@ Submit a file to a D2L dropbox folder.
 | Flag | Description |
 |------|-------------|
 | `-f`, `--file` | Path to the file to submit (required) |
-| `--yes` | Skip confirmation prompt (also auto-skipped in non-TTY) |
+| `--yes` | Skip confirmation prompt; required in non-TTY mode |
 | `--json` | Output structured JSON result |
 
 **API call:** `POST /d2l/api/le/1.93/{orgId}/dropbox/folders/{folderId}/submissions/mysubmissions/`
@@ -663,8 +688,9 @@ Submit a file to a D2L dropbox folder.
 - `FOLDER_ID`: numeric folder ID or case-insensitive name substring match
   against assignment names
 
-**Confirmation:** Prompts for confirmation before submitting. Skipped with
-`--yes` or when running in a non-TTY environment (e.g. from an agent).
+**Confirmation:** Prompts for confirmation in a TTY unless `--yes` is set. In
+non-TTY environments (e.g. from an agent), `--yes` is required; otherwise the
+command refuses to submit.
 
 **Error handling:**
 - Session expired → prints message to stderr, exit code 1
@@ -683,8 +709,10 @@ Submitted successfully. Submission ID: 5001
 {
   "submission_id": 5001,
   "folder_id": 101,
+  "folder_name": "Homework 1",
   "course_id": 1001,
-  "file": "homework.pdf",
+  "course_name": "Introduction to CS",
+  "file": {"name": "homework.pdf", "size_bytes": 24576},
   "submitted_at": "2025-05-10T15:30:00Z"
 }
 ```
@@ -883,12 +911,10 @@ All endpoints are relative to `https://lighthouse.manipal.edu`.
 - **Orphaned topics:** Files that appear in the manifest but are no longer in
   the content tree are reported as "orphaned". They are not deleted
   automatically — the user must clean them up manually.
-- **Credential storage:** `CredentialStore` uses Fernet symmetric encryption
-  for credential storage with OS keyring as a fallback. If neither is
-  available, credentials are stored in plaintext (with a warning).
-- **Headless auth timeout:** The `auth login` command has a default 120-second
-  timeout to account for 2FA. If authentication takes longer, use
-  `--timeout` to increase it.
+- **Credential storage:** `CredentialStore` always seals credentials, cookies,
+  and pending MFA state with Fernet. A usable
+  `LIGHTHOUSE_SECRETS_PASSPHRASE` or OS keyring is required; authentication
+  fails fast if neither is available.
 
 ## For AI Agents
 
@@ -902,11 +928,11 @@ programmatically. Here's the recommended workflow:
 
 2. If expired, refresh (requires browser running with CDP)
    $ lighthouse auth refresh --cdp-port 34165
-   -> {valid: true, cookies: [...]}
+   -> {success: true, cookies: [...]}
 
    OR use headless browser auth (no pre-running browser needed)
    $ lighthouse auth login
-   -> {valid: true, cookies: [...]}
+   -> {success: true, cookies: [...]}
 
 3. Always use --json for structured output
    $ lighthouse courses --json
@@ -923,20 +949,20 @@ programmatically. Here's the recommended workflow:
 
 6. Download all files from a course
    $ lighthouse download "signals"
-   # saves to ~/Downloads/lighthouse/{course-name}/
+   # saves to ~/Downloads/lighthouse/{course-name}-{course-id}/
 
 7. Download including assignment attachments
    $ lighthouse download "signals" --include-assignments --json
 
-8. Filter downloads by file type
-   $ lighthouse download "signals" --types pdf,docx --json
+8. Include file and HTML content types
+   $ lighthouse download "signals" --types file,html --json
 
 9. Incremental sync — only download new/changed files
     $ lighthouse sync "signals" --json
-    # returns {new, updated, unchanged, orphaned, downloaded_bytes}
+    # returns {course_id, course_name, folder, downloaded, skipped, updated, orphaned, errors}
 
-10. Sync multiple courses at once
-    $ lighthouse sync "signals" --also "math" --also "physics" --json
+10. Sync the latest-semester scope plus additional courses
+    $ lighthouse sync --also "math" --also "physics" --json
 
 11. Check assignments for a course
     $ lighthouse assignments "signals" --json
@@ -944,7 +970,7 @@ programmatically. Here's the recommended workflow:
 
 12. Submit a file to a dropbox folder
     $ lighthouse submit -f homework.pdf "signals" "Homework 1" --yes --json
-    # returns {submission_id, folder_id, course_id, file, submitted_at}
+    # returns {submission_id, folder_id, folder_name, course_id, course_name, file: {name, size_bytes}, submitted_at}
 
 13. Resolve folder ID by name
     $ lighthouse submit -f report.pdf "signals" "Lab Report" --yes --json
@@ -964,8 +990,8 @@ programmatically. Here's the recommended workflow:
   skips unchanged files and only downloads new/modified ones.
 - Orphaned topics in sync output indicate files that were removed from the
   LMS content tree but still exist locally.
-- The `submit` command auto-skips confirmation in non-TTY mode, so agents
-  don't need `--yes`. But include it anyway for safety.
+- The `submit` command requires `--yes` in non-TTY mode; include it explicitly
+  in agent and automation invocations.
 - Use `assignments --json` to discover folder IDs before submitting.
 - Course and folder resolution both support name substrings, so you don't
   need to memorize numeric IDs.
@@ -974,17 +1000,16 @@ programmatically. Here's the recommended workflow:
 
 ```
 lighthouse-cli/
-  pyproject.toml           Package config, dependencies (click, requests, rich,
-                           playwright, cryptography, keyring, requests-toolbelt)
+  pyproject.toml           Package config and bounded core/optional dependencies
   README.md                This file
   lighthouse_cli/
     __init__.py            Version string (__version__ = "0.1.0")
     api.py                 LighthouseClient — HTTP client, auth, cookie
                            management, all API methods, course ID resolution,
                            CDP-based cookie extraction (used by auth refresh)
-    auth.py                cmd_auth_login / cmd_auth_verify orchestration;
-                           CredentialStore — Fernet encryption with keyring
-                           fallback for secure credential storage
+    auth.py                cmd_auth_login / cmd_auth_verify / cmd_auth_refresh
+                           orchestration
+    credential_store.py    Fernet encryption with passphrase/keyring key sources
     ms_auth.py             MicrosoftSSOClient — pure-HTTP Microsoft Entra (Azure
                            AD) SSO (SAML + ConvergedTFA MFA); username bootstrap
                            via optional Playwright
@@ -1014,12 +1039,12 @@ lighthouse-cli/
 - `resolve_course_id()` (api.py) — Resolves a string identifier (numeric
   OrgUnitId or name substring) to an integer course ID.
 - `refresh_auth_from_browser()` (api.py) — Extracts cookies from browser via
-  CDP (tries browser-harness, then websockets, then Node.js).
+  CDP (tries browser-harness, then loopback-validated Python websockets).
 - `MicrosoftSSOClient` (ms_auth.py) — pure-HTTP Microsoft Entra (Azure AD) SSO:
   replays the `$Config` / SAS-MFA / SAML ACS endpoints, handles two-step SMS
   MFA and offline Authenticator TOTP, and returns D2L session cookies.
   Playwright is used only to bootstrap the username "Next" step.
-- `CredentialStore` (auth.py) — Secure credential storage using Fernet
+- `CredentialStore` (credential_store.py) — Secure credential storage using Fernet
   symmetric encryption with OS keyring fallback.
 - `Manifest` (manifest.py) — Manages `.lighthouse.json` files in download
   directories. Tracks file paths with SHA-256 hashes. Supports atomic writes
@@ -1028,28 +1053,31 @@ lighthouse-cli/
   from Content-Disposition headers.
 - `cmd_*` functions (commands.py) — One per CLI command. Return exit code
   (0 or 1). Handle `--json` output mode internally.
-- `_walk_content_tree()` / `_flatten_all_topics()` (commands.py) — Recursively
-  process the nested content TOC for display and download.
+- `_walk_content_tree()` (commands.py) and `flatten_all_topics()`
+  (sync_engine.py) — Recursively process the nested content TOC for display
+  and download.
 
-**Dependencies:**
+**Core dependencies:**
 
 | Package | Purpose |
 |---------|---------|
-| `click>=8.1` | CLI framework (commands, options, arguments) |
+| `click>=8.2` | CLI framework (commands, options, arguments) |
 | `requests>=2.31` | HTTP client for D2L REST API |
-| `rich>=13.0` | Pretty terminal tables (graceful fallback to plain text) |
-| `playwright>=1.40` | Headless browser for auth login |
+| `beautifulsoup4>=4.12` | Microsoft SSO HTML parsing |
 | `cryptography>=41.0` | Fernet encryption for credential storage |
-| `keyring>=24.0` | OS keyring integration for credential storage |
-| `requests-toolbelt>=1.0` | Multipart encoding for file submission |
 
-**Optional dependencies (for CDP cookie extraction):**
+**Optional dependency groups:**
 
-| Package | Purpose |
-|---------|---------|
-| `browser-harness` | CLI tool for CDP cookie extraction |
-| `websockets` | Python CDP client fallback |
-| Node.js | Final fallback for CDP cookie extraction |
+| Extra | Package | Purpose |
+|-------|---------|---------|
+| `rich` | `rich>=13.0` | Pretty terminal tables (plain-text fallback without it) |
+| `auth` | `playwright>=1.40` | Browser bootstrap for the SSO username step |
+| `credentials` | `keyring>=24.0` | OS keyring source for the Fernet key |
+| `cdp` | `websockets>=12,<16` | Direct loopback CDP cookie extraction fallback |
+
+Install the direct browser-refresh fallback with `pip install -e '.[cdp]'`.
+An installed `browser-harness` CLI is used first and does not require that
+extra.
 
 **Dev dependencies:**
 
@@ -1062,8 +1090,13 @@ lighthouse-cli/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LIGHTHOUSE_CONFIG_DIR` | `~/.config/lighthouse-cli` | Directory for cookie storage |
+| `LIGHTHOUSE_USERNAME` | — | Username for `auth login` and `auth mfa-methods` when flags are omitted |
+| `LIGHTHOUSE_PASSWORD` | — | Password for `auth login` and `auth mfa-methods` when flags are omitted |
+| `LIGHTHOUSE_MFA_METHOD` | `auto` | Default MFA selector (`auto`, `sms`, `app`, `call`, `push`, or `choose`) |
+| `LIGHTHOUSE_SECRETS_PASSPHRASE` | — | Fernet key source for encrypted credentials, cookies, and pending MFA state |
+| `LIGHTHOUSE_CONFIG_DIR` | `~/.config/lighthouse-cli` | Directory for cookies, credentials, MFA state, and course tracking config |
 | `LIGHTHOUSE_CDP_PORT` | `34165` | Default CDP port for `auth refresh` |
+| `LIGHTHOUSE_DEBUG_FLOW` | — | Path for sanitized, secret-free HTTP flow diagnostics during SSO |
 
 ## Contributing & AI Code Review
 

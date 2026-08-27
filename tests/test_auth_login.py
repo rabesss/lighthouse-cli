@@ -806,6 +806,23 @@ def test_verify_never_saves_credentials(
     store_cls.return_value.save.assert_not_called()
 
 
+def test_verify_without_pending_reports_usage_before_key_preflight(
+    cli_runner: CliRunner, isolated_config: Path,
+) -> None:
+    """A missing checkpoint must not create or probe an encryption key."""
+    store = MagicMock()
+    store.mfa_pending_file = isolated_config / "mfa_pending.json"
+
+    with patch.object(auth_mod, "CredentialStore", return_value=store), \
+         patch.object(auth_mod, "MicrosoftSSOClient") as sso_cls:
+        result = cli_runner.invoke(cli, ["auth", "verify", "123456", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"].startswith("No pending MFA session")
+    store.preflight.assert_not_called()
+    sso_cls.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Empty credential rejection
 # ---------------------------------------------------------------------------

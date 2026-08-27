@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
+from lighthouse_cli.commands import cmd_download
 from lighthouse_cli.manifest import MANIFEST_FILENAME
 
 
@@ -54,6 +55,7 @@ class TestDownloadManifestIntegration:
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--json"],
             )
+            assert result.exit_code == 0
 
             # Check manifest was created
             course_dir = output_dir / "Signals & Systems-44347"
@@ -99,6 +101,7 @@ class TestDownloadManifestIntegration:
                 ["download", "44347", "-o", str(output_dir), "--json"],
             )
 
+            assert result.exit_code == 0
             # Course folder should be named after sanitized course name + org_id
             course_dir = output_dir / "Signals & Systems-44347"
             assert course_dir.exists(), f"Expected {course_dir}. Contents: {list(output_dir.iterdir())}"
@@ -126,6 +129,7 @@ class TestDownloadManifestIntegration:
                 cli,
                 ["download", "99999", "-o", str(output_dir), "--json"],
             )
+            assert result.exit_code == 0
 
             # Should create "Intro_ CS _2025_ _ Section_1_-99999"
             expected_folder = "Intro_ CS _2025_ _ Section_1_-99999"
@@ -165,6 +169,7 @@ class TestDownloadManifestIntegration:
                 cli,
                 ["download", "44347", "-o", str(output_dir)],
             )
+            assert result.exit_code == 0
 
             course_dir = output_dir / "Signals-44347"
             manifest_path = course_dir / MANIFEST_FILENAME
@@ -203,6 +208,7 @@ class TestDownloadManifestIntegration:
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--json"],
             )
+            assert result.exit_code == 0
 
             course_dir = output_dir / "Test-44347"
             manifest_path = course_dir / MANIFEST_FILENAME
@@ -237,6 +243,7 @@ class TestSanitizationIntegration:
                 cli,
                 ["download", "44347", "-o", str(output_dir)],
             )
+            assert result.exit_code == 0
 
             course_dir = output_dir / "Test-44347"
             manifest_path = course_dir / MANIFEST_FILENAME
@@ -277,6 +284,7 @@ class TestSanitizationIntegration:
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--force"],
             )
+            assert result.exit_code == 0
 
             # Manifest should now be valid JSON
             manifest_data = json.loads(manifest_path.read_text())
@@ -480,3 +488,79 @@ class TestNoCourseIdDownloadsLatestSemester:
             assert result.exit_code == 0
             # Dry run should mention "Would download"
             assert "Would download" in result.output
+
+
+class TestDownloadAssignmentValidation:
+    """Invalid assignment flag combinations fail before any side effects."""
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (["--attachment", "1"], "--attachment requires --assignment"),
+            (
+                ["--assignment", "101", "--attachment", "1"],
+                "COURSE_ID is required",
+            ),
+        ],
+    )
+    def test_invalid_assignment_scope_is_error_without_api_calls(
+        self, cli_runner, tmp_path, args, message
+    ):
+        output_dir = tmp_path / "downloads"
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
+             patch("lighthouse_cli.commands._download_single_attachment") as attachment:
+            result = cli_runner.invoke(cli, ["download", *args, "-o", str(output_dir)])
+
+        assert result.exit_code == 1, result.output
+        assert message in result.output
+        client_cls.assert_not_called()
+        attachment.assert_not_called()
+        assert not output_dir.exists()
+
+    def test_specific_attachment_dry_run_is_rejected_without_writes(
+        self, cli_runner, tmp_path
+    ):
+        output_dir = tmp_path / "downloads"
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
+             patch("lighthouse_cli.commands._download_single_attachment") as attachment:
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "download", "44347", "--assignment", "101", "--attachment", "1",
+                    "--dry-run", "--json", "-o", str(output_dir),
+                ],
+            )
+
+        assert result.exit_code == 1, result.output
+        assert "--dry-run" in result.output
+        client_cls.assert_not_called()
+        attachment.assert_not_called()
+        assert not output_dir.exists()
+
+    def test_assignment_dry_run_is_rejected_without_api_calls(self, cli_runner, tmp_path):
+        output_dir = tmp_path / "downloads"
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls:
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "download", "44347", "--assignment", "101", "--dry-run",
+                    "--json", "-o", str(output_dir),
+                ],
+            )
+
+        assert result.exit_code == 1, result.output
+        assert "--dry-run cannot be used with --assignment" in result.output
+        client_cls.assert_not_called()
+        assert not output_dir.exists()
+
+    def test_assignment_only_enables_folder_scoped_download(self):
+        """A valid --assignment without --attachment must not be silently ignored."""
+        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
+             patch("lighthouse_cli.commands.resolve_course_id", return_value=44347), \
+             patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run:
+            result = cmd_download(course_id="44347", assignment_id=101)
+
+        assert result == 0
+        client_cls.assert_called_once_with()
+        assert run.call_args.kwargs["include_assignments"] is True
+        assert run.call_args.kwargs["assignment_id"] == 101

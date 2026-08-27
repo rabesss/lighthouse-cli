@@ -11,7 +11,7 @@ from __future__ import annotations
 import click
 
 from . import __version__
-from .auth import cmd_auth_login, cmd_auth_mfa_methods, cmd_auth_verify
+from .auth import cmd_auth_login, cmd_auth_mfa_methods, cmd_auth_refresh, cmd_auth_verify
 from .commands import (
     cmd_announcements,
     cmd_assignments,
@@ -60,35 +60,24 @@ def auth_status(json_output: bool) -> None:
 
 
 @auth.command("refresh")
-@click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
-@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
-@click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option(
-    "--mfa-method",
-    type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
+    "--cdp-port",
     default=None,
-    help="MFA: auto (tenant default), sms, call (voice), app (TOTP), push (approve), or choose.",
+    help="Loopback Chrome DevTools Protocol port (default: LIGHTHOUSE_CDP_PORT or 34165).",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
 def auth_refresh(
-    username: str | None,
-    password: str | None,
-    totp: str | None,
-    mfa_method: str | None,
+    cdp_port: str | None,
     json_output: bool,
 ) -> None:
-    """Refresh session cookies via Microsoft SSO.
+    """Refresh cookies from a signed-in browser through loopback CDP.
 
-    Runs the full HTTP-based SSO login flow to obtain fresh session cookies.
-    Equivalent to ``auth login`` without the ``--save-credentials`` option.
+    The browser must already be running with a CDP port and signed in to
+    lighthouse.manipal.edu. Use ``auth login`` for the pure-HTTP SSO flow.
     """
-    raise SystemExit(cmd_auth_login(
-        username=username,
-        password=password,
-        totp_code=totp,
-        totp_stdin=(totp == "-"),
+    raise SystemExit(cmd_auth_refresh(
+        cdp_port=cdp_port,
         json_output=json_output,
-        mfa_method=mfa_method,
     ))
 
 

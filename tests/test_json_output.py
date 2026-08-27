@@ -664,6 +664,9 @@ class TestMultiCourseJsonOutput:
                 "last_modified": "2025-12-01T00:00:00Z",
             },
         }))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "f.pdf").write_bytes(b"x" * 100)
 
         def get_content_toc(cid):
             return {

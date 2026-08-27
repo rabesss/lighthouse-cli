@@ -40,6 +40,9 @@ class TestSyncIncremental:
             }
         }
         manifest_path.write_text(json.dumps(manifest_data))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "file.pdf").write_bytes(b"x" * 1024)
 
         toc = {
             "Modules": [{
@@ -88,6 +91,9 @@ class TestSyncIncremental:
             }
         }
         manifest_path.write_text(json.dumps(manifest_data))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "file.pdf").write_bytes(b"x" * 1024)
 
         toc = {
             "Modules": [{
@@ -134,6 +140,9 @@ class TestSyncIncremental:
             }
         }
         manifest_path.write_text(json.dumps(manifest_data))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "existing.pdf").write_bytes(b"x" * 1024)
 
         toc = {
             "Modules": [{
@@ -184,7 +193,6 @@ class TestSyncIncremental:
             }
         }
         manifest_path.write_text(json.dumps(manifest_data))
-
         toc = {
             "Modules": [{
                 "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
@@ -378,6 +386,9 @@ class TestSyncDownloadedVsUpdated:
             },
         }
         manifest_path.write_text(json.dumps(manifest_data))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "unchanged.pdf").write_bytes(b"x" * 1024)
 
         toc = {
             "Modules": [{

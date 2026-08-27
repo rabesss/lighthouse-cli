@@ -23,13 +23,31 @@ def cmd_submit(
     FOLDER_ID is the dropbox folder identifier (numeric ID or name substring).
 
     Prompts for confirmation before submitting (unless --yes is set).
-    Shows course name, folder name, and file path before submitting.
+    Shows course name, folder name, and file path before submitting. In JSON
+    mode, the prompt is written to stderr so stdout remains JSON-only.
 
     On success, prints JSON with submission details (submission_id, folder_id,
     folder_name, course_id, course_name, file, submitted_at).
 
     Non-interactive / agent-friendly: --yes + --json = only JSON on stdout.
     """
+    # Validate the local input before constructing a client or resolving any
+    # remote identifiers. A declined submission should not read the file body,
+    # so defer ``read_bytes`` until after confirmation below.
+    file_path_obj = Path(file_path).expanduser().resolve()
+    if not file_path_obj.exists() or not file_path_obj.is_file():
+        return _submit_error(f"File not found: {file_path}", json_output)
+
+    filename = file_path_obj.name
+
+    # Keep the explicit confirmation requirement for non-interactive callers.
+    # This check happens after local validation, but before any API work.
+    if not yes and not sys.stdout.isatty():
+        return _submit_error(
+            "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
+            json_output,
+        )
+
     client = LighthouseClient()
 
     try:
@@ -37,32 +55,32 @@ def cmd_submit(
         course_name = _get_course_name(client, org_id)
         folder_id_int = _resolve_folder_id(client, org_id, folder_id)
     except Exception as e:
-        return _error(str(e))
+        return _submit_error(str(e), json_output)
 
     folder_name = _get_folder_name(client, org_id, folder_id_int)
 
-    # Check file exists (fail fast before API call)
-    file_path_obj = Path(file_path).expanduser().resolve()
-    if not file_path_obj.exists():
-        return _error(f"File not found: {file_path}")
+    # Confirmation prompt (skip with --yes). JSON-mode prompts must not pollute
+    # stdout; ``input`` is called without a prompt because input() writes its
+    # prompt to stdout.
+    if not yes:
+        prompt_stream = sys.stderr if json_output else sys.stdout
+        print(
+            f"Submit to '{folder_name}' in '{course_name}'?\n  File: {file_path_obj}",
+            file=prompt_stream,
+        )
+        print("Confirm [y/N]: ", end="", flush=True, file=prompt_stream)
+        if input().strip().lower() not in ("y", "yes"):
+            print("Submission cancelled.", file=prompt_stream)
+            if json_output:
+                _output_json({"cancelled": True})
+            return 0
 
-    # Read file bytes
+    # Read the body only once the user has confirmed (or --yes bypassed the
+    # prompt), so declined submissions do no unnecessary file work.
     try:
         file_bytes = file_path_obj.read_bytes()
     except OSError as e:
-        return _error(f"Could not read file: {e}")
-
-    filename = file_path_obj.name
-
-    # Confirmation prompt (skip with --yes or non-TTY)
-    if not yes:
-        if not sys.stdout.isatty():
-            return _error("Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.")
-
-        print(f"Submit to '{folder_name}' in '{course_name}'?\n  File: {file_path_obj}")
-        if input("Confirm [y/N]: ").strip().lower() not in ("y", "yes"):
-            print("Submission cancelled.")
-            return 0
+        return _submit_error(f"Could not read file: {e}", json_output)
 
     # Make the submission
     try:
@@ -74,10 +92,10 @@ def cmd_submit(
             description=f"Submitted via lighthouse-cli: {filename}",
         )
     except Exception as e:
-        _error(str(e))
+        messages = [str(e)]
         if isinstance(e, FileNotFoundError):
-            _error("Run: lighthouse assignments")
-        return 1
+            messages.append("Run: lighthouse assignments")
+        return _submit_error("\n".join(messages), json_output)
 
     # Build output
     submitted_at = result.get("submittedAt", _utc_now_iso())
@@ -97,6 +115,14 @@ def cmd_submit(
               f"  Submitted at: {submitted_at}")
 
     return 0
+
+
+def _submit_error(message: str, json_output: bool) -> int:
+    """Emit a submit failure without breaking the machine-output contract."""
+    _error(message)
+    if json_output:
+        _output_json({"error": message})
+    return 1
 
 
 def _resolve_folder_id(client: LighthouseClient, org_id: int, identifier: str) -> int:
@@ -144,5 +170,3 @@ def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> s
         return client.get_dropbox_folder_detail(org_id, folder_id).get("Name", f"Folder-{folder_id}")
     except Exception:
         return f"Folder-{folder_id}"
-
-

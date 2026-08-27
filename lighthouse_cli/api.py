@@ -6,12 +6,15 @@ and all low-level HTTP interactions.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import math
 import os
 import sys
 import time
-from typing import Any
 from contextlib import suppress
+from typing import Any
+from urllib.parse import unquote_to_bytes, urlparse
 
 import requests
 
@@ -41,7 +44,7 @@ class SessionExpiredError(Exception):
 
 
 class NetworkError(Exception):
-    """Raised on connectivity / DNS / timeout issues."""
+    """Raised on connectivity, protocol, or timeout issues."""
 
 
 class CourseNotFoundError(Exception):
@@ -113,12 +116,16 @@ class LighthouseClient:
     # Retry configuration
     _MAX_RETRIES = 3
     _RETRY_BACKOFF = 2  # base seconds for exponential backoff
+    # Never honor an untrusted server-provided delay beyond one minute.
+    _MAX_RETRY_AFTER = 60.0
 
     def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, **kwargs: Any) -> requests.Response:
         """Make an authenticated request with rate-limit retry and auto-refresh.
 
         Retries on HTTP 429 (Too Many Requests) with exponential backoff,
-        respecting the Retry-After header when present.
+        respecting the Retry-After header when present.  A valid server delay
+        is capped at ``_MAX_RETRY_AFTER`` seconds; malformed delays use the
+        exponential fallback.
 
         On SessionExpiredError, attempts one auto-refresh via CDP if a browser
         with valid cookies is running, then retries the request once.
@@ -195,7 +202,23 @@ class LighthouseClient:
 
             # Rate-limit: retry with backoff
             if resp.status_code == 429 and attempt < self._MAX_RETRIES:
-                time.sleep(float(resp.headers.get("Retry-After", self._RETRY_BACKOFF)) * (2 ** attempt))
+                fallback = self._RETRY_BACKOFF * (2 ** attempt)
+                retry_after = resp.headers.get("Retry-After")
+                try:
+                    server_delay = float(retry_after) if retry_after is not None else None
+                except (TypeError, ValueError):
+                    server_delay = None
+
+                # Retry-After is untrusted input.  Invalid, non-finite, and
+                # negative values use the normal exponential fallback.  A
+                # valid server delay is authoritative (do not exponentiate it)
+                # but is capped to keep a malicious response from stalling the
+                # CLI indefinitely.
+                if server_delay is None or not math.isfinite(server_delay) or server_delay < 0:
+                    delay = fallback
+                else:
+                    delay = min(server_delay, self._MAX_RETRY_AFTER)
+                time.sleep(delay)
                 continue
 
             if not skip_raise:
@@ -234,11 +257,19 @@ class LighthouseClient:
         """
         url: str | None = path
         all_items: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
         while url:
+            if not isinstance(url, str):
+                raise NetworkError("Invalid pagination link returned by the server.")
+            if url in seen_urls:
+                raise NetworkError("Pagination cycle detected while following a Next link.")
+            seen_urls.add(url)
             data = self.get_json(url)
             # Handle plain array responses (no pagination wrapper)
             if isinstance(data, list):
                 return data
+            if not isinstance(data, dict):
+                raise NetworkError("Invalid paginated response returned by the server.")
             all_items.extend(data.get(items_key, []))
             url = data.get("Next")
         return all_items
@@ -295,15 +326,12 @@ class LighthouseClient:
 
     def get_enrollments(self) -> list[dict[str, Any]]:
         """GET all enrollments (courses, sections, departments, etc.) (cached)."""
-        def _fetch():
-            items: list[dict[str, Any]] = []
-            url: str | None = f"{BASE_URL}/d2l/api/lp/1.47/enrollments/myenrollments/"
-            while url:
-                data = self.get_json(url)
-                items.extend(data.get("Items", []))
-                url = data.get("Next")
-            return items
-        return self._cached("enrollments", _fetch)
+        return self._cached(
+            "enrollments",
+            lambda: self._paginate_list(
+                f"{BASE_URL}/d2l/api/lp/1.47/enrollments/myenrollments/", "Items"
+            ),
+        )
 
     def get_course_enrollments(self) -> list[dict[str, Any]]:
         """GET enrollments filtered to Course Offering type only (cached)."""
@@ -453,12 +481,81 @@ class LighthouseClient:
 
 
 def _extract_filename(headers: dict[str, str]) -> str:
-    """Parse Content-Disposition header to get the filename."""
-    cd = headers.get("Content-Disposition", headers.get("content-disposition", ""))
-    if "filename=" in cd:
-        if name := cd.split("filename=", 1)[1].strip().strip('"').strip("'"):
-            return name
-    return ""
+    """Parse a Content-Disposition filename, including RFC 5987 values.
+
+    A quoted filename may contain semicolons, so splitting the header on
+    ``;`` directly is unsafe.  ``filename*`` is preferred over the legacy
+    ``filename`` parameter and is decoded from its declared charset after
+    percent-decoding (the common form is ``UTF-8''...``).
+    """
+    cd = next(
+        (value for key, value in headers.items() if key.lower() == "content-disposition"),
+        "",
+    )
+    if not isinstance(cd, str) or not cd:
+        return ""
+
+    # Split parameters while preserving semicolons inside quoted values.  A
+    # single-quoted value is not part of the HTTP grammar, but was accepted by
+    # the old parser, so retain that compatibility when it is visibly paired.
+    parts: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(cd):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char == '"':
+            quote = char
+        elif char == "'" and cd[start:index].rstrip().endswith("="):
+            # Only treat an apostrophe immediately after ``=`` as a legacy
+            # quote.  Apostrophes in RFC 5987's charset/lang separator remain
+            # ordinary characters.
+            closing = cd.find("'", index + 1)
+            if closing >= 0:
+                quote = char
+        elif char == ";":
+            parts.append(cd[start:index])
+            start = index + 1
+    parts.append(cd[start:])
+
+    filename = ""
+    extended_filename = ""
+    for parameter in parts:
+        name, separator, value = parameter.partition("=")
+        if not separator or name.strip().lower() not in {"filename", "filename*"}:
+            continue
+
+        name = name.strip().lower()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+            if name == "filename":
+                # Undo quoted-pair escaping from a quoted-string.
+                value = value.replace('\\"', '"').replace("\\\\", "\\")
+
+        if name == "filename*":
+            charset, separator, encoded = value.partition("'")
+            if not separator:
+                continue
+            _language, separator, encoded = encoded.partition("'")
+            if not separator or not charset:
+                continue
+            try:
+                decoded = unquote_to_bytes(encoded).decode(charset, errors="replace")
+            except (LookupError, UnicodeError):
+                continue
+            if decoded:
+                extended_filename = decoded
+        elif value and not filename:
+            filename = value
+
+    return extended_filename or filename
 
 
 def resolve_course_id(client: LighthouseClient, identifier: str) -> int:
@@ -544,6 +641,8 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
     ) as resp:
         ws_url = json.loads(resp.read())["webSocketDebuggerUrl"]
 
+    _validate_cdp_websocket_url(ws_url)
+
     try:
         import asyncio
         return asyncio.run(_cdp_get_cookies_ws(ws_url))
@@ -553,6 +652,29 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
             f"Install with: pip install websockets\n"
             f"Or ensure Chrome is running with --remote-debugging-port={port}"
         )
+
+
+def _validate_cdp_websocket_url(ws_url: object) -> None:
+    """Reject CDP WebSocket URLs that are not confined to loopback hosts."""
+    parsed = None
+    try:
+        parsed = urlparse(ws_url if isinstance(ws_url, str) else "")
+        hostname = parsed.hostname
+    except (TypeError, ValueError):
+        hostname = None
+
+    if parsed is None or parsed.scheme not in {"ws", "wss"} or not hostname:
+        raise NetworkError("Browser returned an invalid CDP WebSocket URL.")
+
+    normalized = hostname.rstrip(".").lower()
+    is_loopback = normalized == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(normalized).is_loopback
+        except ValueError:
+            is_loopback = False
+    if not is_loopback:
+        raise NetworkError("Refusing a non-loopback CDP WebSocket URL.")
 
 
 async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:

@@ -616,6 +616,46 @@ class TestBuildSsoError:
         err = build_sso_error(None, "Password is incorrect", "POST credentials")
         assert "Password is incorrect" in str(err)
 
+    def test_mfa_required_recovery_describes_each_supported_flow(self) -> None:
+        err = build_sso_error(50076, None, "POST credentials")
+        recovery = err.recovery or ""
+
+        assert "--mfa-method app --totp <code>" in recovery
+        assert "--mfa-method sms then auth verify <code>" in recovery
+        assert "--mfa-method call/push then auth verify ok" in recovery
+        assert "Use --totp flag" not in recovery
+
+
+def test_endauth_poll_interval_is_capped_and_final_retry_does_not_sleep() -> None:
+    client = MicrosoftSSOClient()
+    response = MagicMock()
+    response.json.return_value = {
+        "Retry": True,
+        "FlowToken": "flow",
+        "Ctx": "ctx",
+    }
+    client._post = MagicMock(return_value=response)
+    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
+
+    try:
+        with patch("lighthouse_cli.ms_auth.time.sleep") as sleep:
+            with pytest.raises(MicrosoftSSOError, match="timed out"):
+                client._poll_end_auth(
+                    MS_SSO_URL,
+                    {
+                        "urlEndAuth": "/common/SAS/EndAuth",
+                        "oPerAuthPollingInterval": {"OneWaySMS": 999999},
+                    },
+                    proof,
+                    {"FlowToken": "flow", "Ctx": "ctx"},
+                    "123456",
+                )
+    finally:
+        client.close()
+
+    assert sleep.call_count == 29
+    assert all(call.args == (30.0,) for call in sleep.call_args_list)
+
 
 class TestClose:
     def test_close_cleans_up(self) -> None:

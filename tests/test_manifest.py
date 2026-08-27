@@ -220,17 +220,7 @@ class TestManifestAtomicWrite:
         }}
         Manifest(old_entries).save(manifest_path)
 
-        # New manifest save that fails partway through
-        new_entries = {"12345": {
-            "sha256": "newhash",
-            "filename": "new.pdf",
-            "size": 200,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }}
-        m = Manifest(new_entries)
-
-        # Simulate crash: patch os.replace to fail AFTER tmp is written
+        # Simulate a stale temp artifact left by an interrupted write.
         tmp = manifest_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"incomplete": True}), encoding="utf-8")  # Write tmp but don't replace
 

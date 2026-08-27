@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,12 +18,41 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
-from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest
+from lighthouse_cli.commands import _run_and_render_multi
+from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest, compute_sha256 as manifest_compute_sha256
 from lighthouse_cli.sync_engine import Mode, flatten_all_topics, run_course
+from lighthouse_cli.utils import atomic_write as shared_atomic_write
 
 ORG_ID = 44347
 LM_OLD = "2026-01-01T00:00:00Z"
 LM_NEW = "2026-05-01T00:00:00Z"
+
+
+def test_multi_json_retains_top_level_course_failures(tmp_path, capsys) -> None:
+    with patch(
+        "lighthouse_cli.commands.run_course",
+        side_effect=[RuntimeError("course one failed"), RuntimeError("course two failed")],
+    ):
+        rc = _run_and_render_multi(
+            LighthouseClient(),
+            [111, 222],
+            tmp_path,
+            Mode.DOWNLOAD,
+            "download",
+            "file",
+            100,
+            "Sem I",
+            [],
+            True,
+            False,
+        )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc == 1
+    assert payload["summary"]["courses_checked"] == 2
+    assert [course["course_id"] for course in payload["courses"]] == [111, 222]
+    assert all(course["errors"] for course in payload["courses"])
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +145,14 @@ def _seed_manifest(course_dir: Path, entries: dict) -> Path:
     return path
 
 
+def _materialize(course_dir: Path, relative_path: str, content: bytes) -> Path:
+    """Create a local topic fixture at the path recorded by the manifest."""
+    path = course_dir / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path
+
+
 def _tree(root: Path) -> dict[str, bytes]:
     """Snapshot every file under root (path -> bytes)."""
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
@@ -144,7 +182,9 @@ class TestSyncDecisions:
             names={ORG_ID: "Test"},
             files={100: (b"content", "file.pdf")},
         )
-        _seed_manifest(root / "Test-44347", {"100": _mentry()})
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {"100": _mentry(size=7)})
+        _materialize(course_dir, "Mod/file.pdf", b"content")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert [e["topic_id"] for e in result["skipped"]] == ["100"]
         assert result["downloaded"] == [] and result["updated"] == []
@@ -173,6 +213,85 @@ class TestSyncDecisions:
         assert [e["topic_id"] for e in result["downloaded"]] == ["300"]
         assert result["saved"] is True
 
+    def test_download_hashes_body_once_and_reuses_manifest_entry(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "file.pdf")},
+        )
+        with patch("lighthouse_cli.manifest.compute_sha256", wraps=manifest_compute_sha256) as manifest_hash, \
+             patch("lighthouse_cli.sync_engine.compute_sha256", wraps=manifest_compute_sha256) as engine_hash:
+            result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert manifest_hash.call_count == 1
+        assert engine_hash.call_count == 0
+        assert result["downloaded"][0]["sha256"] == manifest_compute_sha256(b"content")
+
+    def test_matching_timestamp_redownloads_when_local_file_is_missing(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "file.pdf")},
+        )
+        _seed_manifest(root / "Test-44347", {"100": _mentry(size=7)})
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [e["topic_id"] for e in result["updated"]] == ["100"]
+        assert client.body_calls() == [("file", ORG_ID, 100)]
+        assert (root / "Test-44347" / "Mod" / "file.pdf").read_bytes() == b"content"
+
+    def test_matching_timestamp_redownloads_when_local_file_size_differs(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "file.pdf")},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {"100": _mentry(size=7)})
+        _materialize(course_dir, "Mod/file.pdf", b"truncated")
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [e["topic_id"] for e in result["updated"]] == ["100"]
+        assert (course_dir / "Mod" / "file.pdf").read_bytes() == b"content"
+
+    def test_matching_timestamp_redownloads_when_local_file_is_symlink(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "file.pdf")},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {"100": _mentry(size=7)})
+        local_file = _materialize(course_dir, "Mod/file.pdf", b"content")
+        symlink_target = root / "outside.pdf"
+        symlink_target.write_bytes(b"content")
+        local_file.unlink()
+        local_file.symlink_to(symlink_target)
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [e["topic_id"] for e in result["updated"]] == ["100"]
+        assert not local_file.is_symlink()
+        assert local_file.read_bytes() == b"content"
+        assert symlink_target.read_bytes() == b"content"
+
+    def test_topic_write_uses_atomic_0600(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "file.pdf")},
+        )
+        with patch("lighthouse_cli.sync_engine.atomic_write", wraps=shared_atomic_write) as atomic:
+            result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["downloaded"]
+        assert atomic.call_args.kwargs["mode"] == 0o600
+        filepath = root / "Test-44347" / "Mod" / "file.pdf"
+        permissions = stat.S_IMODE(filepath.stat().st_mode)
+        assert permissions & 0o077 == 0
+
     def test_orphaned_reported_not_deleted(self, root):
         client = FakeClient(
             tocs={ORG_ID: _toc((100, "file100.pdf", "File", LM_OLD))},
@@ -187,6 +306,23 @@ class TestSyncDecisions:
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert [e["topic_id"] for e in result["orphaned"]] == ["200"]
         assert orphan_file.exists(), "orphaned file must not be deleted"
+
+    def test_orphaned_output_is_sorted_by_manifest_key(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "live.pdf", "File", LM_OLD))},
+            names={ORG_ID: "Test"},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {
+            "20": _mentry(filename="twenty.pdf"),
+            "10": _mentry(filename="ten.pdf"),
+            "100": _mentry(filename="live.pdf", size=4),
+        })
+        _materialize(course_dir, "Mod/live.pdf", b"live")
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert [e["topic_id"] for e in result["orphaned"]] == ["10", "20"]
 
     def test_corrupt_manifest_warns_records_and_recovers(self, root):
         client = FakeClient(
@@ -574,7 +710,9 @@ class TestReviewFixRegressions:
             tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD))},
             names={ORG_ID: "Test"},
         )
-        _seed_manifest(root / "Test-44347", {"100": _mentry(filename="file.pdf")})
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {"100": _mentry(filename="file.pdf", size=7)})
+        _materialize(course_dir, "Mod/file.pdf", b"content")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert len(result["skipped"]) == 1
         assert result["skipped"][0]["path"] == "Mod/file.pdf"
@@ -588,7 +726,9 @@ class TestReviewFixRegressions:
             tocs={ORG_ID: _toc((100, "file.pdf", "File", LM_OLD), module="..")},
             names={ORG_ID: "Test"},
         )
-        _seed_manifest(root / "Test-44347", {"100": _mentry(filename="file.pdf")})
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {"100": _mentry(filename="file.pdf", size=7)})
+        _materialize(course_dir, "file.pdf", b"content")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert len(result["skipped"]) == 1
         assert result["skipped"][0]["path"] == "file.pdf"
@@ -599,10 +739,13 @@ class TestReviewFixRegressions:
             tocs={ORG_ID: _toc((100, "a.pdf", "File", LM_OLD), (200, "b.pdf", "File", LM_OLD))},
             names={ORG_ID: "Test"},
         )
-        _seed_manifest(root / "Test-44347", {
-            "100": _mentry(filename="a.pdf", sha="same"),
-            "200": _mentry(filename="b.pdf", sha="same"),
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {
+            "100": _mentry(filename="a.pdf", sha="same", size=4),
+            "200": _mentry(filename="b.pdf", sha="same", size=4),
         })
+        _materialize(course_dir, "Mod/a.pdf", b"same")
+        _materialize(course_dir, "Mod/b.pdf", b"same")
         result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
         assert len(result["skipped"]) == 2
         assert len(result["duplicates"]) == 2

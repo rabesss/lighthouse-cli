@@ -24,8 +24,8 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from .api import LighthouseClient
-from .config import ensure_config_dir, load_mfa_pending, save_cookies
+from .api import LighthouseClient, refresh_auth_from_browser
+from .config import ensure_config_dir, load_mfa_pending, missing_cookie_names, save_cookies
 from .credential_store import CredentialStore, CredentialStoreError
 from .ms_auth import (
     MFA_METHOD_APP,
@@ -44,10 +44,6 @@ from .ms_auth import (
 # ---------------------------------------------------------------------------
 # Exceptions and uniform exits
 # ---------------------------------------------------------------------------
-
-class AuthenticationError(Exception):
-    """Raised when authentication fails (wrong credentials, 2FA, etc.)."""
-
 
 class _PromptUnavailable(Exception):
     """A credential is missing and stdin cannot be prompted."""
@@ -260,6 +256,7 @@ def _persist_check_report(
     json_output: bool,
     failure_hint: str = "",
     save_credentials_pair: tuple[str, str] | None = None,
+    success_message: str = "Login successful. Session valid.",
 ) -> int:
     """Shared login/verify success tail: persist → check → report.
 
@@ -287,13 +284,48 @@ def _persist_check_report(
     if json_output:
         print(json.dumps({"success": True, "cookies": list(cookies.keys())}))
     else:
-        print(f"Login successful. Session valid. Cookies: {', '.join(cookies.keys())}")
+        print(f"{success_message} Cookies: {', '.join(cookies.keys())}")
     return 0
 
 
 # ---------------------------------------------------------------------------
 # Command entry points
 # ---------------------------------------------------------------------------
+
+@_clean_auth_command
+def cmd_auth_refresh(
+    cdp_port: int | str | None = None,
+    *,
+    json_output: bool = False,
+) -> int:
+    """Extract a signed-in browser's D2L cookies through loopback CDP."""
+    resolved_port: int | None = None
+    if cdp_port is not None:
+        try:
+            resolved_port = int(cdp_port)
+        except (TypeError, ValueError):
+            return _auth_error("CDP port must be an integer from 1 to 65535", json_output)
+        if not 1 <= resolved_port <= 65535:
+            return _auth_error("CDP port must be an integer from 1 to 65535", json_output)
+
+    ensure_config_dir()
+
+    # Cookie extraction is a side effect and the result must be sealed. Fail
+    # before contacting the browser when no usable encryption key is present.
+    CredentialStore().preflight()
+    cookies = refresh_auth_from_browser(resolved_port)
+    if missing := missing_cookie_names(cookies):
+        return _auth_error(
+            "Browser session is missing required D2L cookies: " + ", ".join(missing),
+            json_output,
+        )
+
+    return _persist_check_report(
+        cookies,
+        json_output=json_output,
+        failure_hint="Open lighthouse.manipal.edu in the browser and sign in, then retry.",
+        success_message="Auth refreshed and verified.",
+    )
 
 @_clean_auth_command
 def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
@@ -303,10 +335,20 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
     if not totp_code or not totp_code.strip():
         return _auth_error("2FA code cannot be empty", json_output, 2)
 
+    # A missing checkpoint is a local usage error, not an encryption failure.
+    # Check the path before preflight so an installation without a configured
+    # key source still reports the useful "No pending MFA session" message.
+    store = CredentialStore()
+    if not store.mfa_pending_file.exists():
+        return _auth_error(
+            "No pending MFA session. Run: lighthouse auth login --mfa-method sms",
+            json_output,
+        )
+
     # Preflight the encryption key source BEFORE any auth side effects: verify
     # submits the code and then must seal cookies.  Fail here, not mid-flow.
     try:
-        CredentialStore().preflight()
+        store.preflight()
     except CredentialStoreError as exc:
         return _auth_error(str(exc), json_output)
 

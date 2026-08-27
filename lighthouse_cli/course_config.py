@@ -21,9 +21,36 @@ def load() -> dict[str, dict[str, str]]:
     if not COURSE_CONFIG_FILE.exists():
         return {}
     try:
-        return json.loads(COURSE_CONFIG_FILE.read_text(encoding="utf-8")).get("tracked_courses", {})
+        data = json.loads(COURSE_CONFIG_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    tracked_courses = data.get("tracked_courses", {})
+    if not isinstance(tracked_courses, dict):
+        return {}
+
+    # Treat the file as untrusted input. One malformed course must not make
+    # list/JSON output crash or prevent valid sibling entries from loading.
+    normalized: dict[str, dict[str, str]] = {}
+    for org_id, entry in tracked_courses.items():
+        if not isinstance(org_id, str) or not isinstance(entry, dict):
+            continue
+        name = entry.get("name", "")
+        semester = entry.get("semester", "")
+        normalized[org_id] = {
+            "name": name if isinstance(name, str) else "",
+            "semester": semester if isinstance(semester, str) else "",
+        }
+    return normalized
+
+
+def _entries(config: dict[str, dict[str, str]]) -> list[dict[str, str]]:
+    """Return tracked courses in the stable JSON/list display shape."""
+    return [
+        {"id": oid, "name": entry.get("name", ""), "semester": entry.get("semester", "")}
+        for oid, entry in sorted(config.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0)
+    ]
 
 
 def save(config: dict[str, dict[str, str]]) -> None:
@@ -53,7 +80,10 @@ def cmd_config_courses(
     # --reset: clear all tracking
     if reset:
         save({})
-        print("Course tracking config cleared.")
+        if json_output:
+            _output_json([])
+        else:
+            print("Course tracking config cleared.")
         return 0
 
     # --remove ID: untrack a course
@@ -63,18 +93,21 @@ def cmd_config_courses(
         name = config[remove].get("name", remove)
         del config[remove]
         save(config)
-        print(f"Stopped tracking {name} ({remove})")
+        if json_output:
+            _output_json(_entries(config))
+        else:
+            print(f"Stopped tracking {name} ({remove})")
         return 0
 
     # --list / --json: show tracked courses
-    if list_courses or json_output:
+    if list_courses or (json_output and add is None):
         if not config:
-            print("No courses tracked. Run: lighthouse config courses (without flags) to set up.")
+            if json_output:
+                _output_json([])
+            else:
+                print("No courses tracked. Run: lighthouse config courses (without flags) to set up.")
             return 0
-        entries = [
-            {"id": oid, "name": entry.get("name", ""), "semester": entry.get("semester", "")}
-            for oid, entry in sorted(config.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0)
-        ]
+        entries = _entries(config)
         if json_output:
             _output_json(entries)
             return 0
@@ -102,7 +135,10 @@ def cmd_config_courses(
         oid, name = match
         config[oid] = {"name": name, "semester": semester or ""}
         save(config)
-        print(f"Tracking {name} ({oid}){f' -> {semester}' if semester else ''}")
+        if json_output:
+            _output_json(_entries(config))
+        else:
+            print(f"Tracking {name} ({oid}){f' -> {semester}' if semester else ''}")
         return 0
 
     # No flags: interactive setup

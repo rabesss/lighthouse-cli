@@ -253,7 +253,10 @@ class TestSealedCookies:
         assert "sec-sentinel" not in err
 
     def test_legacy_plaintext_upgraded_only_after_preflight(
-        self, store_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        store_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         legacy = {
             "cookies": {"d2lSecureSessionVal": "sec-sentinel"},
@@ -261,11 +264,14 @@ class TestSealedCookies:
         }
         cookies_path(store_dir).write_text(json.dumps(legacy))
 
-        # No key source → plaintext left untouched, values still served.
+        # No key source → plaintext is left untouched but fails closed.
         monkeypatch.delenv("LIGHTHOUSE_SECRETS_PASSPHRASE", raising=False)
         monkeypatch.setitem(sys.modules, "keyring", None)
-        assert load_cookies() == {"d2lSecureSessionVal": "sec-sentinel"}
+        assert load_cookies() == {}
         assert json.loads(cookies_path(store_dir).read_text()) == legacy
+        warning = capsys.readouterr().err
+        assert "could not be sealed" in warning
+        assert "sec-sentinel" not in warning
 
         # Key source appears → next read upgrades the file to a sealed envelope.
         monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", PASSPHRASE_A)

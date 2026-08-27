@@ -28,7 +28,7 @@ class TestSanitizeFilename:
         for ch in '\\/:*?"<>|':
             result = _sanitize_filename(f"file{ch}name")
             assert ch not in result
-            assert result == f"file_name"
+            assert result == "file_name"
 
     def test_url_decodes_percent_encoding(self):
         """Percent-encoded names like L1%20Intro%20to%20CS become L1 Intro to CS."""
@@ -127,7 +127,7 @@ class TestCourseNameCollision:
         name = _sanitize_filename("Physics")
         # After collision handling with ID 67890
         # Should produce "Physics-67890"
-        collision_name = f"Physics-67890"
+        collision_name = f"{name}-67890"
         assert collision_name.endswith("-67890")
 
 

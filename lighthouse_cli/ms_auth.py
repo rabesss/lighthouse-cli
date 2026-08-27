@@ -27,6 +27,7 @@ JavaScript state that pure HTTP cannot reproduce for this tenant's SAML login.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -98,6 +99,16 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 _MAX_POST_MFA_HOPS = 12
 _MAX_ENDAUTH_POLLS = 30
+# Never let an upstream-provided interval make a single MFA attempt sleep
+# indefinitely. The retry count above still bounds the total polling window.
+_MAX_ENDAUTH_POLL_SECONDS = 30.0
+# Recovery text for errors that do not know which proof Microsoft selected.
+_MFA_RECOVERY_HINT = (
+    "Complete MFA with a supported method: use --mfa-method app --totp <code> "
+    "for an offline Authenticator code, --mfa-method sms then auth verify <code> "
+    "for a server-sent code, or --mfa-method call/push then auth verify ok for "
+    "an approval."
+)
 # Conservative client-side safety budget. The page's ``slMaxRetry`` belongs
 # to Microsoft's script loader, not to the session-pull form submission.
 _MAX_SSO_RELOADS = 2
@@ -272,10 +283,7 @@ def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSS
     elif code == 50058:
         recovery = "Additional sign-in verification required. Check your authenticator app."
     elif code in (50076, 50072):
-        recovery = (
-            "Multi-factor authentication is required. "
-            "Use --totp flag to provide your 2FA code."
-        )
+        recovery = f"Multi-factor authentication is required. {_MFA_RECOVERY_HINT}"
 
     return MicrosoftSSOError(
         f"Authentication failed: {description}",
@@ -905,8 +913,13 @@ class MicrosoftSSOClient:
                 recovery="Try again or check your account status.",
             )
         self._step_post_saml(saml_response, saml_html)
-        # Step 6: Extract D2L cookies
-        return self._extract_d2l_cookies()
+        # Step 6: Extract D2L cookies. Only after the complete inline flow has
+        # produced a valid session do we remove a stale/recovery checkpoint.
+        cookies = self._extract_d2l_cookies()
+        from lighthouse_cli.config import clear_mfa_pending
+
+        clear_mfa_pending()
+        return cookies
 
     def probe_mfa_methods(self, username: str, password: str) -> MfaProbeResult:
         """Run the flow up to the MFA page and report registered methods.
@@ -1725,10 +1738,17 @@ class MicrosoftSSOClient:
         end_ctx = str(begin_data.get("Ctx") or ctx)
         polling = mfa_config.get("oPerAuthPollingInterval") or {}
         try:
-            poll_seconds = float(polling.get(selected.auth_method_id, 2))
+            raw_poll_seconds = (
+                polling.get(selected.auth_method_id, 2)
+                if isinstance(polling, dict)
+                else 2
+            )
+            poll_seconds = float(raw_poll_seconds)
         except (TypeError, ValueError):
             poll_seconds = 2.0
-        poll_seconds = max(0.5, poll_seconds)
+        if not math.isfinite(poll_seconds):
+            poll_seconds = 2.0
+        poll_seconds = min(_MAX_ENDAUTH_POLL_SECONDS, max(0.5, poll_seconds))
 
         end_data: dict[str, Any] = {}
         shown_entropy: str | None = None
@@ -1736,7 +1756,7 @@ class MicrosoftSSOClient:
             end_flow = end_auth_flow
             end_ctx = end_auth_ctx
             end_data = {"FlowToken": end_flow, "Ctx": end_ctx, "Success": True}
-        for _ in range(_MAX_ENDAUTH_POLLS):
+        for poll_index in range(_MAX_ENDAUTH_POLLS):
             if skip_end_auth:
                 break
             end_resp = self._post(
@@ -1795,9 +1815,10 @@ class MicrosoftSSOClient:
                         flush=True,
                         file=sys.stderr,
                     )
-            time.sleep(poll_seconds)
             end_flow = str(end_data.get("FlowToken") or end_flow)
             end_ctx = str(end_data.get("Ctx") or end_ctx)
+            if poll_index + 1 < _MAX_ENDAUTH_POLLS:
+                time.sleep(poll_seconds)
         else:
             raise MicrosoftSSOError(
                 "2FA verification timed out waiting for approval.",

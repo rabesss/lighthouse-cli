@@ -157,14 +157,22 @@ def load_cookies() -> dict[str, str]:
     # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
     cookies = _cookies_from_legacy_doc(doc)
     legacy_extracted = doc.get("extracted_at")
-    _try_upgrade_plaintext_cookies(
+    upgraded = _try_upgrade_plaintext_cookies(
         store,
         cookies,
         # Only a genuine ISO string is trustworthy; any other JSON type would
         # either reset the cookie age to "now" or poison the staleness math.
         extracted_at=legacy_extracted if isinstance(legacy_extracted, str) else None,
     )
-    return cookies
+    if upgraded:
+        return cookies
+    print(
+        "Warning: legacy plaintext cookies were not used because they could not "
+        "be sealed. Configure LIGHTHOUSE_SECRETS_PASSPHRASE or an OS keyring, "
+        "then run: lighthouse auth login",
+        file=sys.stderr,
+    )
+    return {}
 
 
 def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) -> None:
@@ -226,7 +234,7 @@ def _try_upgrade_plaintext_cookies(
     cookies: dict[str, str],
     *,
     extracted_at: str | None = None,
-) -> None:
+) -> bool:
     """Re-save legacy plaintext cookies sealed — only when a key source exists.
 
     The original ``extracted_at`` timestamp rides along so the upgraded
@@ -235,11 +243,12 @@ def _try_upgrade_plaintext_cookies(
     try:
         store.preflight()
     except CredentialStoreError:
-        return
+        return False
     try:
         save_cookies(cookies, extracted_at=extracted_at)
     except (CredentialStoreError, OSError):
-        return
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
