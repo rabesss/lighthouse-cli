@@ -512,7 +512,7 @@ def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
             or parsed.password is not None
         ):
             return None
-        return hostname.lower(), port or 443
+        return hostname.lower(), port if port is not None else 443
 
     source_origin = https_origin(source_url)
     if source_origin is None or https_origin(target) != source_origin:

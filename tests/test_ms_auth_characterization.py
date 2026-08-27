@@ -1307,6 +1307,20 @@ class TestSsoReloadInterstitial:
         assert transition.kind == "sso_reload"
         assert transition.url.startswith("https://login.microsoftonline.com:443/")
 
+    @pytest.mark.parametrize("port", [0, 8443])
+    def test_non_default_https_port_is_rejected(self, port: int) -> None:
+        from lighthouse_cli.ms_auth import sso_reload_transition
+
+        html = sso_reload_html(
+            url_post=(
+                f"https://login.microsoftonline.com:{port}/tenant-id/login"
+                "?sso_reload=True"
+            )
+        )
+
+        with pytest.raises(MicrosoftSSOError, match="unsafe re-POST target"):
+            sso_reload_transition(self._snap(html), CREDS_POST_URL)
+
     def test_nested_reload_value_is_rejected_without_value_echo(self) -> None:
         from lighthouse_cli.ms_auth import sso_reload_transition
 

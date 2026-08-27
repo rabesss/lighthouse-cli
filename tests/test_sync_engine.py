@@ -648,6 +648,12 @@ class TestReviewFixRegressions:
         assert result.exit_code == 1
         assert data["errors"], "empty-course JSON must surface the manifest error"
         assert set(data["errors"][0]) <= {"topic_id", "error"}
+        assert data["course_name"] == "Course A"
+        assert data["folder"] == str(course_dir)
+        assert data["downloaded"] == []
+        assert data["skipped"] == []
+        assert data["updated"] == []
+        assert data["orphaned"] == []
 
     def test_empty_course_single_download_json_lists_errors(self, runner, tmp_path):
         """The empty download schema's errors match the non-empty branch's

@@ -64,7 +64,6 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
     if result["mode"] is Mode.PLAN:
         return result["planned"]
     if result["empty"]:
-        assignments = result["assignments"]
         data: dict[str, Any] = {
             "course_id": result["org_id"],
             "course_name": result["course_name"],
@@ -73,20 +72,8 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
         }
         if action == "sync":
             data.update(downloaded=[], skipped=[], updated=[], orphaned=[])
-            if include_assignments:
-                data.update(
-                    assignments_downloaded=assignments["downloaded"],
-                    assignments_skipped=assignments["skipped"],
-                    assignments_updated=assignments["updated"],
-                    assignment_errors=assignments["errors"],
-                )
         else:
             data.update(manifest=str(result["manifest_path"]), downloaded=[])
-            if include_assignments:
-                data.update(
-                    assignments_downloaded=assignments["downloaded"],
-                    assignment_errors=assignments["errors"],
-                )
         return data
 
     assignments = result["assignments"]
