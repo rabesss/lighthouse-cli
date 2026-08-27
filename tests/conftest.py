@@ -4,10 +4,12 @@ Provides reusable fixtures for:
 - CliRunner: Click CLI test runner
 - mock_api_client: MagicMock-backed LighthouseClient for API mocking
 - temp_download_dir: Temporary directory factory for download testing
+- fake_keyring: in-memory keyring module for CredentialStore tests
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -18,9 +20,61 @@ from click.testing import CliRunner
 from lighthouse_cli.api import LighthouseClient
 
 
+class _FakeKeyringBackend:
+    """In-memory keyring backend (priority > 0 so CredentialStore accepts it)."""
+
+    priority = 5
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self._store.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self._store[(service, username)] = password
+
+
+class _FakeKeyringModule:
+    """Stands in for the ``keyring`` module in tests."""
+
+    def __init__(self) -> None:
+        self.backend = _FakeKeyringBackend()
+
+    def get_keyring(self) -> _FakeKeyringBackend:
+        return self.backend
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.backend.get_password(service, username)
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.backend.set_password(service, username, password)
+
+
+@pytest.fixture
+def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> _FakeKeyringModule:
+    """Route CredentialStore through a fake keyring (no passphrase env)."""
+    monkeypatch.delenv("LIGHTHOUSE_SECRETS_PASSPHRASE", raising=False)
+    mod = _FakeKeyringModule()
+    monkeypatch.setitem(sys.modules, "keyring", mod)
+    return mod
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _hermetic_secrets_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test a deterministic passphrase key source.
+
+    Sealing/unsealing in tests never touches the developer's (or CI's) real
+    OS keyring.  Tests that exercise the keyring source install a fake
+    keyring module and clear this env var explicitly; tests that need the
+    "no key source" preflight failure clear it too.
+    """
+    monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", "suite-passphrase-sentinel")
+
 
 @pytest.fixture
 def cli_runner() -> CliRunner:

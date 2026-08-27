@@ -279,7 +279,9 @@ class TestSyncManifestHandling:
                 ["sync", "44347", "-o", str(output_dir), "--json"],
             )
 
-            assert result.exit_code == 0
+            # Uniform exit matrix: manifest corruption is recorded as an error
+            # entry → exit 1 (run still continues and re-downloads).
+            assert result.exit_code == 1
             assert "Warning" in result.output or "Corrupt" in result.output
             download_mock.assert_called_once()
             # New valid manifest replaces corrupt one

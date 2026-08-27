@@ -31,8 +31,11 @@ There is no separate build step. Lint with `ruff` if available.
   `--json` vs human output).
 - `lighthouse_cli/api.py` — `LighthouseClient` (D2L REST client, cookie mgmt,
   course-id resolution, CDP cookie extraction for `auth refresh`).
-- `lighthouse_cli/auth.py` — `cmd_auth_login` / `cmd_auth_verify` and
-  `CredentialStore` (Fernet + OS keyring).
+- `lighthouse_cli/auth.py` — `cmd_auth_login` / `cmd_auth_verify`.
+- `lighthouse_cli/credential_store.py` — `CredentialStore`: single owner of
+  secret sealing (Fernet envelopes; key from `LIGHTHOUSE_SECRETS_PASSPHRASE`
+  or the OS keyring) for `credentials.json`, `cookies.json`, and the MFA
+  pending checkpoint.
 - **Microsoft SSO is split into focused modules** (do not re-monolithize):
   `ms_auth.py` (`MicrosoftSSOClient`), `ms_parse.py` (HTML/`$Config` parsing),
   `ms_session.py` (cookie/session helpers), `ms_mfa.py` (MFA proof selection),
@@ -56,8 +59,10 @@ There is no separate build step. Lint with `ruff` if available.
   **server-sent on `BeginAuth`**, so a literal `--totp <code>` cannot match —
   use the two-step `auth login` → `auth verify` flow. Offline Authenticator
   TOTP (`PhoneAppOTP`) is generated on-device, so a pre-provided `--totp` **is**
-  valid for `--mfa-method app`. Resume a pending MFA session only when its saved
-  method matches the requested method.
+  valid for `--mfa-method app`. `TwoWayVoice*` (answer and press #) and
+  `PhoneAppNotification` (including number matching) are codeless approvals:
+  poll EndAuth without `AdditionalAuthData`. Resume a pending MFA session only
+  when its saved method matches the requested method.
 - **Typing:** keep `from __future__ import annotations`; use `X | None` (not
   `Optional[X]`); never use a bare `Callable` (parameterize it).
 - **External processes:** wrap `subprocess`, Playwright, and CDP/websocket
@@ -78,7 +83,8 @@ a nested `AGENTS.md` if needed — the closest file to a changed file wins.)
 - **P0** — Flag any `print()` / `click.echo()` of human text to stdout on a
   `--json` path (including `input()` prompts); these must go to stderr.
 - **P1** — Flag MFA logic that treats a literal `--totp` as usable for the
-  server-sent SMS/WhatsApp path, or that conflates SMS with offline `PhoneAppOTP`.
+  server-sent SMS/WhatsApp path, conflates SMS with offline `PhoneAppOTP`, or
+  sends `AdditionalAuthData` for codeless voice/push approvals.
 - **P1** — Flag missing `from __future__ import annotations`, use of
   `Optional[...]`, or bare `Callable`.
 - **P1** — Flag unwrapped subprocess/Playwright/CDP calls that can surface raw

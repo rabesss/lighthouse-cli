@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from lighthouse_cli.auth import CredentialStore, CredentialStoreError
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -108,24 +109,53 @@ def test_corrupted_credentials_fallback(
 # VAL-AUTH-023: Encryption key change
 # ---------------------------------------------------------------------------
 
-def test_encryption_key_change_graceful(
+def test_passphrase_sealed_survives_keyring_loss(
     config_dir: Path,
     credentials_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decryption failure on different machine prompts for credentials (returns None)."""
+    """Decryption uses the RECORDED key source: a passphrase-sealed artifact
+    still opens when the system keyring disappears entirely."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
-    # First, save with a key
     store = CredentialStore()
     store.save("user@manipal.edu", "secret_password")
 
-    # Now simulate keyring being cleared (different machine scenario)
-    # by patching keyring to raise an exception
-    with patch("keyring.get_password", side_effect=Exception("Keyring unavailable")):
-        store2 = CredentialStore()
-        with pytest.raises(CredentialStoreError):
-            store2.load()
+    # The premise below IS the passphrase source — pin it explicitly.
+    doc = json.loads(credentials_path.read_text())
+    assert doc["key_source"] == "passphrase"
+
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "keyring", None)  # import becomes unavailable
+    store2 = CredentialStore()
+    assert store2.load() == ("user@manipal.edu", "secret_password")
+
+
+def test_keyring_sealed_fails_cleanly_on_wrong_key(
+    config_dir: Path,
+    credentials_path: Path,
+    fake_keyring: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A keyring-sealed artifact raises a clean error when the keyring entry
+    no longer matches (different machine scenario)."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+
+    from cryptography.fernet import Fernet
+
+    fake_keyring.backend.set_password(
+        "lighthouse-cli", "credential-key", Fernet.generate_key().decode()
+    )
+    store = CredentialStore()
+    store.save("user@manipal.edu", "secret_password")
+    assert json.loads(credentials_path.read_text())["key_source"] == "keyring"
+
+    # Different machine: the keyring entry now holds an unrelated key.
+    fake_keyring.backend.set_password(
+        "lighthouse-cli", "credential-key", Fernet.generate_key().decode()
+    )
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
 
 
 # ---------------------------------------------------------------------------
@@ -210,17 +240,6 @@ def test_config_dir_env_var_respected(
     assert not (tmp_path / ".config" / "lighthouse-cli" / "credentials.json").exists()
 
 
-def test_store_exists(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """CredentialStore.exists() returns True when credentials file exists."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
-    assert not store.exists()
-
-    store.save("user@manipal.edu", "secret")
-    assert store.exists()
-
-
 # ---------------------------------------------------------------------------
 # Additional tests for CredentialStore
 # ---------------------------------------------------------------------------
@@ -233,4 +252,124 @@ def test_store_no_credentials_file_returns_none(monkeypatch: pytest.MonkeyPatch,
 
     store = CredentialStore()
     assert store.load() is None
-    assert not store.exists()
+
+
+# ---------------------------------------------------------------------------
+# F1: any malformed artifact or key raises CredentialStoreError, never a raw
+# binascii.Error / UnicodeEncodeError / ValueError traceback.
+# ---------------------------------------------------------------------------
+
+def _sealed_doc(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Save credentials and return the parsed sealed envelope."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    CredentialStore().save("user@manipal.edu", "secret_password")
+    return json.loads((config_dir / "credentials.json").read_text())
+
+
+def test_truncated_kdf_salt_raises_clean_error(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    # 11 chars: not a multiple of 4, so b64decode(validate=True) rejects the
+    # broken padding (a 12-char truncation would still decode cleanly).
+    doc["kdf_salt"] = doc["kdf_salt"][:11]
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+
+def test_non_base64_kdf_salt_raises_clean_error(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["kdf_salt"] = "!!!not-base64!!!"
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+
+def test_non_ascii_ciphertext_raises_clean_error(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["ciphertext"] = "gAAAA-ünïcödé-ciphertext"
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+def test_corrupt_keyring_entry_raises_clean_error(
+    config_dir: Path,
+    credentials_path: Path,
+    fake_keyring: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hand-mangled keyring entry wraps Fernet's raw ValueError cleanly."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    fake_keyring.set_password("lighthouse-cli", "credential-key", "not-a-fernet-key")
+    credentials_path.write_text(json.dumps({
+        "v": 2, "key_source": "keyring", "ciphertext": "gAAAAA",
+    }))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+
+# ---------------------------------------------------------------------------
+# F15: the passphrase-derived-key cache is bounded.
+# ---------------------------------------------------------------------------
+
+def test_passphrase_key_cache_is_bounded(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lighthouse_cli.credential_store import _derive_passphrase_key
+
+    # iterations=1 keeps this a cache-behavior test, not 40 real PBKDF2 runs.
+    for i in range(40):
+        _derive_passphrase_key(f"pass-{i}", bytes([i]) * 16, 1)
+    info = _derive_passphrase_key.cache_info()
+    assert info.currsize <= 32
+
+
+def test_passphrase_envelope_records_kdf_iterations(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sealed envelopes record their KDF count; envelopes from before the
+    field existed still open via the pre-record fallback (no orphans)."""
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    CredentialStore().save("user@manipal.edu", "secret_password")
+    doc = json.loads((config_dir / "credentials.json").read_text())
+    assert doc["kdf_iterations"] == 600_000
+
+    # Simulate a genuine pre-record envelope: actually seal at the legacy
+    # 300k count, then strip the recorded field.
+    import lighthouse_cli.credential_store as cs
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cs, "_KDF_ITERATIONS", 300_000)
+        CredentialStore().save("user@manipal.edu", "secret_password")
+    legacy_doc = json.loads((config_dir / "credentials.json").read_text())
+    assert legacy_doc["kdf_iterations"] == 300_000
+    del legacy_doc["kdf_iterations"]
+    (config_dir / "credentials.json").write_text(json.dumps(legacy_doc))
+    assert CredentialStore().load() == ("user@manipal.edu", "secret_password")
+
+    legacy_doc["kdf_iterations"] = 1  # wrong count derives a wrong key: clean failure
+    (config_dir / "credentials.json").write_text(json.dumps(legacy_doc))
+    with pytest.raises(CredentialStoreError):
+        CredentialStore().load()
+
+@pytest.mark.parametrize("bad_iterations", [True, 0, -1, "600000", 600_001, 10**12])
+def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_iterations: object,
+) -> None:
+    doc = _sealed_doc(config_dir, monkeypatch)
+    doc["kdf_iterations"] = bad_iterations
+    (config_dir / "credentials.json").write_text(json.dumps(doc))
+    expected = "unsupported KDF iteration" if isinstance(
+        bad_iterations, int
+    ) and not isinstance(bad_iterations, bool) else "invalid KDF iteration"
+    with pytest.raises(CredentialStoreError, match=expected) as exc_info:
+        CredentialStore().load()
+    if isinstance(bad_iterations, int) and not isinstance(bad_iterations, bool):
+        assert str(bad_iterations) in str(exc_info.value)

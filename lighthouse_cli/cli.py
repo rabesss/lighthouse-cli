@@ -11,8 +11,10 @@ from __future__ import annotations
 import click
 
 from . import __version__
+from .auth import cmd_auth_login, cmd_auth_mfa_methods, cmd_auth_verify
 from .commands import (
     cmd_announcements,
+    cmd_assignments,
     cmd_auth_status,
     cmd_calendar,
     cmd_content,
@@ -22,11 +24,9 @@ from .commands import (
     cmd_quiz_detail,
     cmd_quizzes,
     cmd_semesters,
-    cmd_sync,
-    cmd_assignments,
     cmd_submit,
+    cmd_sync,
 )
-from .auth import cmd_auth_login
 from .course_config import cmd_config_courses
 
 # ---------------------------------------------------------------------------
@@ -65,9 +65,9 @@ def auth_status(json_output: bool) -> None:
 @click.option("--totp", "totp", default=None, help="2FA code. Use - to read from stdin pipe.")
 @click.option(
     "--mfa-method",
-    type=click.Choice(["auto", "sms", "app", "choose"]),
+    type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
     default=None,
-    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+    help="MFA: auto (tenant default), sms, call (voice), app (TOTP), push (approve), or choose.",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output JSON.")
 def auth_refresh(
@@ -98,9 +98,9 @@ def auth_refresh(
 @click.option("--totp", "totp", default=None, help="2FA code. Omit for two-phase interactive login.")
 @click.option(
     "--mfa-method",
-    type=click.Choice(["auto", "sms", "app", "choose"]),
+    type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
     default=None,
-    help="MFA: auto (tenant default), sms, app, or choose (interactive list).",
+    help="MFA: auto (tenant default), sms, call (voice), app (TOTP), push (approve), or choose.",
 )
 @click.option(
     "--save-credentials",
@@ -128,9 +128,12 @@ def auth_login(
     Two-phase interactive login (TTY): username/password first, then verification
     code after Microsoft accepts your password.
 
-    MFA: --mfa-method auto (default), sms, app, or choose (pick from a list).
-    Text codes may arrive via SMS or WhatsApp depending on Microsoft; the CLI
-    cannot select the delivery channel.
+    MFA: --mfa-method auto (default), sms, call, app, push, or choose (pick from
+    a list). Text codes may arrive via SMS or WhatsApp depending on Microsoft;
+    the CLI cannot select the delivery channel. Voice calls are approved by
+    answering and pressing #; push is approved in Microsoft Authenticator.
+
+    Discover what the account supports first: lighthouse auth mfa-methods
 
     Session cookies typically expire after ~5 days (MAHE tenant policy); re-run
     login when auth status fails. --save-credentials stores email/password only.
@@ -170,11 +173,29 @@ def auth_verify(code: str, json_output: bool) -> None:
     Use after ``auth login`` prints "Verification code sent." Do not run a second
     ``auth login`` — that sends a new code and invalidates the previous one.
     """
-    from lighthouse_cli.auth import cmd_auth_verify
-
     raise SystemExit(cmd_auth_verify(code, json_output=json_output))
 
 
+@auth.command("mfa-methods")
+@click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
+@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON.")
+def auth_mfa_methods(
+    username: str | None,
+    password: str | None,
+    json_output: bool,
+) -> None:
+    """List the account's MFA methods without triggering a challenge.
+
+    Performs a real sign-in through the post-password stage and may advance
+    KMSI/session state, but stops before BeginAuth. Reports OneWaySMS (sms),
+    TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
+    """
+    raise SystemExit(cmd_auth_mfa_methods(
+        username=username,
+        password=password,
+        json_output=json_output,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +268,6 @@ def content(course_id: str, json_output: bool) -> None:
 
 @cli.command("download")
 @click.argument("course_id", required=False)
-@click.argument("topic_id", required=False, type=int)
 @click.option("-o", "--output-dir", default=None, help="Custom download directory.")
 @click.option("--dry-run", is_flag=True, default=False, help="List files without downloading.")
 @click.option("--json", "json_output", is_flag=True, help="Output raw JSON.")
@@ -260,7 +280,6 @@ def content(course_id: str, json_output: bool) -> None:
 @click.option("--attachment", "attachment_id", default=None, type=int, help="Download a specific attachment from an assignment folder.")
 def download(
     course_id: str | None,
-    topic_id: int | None,
     output_dir: str | None,
     dry_run: bool,
     json_output: bool,
@@ -275,8 +294,7 @@ def download(
     """Download files from a course.
 
     If COURSE_ID is given, download that course. Without COURSE_ID,
-    downloads all courses from the latest semester. If TOPIC_ID is also
-    given, download that single file from the specified course.
+    downloads all courses from the latest semester.
 
     Scope options:
       --semester  Filter courses to a specific semester (by name or ID)
@@ -290,7 +308,6 @@ def download(
     raise SystemExit(
         cmd_download(
             course_id,
-            topic_id=topic_id,
             output_dir=output_dir,
             dry_run=dry_run,
             json_output=json_output,

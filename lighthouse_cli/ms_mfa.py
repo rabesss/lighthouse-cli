@@ -24,6 +24,20 @@ class UserProof:
     is_default: bool
 
 
+@dataclass(frozen=True)
+class MfaProbeResult:
+    """Outcome of probing for MFA after the password step.
+
+    ``page`` distinguishes the landing page: ``"no_mfa"`` (sign-in completed
+    without any verification page), ``"legacy_form"`` (a form-based MFA page
+    that carries no arrUserProofs list — 2FA IS required) or ``"converged"``
+    (ConvergedTFA page with parsed ``proofs``).
+    """
+
+    page: str
+    proofs: list[UserProof]
+
+
 def _parse_user_proofs(config: dict[str, Any]) -> list[UserProof]:
     proofs: list[UserProof] = []
     for raw in config.get("arrUserProofs") or []:
@@ -49,7 +63,7 @@ def _prompt_user_proof_choice(proofs: list[UserProof]) -> UserProof:
         return proofs[0]
     if not sys.stdin.isatty():
         raise MicrosoftSSOError(
-            "Multiple MFA methods are available; pick one with --mfa-method sms|app.",
+            "Multiple MFA methods are available; pick one with --mfa-method sms|app|call|push.",
             step="MFA",
             recovery="Re-run with --mfa-method or use a single-method account.",
         )

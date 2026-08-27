@@ -232,8 +232,6 @@ class TestSingleCourseAssignments:
 
     def test_course_not_found_error(self, cli_runner):
         """Non-existent course shows error with remediation hint."""
-        from lighthouse_cli.api import CourseNotFoundError
-
         with patch.object(LighthouseClient, "get_courses", return_value=[
             {"OrgUnitId": 44347, "Name": "Signals", "Code": "X"},
         ]):

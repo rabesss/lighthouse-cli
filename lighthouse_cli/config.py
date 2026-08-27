@@ -1,20 +1,35 @@
-"""Configuration paths and cookie persistence for lighthouse-cli."""
+"""Configuration paths and cookie persistence for lighthouse-cli.
+
+Secret-bearing artifacts (``cookies.json``, ``mfa_pending.json``) are sealed
+by :class:`~lighthouse_cli.credential_store.CredentialStore`; the functions
+here are thin wrappers.  Plaintext metadata is limited to an allowlist (e.g.
+``extracted_at``, ``created_at``, ``mfa_method``).
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from contextlib import suppress
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lighthouse_cli.credential_store import (
+    FORMAT_VERSION,
+    CredentialStore,
+    CredentialStoreError,
+    is_sealed_document,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://lighthouse.manipal.edu"
+# Canonical D2L origin: the exact host session cookies are set on and filtered for.
+COOKIE_SETTING_HOST = "lighthouse.manipal.edu"
+
+BASE_URL = f"https://{COOKIE_SETTING_HOST}"
 API_LE = f"{BASE_URL}/d2l/api/le/1.93"
 
 # Cookie names we care about
@@ -23,15 +38,31 @@ COOKIE_NAMES = (
     "d2lSecureSessionVal", "d2lSessionVal",
 )
 
-# Paths
+# Paths (defaults; storage functions resolve LIGHTHOUSE_CONFIG_DIR per call)
 CONFIG_DIR = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
-COOKIE_FILE = CONFIG_DIR / "cookies.json"
-MFA_PENDING_FILE = CONFIG_DIR / "mfa_pending.json"
-MFA_PENDING_VERSION = 1
 DEFAULT_DOWNLOAD_DIR = Path("~/Downloads/lighthouse").expanduser()
 
 # Cookie age warning threshold (days)
 _COOKIE_AGE_WARNING_DAYS = 4
+
+#: Plaintext metadata allowed beside the sealed payload in mfa_pending.json.
+_PENDING_METADATA_KEYS = frozenset({"created_at", "mfa_method"})
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+
+def ensure_config_dir() -> Path:
+    """Create the config directory if it doesn't exist with 0700 permissions."""
+    config_dir = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", str(CONFIG_DIR))).expanduser()
+    # mode applies at creation wherever creation-time modes are honored, so a
+    # chmod-hostile filesystem still gets a restrictive directory.
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with suppress(OSError):
+        # Best effort: some filesystems (network mounts, certain tmpfs) reject
+        # chmod; auth must not hard-fail because of that.
+        config_dir.chmod(0o700)
+    return config_dir
 
 
 def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
@@ -44,105 +75,244 @@ def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
     return missing
 
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
+def cookie_domain_accepted(domain: str) -> bool:
+    """True when a cookie domain is the D2L host or a dot-boundary subdomain.
 
-def ensure_config_dir() -> Path:
-    """Create the config directory if it doesn't exist with 0700 permissions."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with suppress(OSError):
-        CONFIG_DIR.chmod(0o700)
-    return CONFIG_DIR
+    Exact registrable-domain semantics — ``manipal.edu.evil.com`` merely
+    *contains* the tenant domain as a substring and is rejected.
+    """
+    normalized = (domain or "").lstrip(".").lower()
+    return normalized == "manipal.edu" or normalized.endswith(".manipal.edu")
+
+
+def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
+    """Extract ``d2l*`` cookies from browser-jar entries (list of dicts).
+
+    Untrusted input: malformed entries are skipped, domains must pass
+    :func:`cookie_domain_accepted`, and host-only cookies (set on
+    ``COOKIE_SETTING_HOST``) win over domain-scoped ones so a sibling-host
+    cookie cannot shadow the genuine session value.
+    """
+    host_only: dict[str, str] = {}
+    domain_scoped: dict[str, str] = {}
+    if not isinstance(entries, list):
+        return {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        value = entry.get("value")
+        if not isinstance(name, str) or not name.startswith("d2l"):
+            continue
+        if not isinstance(value, str):
+            continue
+        domain = str(entry.get("domain") or "")
+        if not cookie_domain_accepted(domain):
+            continue
+        target = (
+            host_only
+            if domain.lstrip(".").lower() == COOKIE_SETTING_HOST
+            else domain_scoped
+        )
+        target[name] = value
+    merged = dict(domain_scoped)
+    merged.update(host_only)
+    return merged
 
 
 def load_cookies() -> dict[str, str]:
     """Load cookies from disk. Returns empty dict if file is missing.
 
-    Handles both the new format (``{"cookies": {...}, "extracted_at": "..."}``)
-    and the legacy flat-dict format for backward compatibility.
+    Sealed v2 documents are decrypted with their recorded key source; an
+    unseal failure on this non-auth read path warns on stderr and behaves as
+    if no cookies were stored.  Legacy plaintext files are accepted once and
+    re-saved sealed when a key source is available (auto-upgrade).
     """
-    if not COOKIE_FILE.exists():
+    store = CredentialStore()
+    path = store.cookie_file
+    if not path.exists():
         return {}
     try:
-        data = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
-        # New format: {"cookies": {...}, "extracted_at": "..."}
-        if isinstance(data, dict) and "cookies" in data:
-            return {k: v for k, v in data["cookies"].items() if k in COOKIE_NAMES}
-        # Legacy format: flat dict
-        return {k: v for k, v in data.items() if k in COOKIE_NAMES}
-    except (json.JSONDecodeError, OSError):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    if not isinstance(doc, dict):
         return {}
 
+    if is_sealed_document(doc):
+        try:
+            artifact = store.read_artifact(path)
+        except CredentialStoreError as exc:
+            print(
+                f"Warning: stored cookies could not be unlocked ({exc}). "
+                "Run: lighthouse auth login",
+                file=sys.stderr,
+            )
+            return {}
+        if artifact is None:
+            return {}
+        _meta, secret = artifact
+        return _filter_cookie_names(secret.get("cookies", {}))
 
-def save_cookies(cookies: dict[str, str]) -> None:
-    """Persist cookies to disk atomically (temp file + rename).
+    # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
+    cookies = _cookies_from_legacy_doc(doc)
+    legacy_extracted = doc.get("extracted_at")
+    _try_upgrade_plaintext_cookies(
+        store,
+        cookies,
+        # Only a genuine ISO string is trustworthy; any other JSON type would
+        # either reset the cookie age to "now" or poison the staleness math.
+        extracted_at=legacy_extracted if isinstance(legacy_extracted, str) else None,
+    )
+    return cookies
 
-    Wraps cookies with an ``extracted_at`` ISO-8601 timestamp.
+
+def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) -> None:
+    """Persist cookies to disk atomically, sealed, with owner-only permissions.
+
+    Wraps cookies with an ``extracted_at`` ISO-8601 timestamp (plaintext
+    metadata beside the sealed payload).  ``extracted_at`` overrides the
+    fresh timestamp — used by the legacy auto-upgrade so migrated cookies
+    keep their original age.
     """
-    ensure_config_dir()
-    payload = {
-        "cookies": cookies,
-        "extracted_at": datetime.now(timezone.utc).isoformat(),
-    }
-    tmp_file = COOKIE_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        tmp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        with suppress(OSError):
-            tmp_file.chmod(0o600)
-        tmp_file.replace(COOKIE_FILE)
-    except OSError:
-        if tmp_file.exists():
-            tmp_file.unlink()
-        raise
+    store = CredentialStore()
+    store.write_artifact(
+        store.cookie_file,
+        metadata={
+            "extracted_at": extracted_at or datetime.now(timezone.utc).isoformat()
+        },
+        secret={"cookies": dict(cookies)},
+    )
 
 
 def get_cookie_age_days() -> float | None:
     """Return the age of stored cookies in days, or None if unavailable."""
-    if not COOKIE_FILE.exists():
+    store = CredentialStore()
+    path = store.cookie_file
+    if not path.exists():
         return None
     try:
-        data = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
-        ts_str = data.get("extracted_at") if isinstance(data, dict) else None
-        if not ts_str:
-            return None
-        extracted = datetime.fromisoformat(ts_str)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ts_str = data.get("extracted_at")
+    if not ts_str:
+        return None
+    try:
+        extracted = datetime.fromisoformat(str(ts_str))
         if extracted.tzinfo is None:
             extracted = extracted.replace(tzinfo=timezone.utc)
         return (datetime.now(timezone.utc) - extracted).total_seconds() / 86400
-    except (json.JSONDecodeError, OSError, ValueError):
+    except ValueError:
         return None
 
 
-def save_mfa_pending(payload: dict) -> None:
-    """Persist in-progress MFA state between ``auth login`` and ``auth verify``."""
-    ensure_config_dir()
-    data = {"version": MFA_PENDING_VERSION, **payload}
-    tmp = MFA_PENDING_FILE.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+def _cookies_from_legacy_doc(doc: dict) -> dict[str, str]:
+    """Extract cookies from a legacy plaintext document."""
+    source = doc.get("cookies") if "cookies" in doc else doc
+    if not isinstance(source, dict):
+        return {}
+    return _filter_cookie_names(source)
+
+
+def _filter_cookie_names(source: dict) -> dict[str, str]:
+    return {k: v for k, v in source.items() if k in COOKIE_NAMES}
+
+
+def _try_upgrade_plaintext_cookies(
+    store: CredentialStore,
+    cookies: dict[str, str],
+    *,
+    extracted_at: str | None = None,
+) -> None:
+    """Re-save legacy plaintext cookies sealed — only when a key source exists.
+
+    The original ``extracted_at`` timestamp rides along so the upgraded
+    document keeps the legacy cookies' age (staleness warnings stay honest).
+    """
     try:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        with suppress(OSError):
-            tmp.chmod(0o600)
-        tmp.replace(MFA_PENDING_FILE)
-    except OSError:
-        if tmp.exists():
-            tmp.unlink()
-        raise
-    with suppress(OSError):
-        MFA_PENDING_FILE.chmod(0o600)
+        store.preflight()
+    except CredentialStoreError:
+        return
+    try:
+        save_cookies(cookies, extracted_at=extracted_at)
+    except (CredentialStoreError, OSError):
+        return
+
+
+# ---------------------------------------------------------------------------
+# MFA pending checkpoint (sealed via CredentialStore)
+# ---------------------------------------------------------------------------
+
+def save_mfa_pending(payload: dict) -> None:
+    """Persist in-progress MFA state between ``auth login`` and ``auth verify``.
+
+    Everything except the metadata allowlist (``created_at``, ``mfa_method``)
+    is sealed — cookies, flow tokens, contexts, SAML material, and all URLs.
+    """
+    store = CredentialStore()
+    metadata = {k: payload[k] for k in _PENDING_METADATA_KEYS if k in payload}
+    secret = {k: v for k, v in payload.items() if k not in _PENDING_METADATA_KEYS}
+    store.write_artifact(store.mfa_pending_file, metadata=metadata, secret=secret)
 
 
 def load_mfa_pending() -> dict | None:
-    """Load pending MFA state, or None if missing/invalid."""
-    if not MFA_PENDING_FILE.exists():
-        return None
+    """Load pending MFA state (metadata + sealed secret merged), or None.
+
+    Compatibility policy:
+    - sealed v2 document → decrypted with its recorded key source; unseal
+      failures raise (auth callers report a clean actionable error);
+    - legacy plaintext v1 → discarded with a stderr warning (it stored
+      secrets unencrypted);
+    - unknown version → treated as absent, cleared, warned.
+    """
+    store = CredentialStore()
+    path = store.mfa_pending_file
     try:
-        data = json.loads(MFA_PENDING_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        if not path.exists():
+            return None
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CredentialStoreError(
+            f"{path.name} could not be read ({exc.__class__.__name__})."
+        ) from None
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-    if not isinstance(data, dict) or data.get("version") != MFA_PENDING_VERSION:
+    if not isinstance(doc, dict):
         return None
-    return data
+
+    if is_sealed_document(doc):
+        artifact = store.read_artifact(path)
+        if artifact is None:
+            return None
+        metadata, secret = artifact
+        return {**secret, **metadata, "version": FORMAT_VERSION}
+
+    version = doc.get("version")
+    _discard_pending(path, version)
+    return None
+
+
+def _discard_pending(path: Path, version: object) -> None:
+    """Remove an unreadable pending checkpoint and warn on stderr."""
+    with suppress(OSError):
+        path.unlink()
+    if version == 1:
+        print(
+            "Warning: discarded a legacy unencrypted MFA pending session. "
+            "Run: lighthouse auth login --mfa-method sms",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Warning: removed an incompatible MFA pending session "
+            f"(version {version!r}). Run: lighthouse auth login --mfa-method sms",
+            file=sys.stderr,
+        )
 
 
 def update_mfa_pending(updates: dict) -> None:
@@ -157,8 +327,9 @@ def update_mfa_pending(updates: dict) -> None:
 
 def clear_mfa_pending() -> None:
     """Remove pending MFA state file."""
+    store = CredentialStore()
     with suppress(OSError):
-        MFA_PENDING_FILE.unlink()
+        store.mfa_pending_file.unlink()
 
 
 def warn_if_cookies_stale() -> bool:
@@ -166,8 +337,6 @@ def warn_if_cookies_stale() -> bool:
 
     Returns True if a warning was printed.
     """
-    import sys
-
     age = get_cookie_age_days()
     if age is not None and age > _COOKIE_AGE_WARNING_DAYS:
         print(

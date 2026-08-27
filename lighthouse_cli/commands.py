@@ -10,29 +10,14 @@ from typing import Any
 
 from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
 from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
-from .manifest import MANIFEST_FILENAME, Manifest, ManifestCorruptError, compute_sha256
-from .utils import _sanitize_filename, get_course_name as _get_course_name, resolve_course_folder_name as _resolve_course_folder_name
 from .display import error as _error, output_json as _output_json, print_table as _print_table, short as _short, fmt_date as _fmt_date, utc_now_iso as _utc_now_iso
 from .course_config import load as _load_course_config
+from .sync_engine import Mode, run_course
+from .assignments import download_single_attachment as _download_single_attachment
 from .submit import cmd_submit  # noqa: F401 — re-export
 from .show import cmd_grades, cmd_announcements, cmd_calendar, cmd_assignments, cmd_quizzes  # noqa: F401 — re-export
-from .assignments import (
-    assignment_key as _assignment_key,
-    download_single_attachment as _download_single_attachment,
-    download_for_course as _download_assignments_for_course,
-    sync_for_course as _sync_assignments_for_course,
-)
 
 
-def _entry(tid: str, name: str, path: str, content_or_entry: bytes | dict, sha: str = "") -> dict:
-    """Build a sync/download entry dict. content_or_entry is bytes (content) or dict (manifest entry)."""
-    if not sha and isinstance(content_or_entry, bytes):
-        sha = compute_sha256(content_or_entry)
-    return {"topic_id": tid, "filename": name, "path": path, "size_kb": round((len(content_or_entry) if isinstance(content_or_entry, bytes) else content_or_entry.get("size", 0)) / 1024, 1), "sha256": sha, **({"extension": Path(name).suffix.lower()} if name and "." in name else {})}
-
-def _fetch_toc_and_name(client: LighthouseClient, org_id: int) -> tuple[dict, str]:
-    """Fetch content TOC and course name. Raises on failure."""
-    return client.get_content_toc(org_id), _get_course_name(client, org_id)
 def _output_multi_course_json(sem_id: int, sem_name: str, courses_results: list[dict], also_errors: list[str]) -> None:
     _output_json({
         "semester": {"id": sem_id, "name": sem_name},
@@ -45,211 +30,229 @@ def _output_multi_course_json(sem_id: int, sem_name: str, courses_results: list[
         "courses": courses_results, "also_errors": also_errors,
     })
 
-def _download_and_persist_topic(
+
+# ---------------------------------------------------------------------------
+# Rendering funnels (human | --json) over sync_engine results
+# ---------------------------------------------------------------------------
+
+def _print_warnings(result: dict[str, Any]) -> None:
+    """Emit recorded engine warnings to stderr (never stdout, even under --json)."""
+    for warning in result["warnings"]:
+        print(f"Warning: {warning}", file=sys.stderr)
+
+
+def _single_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Project an engine entry onto the single-course download schema."""
+    return {"topic_id": entry["topic_id"], "filename": entry["filename"], "size": entry["size"], "path": entry["path"]}
+
+
+def _pipeline_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Project an engine entry onto the sync/multi schema (no raw byte size)."""
+    projected = {k: entry[k] for k in ("topic_id", "filename", "path", "size_kb", "sha256") if k in entry}
+    if "extension" in entry:
+        projected["extension"] = entry["extension"]
+    return projected
+
+
+def _single_error(error: dict[str, Any]) -> dict[str, Any]:
+    """Project an engine error onto the single-course schema ({topic_id, error})."""
+    return {k: error[k] for k in ("topic_id", "error") if k in error}
+
+
+def _single_course_json(result: dict[str, Any], *, action: str, include_assignments: bool) -> Any:
+    """Project one engine result into the single-course JSON schema."""
+    if result["mode"] is Mode.PLAN:
+        return result["planned"]
+    if result["empty"]:
+        data: dict[str, Any] = {
+            "course_id": result["org_id"],
+            "course_name": result["course_name"],
+            "folder": str(result["dest"]),
+            "errors": [_single_error(e) for e in result["errors"]],
+        }
+        if action == "sync":
+            data.update(downloaded=[], skipped=[], updated=[], orphaned=[])
+        else:
+            data.update(manifest=str(result["manifest_path"]), downloaded=[])
+        return data
+
+    assignments = result["assignments"]
+    data: dict[str, Any] = {"course_id": result["org_id"], "course_name": result["course_name"], "folder": str(result["dest"])}
+    if action == "sync":
+        data.update(
+            downloaded=[_pipeline_entry(e) for e in result["downloaded"]],
+            skipped=[_pipeline_entry(e) for e in result["skipped"]],
+            updated=[_pipeline_entry(e) for e in result["updated"]],
+            orphaned=[_pipeline_entry(e) for e in result["orphaned"]],
+            errors=[_single_error(e) for e in result["errors"]],
+        )
+        if include_assignments:
+            data.update(assignments_downloaded=assignments["downloaded"], assignments_skipped=assignments["skipped"],
+                        assignments_updated=assignments["updated"], assignment_errors=assignments["errors"])
+    else:
+        data.update(
+            manifest=str(result["manifest_path"]),
+            downloaded=[_single_entry(e) for e in result["downloaded"]],
+            errors=[_single_error(e) for e in result["errors"]],
+        )
+        if include_assignments:
+            data.update(assignments_downloaded=assignments["downloaded"], assignment_errors=assignments["errors"])
+    return data
+
+
+def _multi_course_json(result: dict[str, Any], *, sem_name: str, action: str) -> dict[str, Any]:
+    """Project one engine result into the multi-course per-course JSON schema."""
+    assignments = result["assignments"]
+    course: dict[str, Any] = {
+        "course_id": result["org_id"], "course_name": result["course_name"],
+        "semester": sem_name, "root": str(result["dest"]),
+        "manifest_total": result["manifest_total"],
+        "downloaded": [_pipeline_entry(e) for e in result["downloaded"]],
+        "skipped": [_pipeline_entry(e) for e in result["skipped"]],
+        "updated": [_pipeline_entry(e) for e in result["updated"]],
+    }
+    if action == "sync":
+        course["orphaned"] = [_pipeline_entry(e) for e in result["orphaned"]]
+    course["duplicates"] = result["duplicates"]
+    course["errors"] = result["errors"]
+    if action == "sync":
+        course.update(assignments_downloaded=assignments["downloaded"], assignments_skipped=assignments["skipped"],
+                      assignments_updated=assignments["updated"], assignment_errors=assignments["errors"])
+    else:
+        course.update(assignments_downloaded=assignments["downloaded"], assignment_errors=assignments["errors"])
+    return course
+
+
+def _render_course_human(result: dict[str, Any], *, action: str, include_assignments: bool) -> int:
+    """Render one engine result as human-readable text. Returns per-course exit code."""
+    if result["mode"] is Mode.PLAN:
+        print(f"Would download {result['topic_count']} files to {result['dest']}/\n")
+        print("\n".join(f"  [{t['topic_id']}] {t['title']}" for t in result["planned"]))
+        if include_assignments:
+            print("\n  (Assignment downloads not shown in dry-run)")
+        return 0
+    if result["empty"]:
+        print("No downloadable files found.")
+        # Uniform policy: a recorded failure (e.g. corrupt manifest surfaced
+        # on an empty course) is an error-class exit even with no downloads.
+        return 1 if (result["errors"] or result["assignments"]["errors"]) else 0
+
+    assignments = result["assignments"]
+    failed = 1 if (result["errors"] or assignments["errors"]) else 0
+    if action == "sync":
+        parts = [f"{len(result['downloaded'])} new"]
+        if assignments["downloaded"]:
+            parts.append(f"{len(assignments['downloaded'])} assignment new")
+        if assignments["updated"]:
+            parts.append(f"{len(assignments['updated'])} assignment updated")
+        parts.extend([f"{len(result['updated'])} updated", f"{len(result['skipped'])} skipped", f"{len(result['orphaned'])} orphaned", f"{len(result['errors'])} errors"])
+        if assignments["errors"]:
+            parts.append(f"{len(assignments['errors'])} assignment errors")
+        print(f"Synced {result['course_name']}: {', '.join(parts)}")
+        return failed
+
+    for i, entry in enumerate(result["downloaded"], 1):
+        print(f"  [{i}/{result['topic_count']}] {entry['path']} ({entry['size'] / 1024:.0f} KB)")
+    for error in result["errors"]:
+        if "topic_id" in error:
+            print(f"  FAILED topic {error['topic_id']}: {error['error']}", file=sys.stderr)
+    if assignments["downloaded"]:
+        print(f"\nAssignments: {len(assignments['downloaded'])} attachment(s) downloaded")
+    print(f"\nDone: {len(result['downloaded'])}/{result['topic_count']} files downloaded to {result['dest']}")
+    if assignments["errors"]:
+        print(f"  {len(assignments['errors'])} assignment error(s)")
+    return failed
+
+
+def _run_and_render_single(
     client: LighthouseClient,
     org_id: int,
-    topic: dict,
-    dest: Path,
-    manifest: Manifest,
-) -> tuple[bytes, str, Path]:
-    """Download a topic, write to disk, update manifest. Returns (content, name, path)."""
-    tid = topic.get("topic_id")
-    if tid is None:
-        raise ValueError(f"Topic missing 'topic_id': {topic.get('title', 'unknown')}")
-    tid = str(tid)
-    if topic.get("type", "").lower() == "html":
-        content, sanitized_name = client.get_topic_html(org_id, int(tid))
-    else:
-        content, filename = client.download_topic_file(org_id, int(tid))
-        sanitized_name = _sanitize_filename(filename)
-    file_dest = dest / Path(topic["path"]).parent
-    file_dest.mkdir(parents=True, exist_ok=True)
-    filepath = file_dest / sanitized_name
-    filepath.write_bytes(content)
-    manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=topic.get("last_modified") or "")
-    return content, sanitized_name, filepath
-
-
-def _parse_type_filter(types: str) -> set[str]:
-    """Parse a comma-separated content-type filter string into a validated set.
-
-    Accepts "file", "html", or comma-separated combos. Unknown types
-    produce a warning and are dropped. Returns ``{"file"}`` when nothing
-    valid remains.
-    """
-    valid, raw = {"file", "html"}, {t.strip().lower() for t in types.split(",")}
-    for u in sorted(raw - valid):
-        _error(f"Unknown content type: {u}")
-    return (raw & valid) or {"file"}
-
-
-def _filter_topics_by_type(modules: list[dict], type_set: set[str]) -> list[dict]:
-    """Flatten topic tree and keep only topics matching *type_set*.
-
-    Returns a list of topic dicts whose ``type`` (lowercased) is present
-    in *type_set* (e.g. ``{"file"}`` or ``{"file", "html"}``).
-    """
-    return [
-        t for t in _flatten_all_topics(modules) if t.get("type", "").lower() in type_set
-    ]
-
-
-
-
-def _walk_content_tree(modules: list[dict], depth: int = 0) -> list[dict[str, Any]]:
-    """Flatten the nested content TOC into a list of display records.
-
-    Each record: {depth, type, id, title, url}
-    """
-    items: list[dict[str, Any]] = []
-    for mod in modules:
-        items.append({
-            "depth": depth, "type": "module",
-            "id": mod.get("ModuleId"), "title": mod.get("Title", ""),
-            "url": None,
-        })
-        items.extend(_walk_content_tree(mod.get("Modules", []), depth + 1))
-        for topic in mod.get("Topics", []):
-            items.append({
-                "depth": depth + 1, "type": "topic",
-                "id": topic.get("TopicId"), "title": topic.get("Title", ""),
-                "url": topic.get("Url"), "topic_type": topic.get("TypeIdentifier", ""),
-            })
-    return items
-
-
-def _flatten_all_topics(modules: list[dict], prefix: str = "") -> list[dict[str, Any]]:
-    """Collect all downloadable topics from the content TOC.
-
-    Returns list of {topic_id, title, url, type, path, last_modified}.
-    """
-    topics: list[dict[str, Any]] = []
-    for mod in modules:
-        new_prefix = f"{prefix}/{mod.get('Title', '')}" if prefix else mod.get("Title", "")
-        topics.extend(_flatten_all_topics(mod.get("Modules", []), new_prefix))
-        for topic in mod.get("Topics", []):
-            topics.append({
-                "topic_id": topic.get("TopicId"), "title": topic.get("Title", ""),
-                "url": topic.get("Url"), "type": topic.get("TypeIdentifier", ""),
-                "path": f"{new_prefix}/{topic.get('Title', '')}",
-                "last_modified": topic.get("LastModifiedDate", ""),
-            })
-    return topics
-
-
-
-def cmd_auth_status(json_output: bool = False) -> int:
-    """Check if stored cookies are valid."""
-    client = LighthouseClient()
-    cookies = client.cookies
-    if not cookies:
-        return _error("No cookies found. Run: lighthouse auth login")
-
-    valid = client.check_auth()
-    if json_output:
-        _output_json({"valid": valid, "cookies": list(cookies.keys())})
-        return 0
-
-    if valid:
-        print(f"Session valid. Cookies: {', '.join(cookies.keys())}")
-        warn_if_cookies_stale()
-        return 0
-    return _error("Session expired. Run: lighthouse auth login")
-def cmd_semesters(json_output: bool = False) -> int:
-    """List all semesters."""
-    client = LighthouseClient()
-    try:
-        semesters = client.get_semesters()
-    except Exception as e:
-        return _error(str(e))
-
-    if json_output:
-        _output_json(semesters)
-        return 0
-
-    _print_table(["ID", "Name", "Code"], [[s.get("OrgUnitId", ""), s.get("Name", ""), s.get("Code", "")] for s in semesters], title="Semesters")
-    return 0
-
-
-def cmd_courses(
-    semester: str | None = None,
-    json_output: bool = False,
-    tracked_only: bool = False,
+    root: Path,
+    mode: Mode,
+    action: str,
+    types: str,
+    json_output: bool,
+    *,
+    include_assignments: bool = False,
+    assignment_id: int | None = None,
 ) -> int:
-    """List courses, optionally filtered by semester or tracked status."""
-    client = LighthouseClient()
+    """Run one course through the sync engine and render it. Returns exit code."""
     try:
-        all_enrollments = client.get_course_enrollments()
+        result = run_course(
+            client, org_id, root, mode=mode, types=types,
+            include_assignments=include_assignments, assignment_id=assignment_id,
+        )
     except Exception as e:
         return _error(str(e))
 
-    config = _load_course_config()
-    courses = [
-        {
-            "OrgUnitId": int(e["OrgUnit"]["Id"]), "Name": e["OrgUnit"].get("Name", ""),
-            "Code": e["OrgUnit"].get("Code", ""),
-            "IsActive": e.get("Access", {}).get("IsActive", True),
-            "semester": (config.get(str(int(e["OrgUnit"]["Id"]))) or {}).get("semester", ""),
-        }
-        for e in all_enrollments
-    ]
+    _print_warnings(result)
+    if json_output:
+        _output_json(_single_course_json(result, action=action, include_assignments=include_assignments))
+    else:
+        _render_course_human(result, action=action, include_assignments=include_assignments)
+    return 1 if (result["errors"] or result["assignments"]["errors"]) else 0
 
-    if (tracked_only or semester) and not config:
-        return _error("No course config found. Run: lighthouse config courses")
-    if tracked_only:
-        courses = [c for c in courses if str(c.get("OrgUnitId", "")) in config]
-    if semester:
-        if not (courses := [
-            c for c in courses
-            if c.get("semester", "").lower().strip() == semester.lower().strip()
-        ]):
-            return _error(
-                f"No tracked courses mapped to semester '{semester}'.\n"
-                "Run: lighthouse config courses --list to see your mappings."
-            )
+
+def _run_and_render_multi(
+    client: LighthouseClient,
+    course_ids: list[int],
+    root: Path,
+    mode: Mode,
+    action: str,
+    types: str,
+    sem_id: int,
+    sem_name: str,
+    also_errors: list[str],
+    json_output: bool,
+    include_assignments: bool,
+) -> int:
+    """Run every scoped course through the sync engine and render the batch."""
+    results: list[dict[str, Any]] = []
+    rc = 0
+    for cid in course_ids:
+        try:
+            results.append(run_course(client, cid, root, mode=mode, types=types, include_assignments=include_assignments))
+        except Exception as e:
+            rc = _error(str(e))
 
     if json_output:
-        _output_json(courses)
-        return 0
+        courses = []
+        for result in results:
+            # Engine warnings reach stderr in every mode — an unknown
+            # --types value must never change the downloaded set silently.
+            _print_warnings(result)
+            if result["mode"] is Mode.PLAN:
+                courses.append({
+                    "course_id": result["org_id"], "course_name": result["course_name"],
+                    "semester": sem_name, "root": str(result["dest"]), "manifest_total": 0,
+                    "planned": result["planned"], "downloaded": [], "skipped": [],
+                    "updated": [], "duplicates": [], "errors": [],
+                })
+                continue
+            courses.append(_multi_course_json(result, sem_name=sem_name, action=action))
+            if result["errors"] or result["assignments"]["errors"]:
+                rc = 1
+        _output_multi_course_json(sem_id, sem_name, courses, also_errors)
+        return rc
 
-    _print_table(["ID", "Name", "Semester", "Active"], [
-        [str(c.get("OrgUnitId", "")), _short(c.get("Name", ""), 40), c.get("semester", ""), "Y" if c.get("IsActive") else "N"]
-        for c in courses
-    ], title=f"Courses ({len(courses)})")
-    return 0
+    print(f"{'Syncing' if action == 'sync' else 'Downloading'} courses from {sem_name}...\n")
+    for result in results:
+        _print_warnings(result)
+        if _render_course_human(result, action=action, include_assignments=include_assignments) != 0:
+            rc = 1
+    if also_errors:
+        print("\n".join(f"  Error: {err}" for err in also_errors), file=sys.stderr)
+    if action == "download":
+        print("\nDownload complete.")
+    return rc
 
-def cmd_content(course_id: str, json_output: bool = False) -> int:
-    """Show content tree for a course."""
-    client = LighthouseClient()
-    try:
-        org_id = resolve_course_id(client, course_id)
-        toc = client.get_content_toc(org_id)
-    except Exception as e:
-        return _error(str(e))
 
-    modules = toc.get("Modules", [])
-
-    if json_output:
-        _output_json({"course_id": org_id, "modules": modules})
-        return 0
-
-    if not (items := _walk_content_tree(modules)):
-        print("No content found for this course.")
-        return 0
-
-    for item in items:
-        indent = "  " * item["depth"]
-        if item["type"] == "module":
-            print(f"{indent}📁 {item['title']}")
-        else:
-            icon = {"File": "📄", "Link": "🔗"}.get(item.get("topic_type", ""), "📎")
-            print(f"{indent}{icon} {item['title']}  [id:{item.get('id', '')}]")
-    return 0
-
+# ---------------------------------------------------------------------------
+# download / sync commands
+# ---------------------------------------------------------------------------
 
 def cmd_download(
     course_id: str | None = None,
-    topic_id: int | None = None,
     output_dir: str | None = None,
     dry_run: bool = False,
     json_output: bool = False,
@@ -268,6 +271,7 @@ def cmd_download(
     client = LighthouseClient()
     root = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_DOWNLOAD_DIR
     also_courses = also_courses or []
+    mode = Mode.PLAN if dry_run else (Mode.FORCE if force else Mode.DOWNLOAD)
 
     if assignment_id is not None and attachment_id is not None and course_id is None:
         return _error("COURSE_ID is required when using --assignment and --attachment")
@@ -279,20 +283,19 @@ def cmd_download(
             return _error(str(e))
         if assignment_id is not None and attachment_id is not None:
             return _download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
-        return _download_single_course(
-            client, org_id, root, json_output, force, types, dry_run,
-            include_assignments=include_assignments,
-            assignment_id=assignment_id,
+        return _run_and_render_single(
+            client, org_id, root, mode, "download", types, json_output,
+            include_assignments=include_assignments, assignment_id=assignment_id,
         )
 
-    if not semester and not also_courses:
-        return _download_multi_course(client, root, json_output, force, types, dry_run, None, [], include_assignments)
-
-    return _download_multi_course(
-        client, root, json_output, force, types, dry_run, semester, also_courses,
-        include_assignments=include_assignments,
+    scope = _resolve_course_scope(client, semester, also_courses, "download")
+    if isinstance(scope, int):
+        return scope
+    course_ids, sem_name, sem_id, also_errors = scope
+    return _run_and_render_multi(
+        client, course_ids, root, mode, "download", types,
+        sem_id, sem_name, also_errors, json_output, include_assignments,
     )
-
 
 
 def cmd_sync(
@@ -309,118 +312,29 @@ def cmd_sync(
     client = LighthouseClient()
     root = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_DOWNLOAD_DIR
     also_courses = also_courses or []
+    mode = Mode.FORCE if force else Mode.SYNC
 
     if course_id is not None:
         try:
             org_id = resolve_course_id(client, course_id)
         except Exception as e:
             return _error(str(e))
-        return _sync_single_course(client, org_id, root, json_output, force, types, include_assignments)
+        return _run_and_render_single(client, org_id, root, mode, "sync", types, json_output,
+                                      include_assignments=include_assignments)
 
-    return _sync_multi_course(
-        client, root, json_output, force, types, semester, also_courses, include_assignments
+    scope = _resolve_course_scope(client, semester, also_courses, "sync")
+    if isinstance(scope, int):
+        return scope
+    course_ids, sem_name, sem_id, also_errors = scope
+    return _run_and_render_multi(
+        client, course_ids, root, mode, "sync", types,
+        sem_id, sem_name, also_errors, json_output, include_assignments,
     )
 
 
-def _sync_single_course(
-    client: LighthouseClient,
-    org_id: int,
-    root: Path,
-    json_output: bool,
-    force: bool,
-    types: str,
-    include_assignments: bool = False,
-) -> int:
-    """Sync a single course, returning exit code."""
-    try:
-        toc, course_name = _fetch_toc_and_name(client, org_id)
-    except Exception as e:
-        return _error(str(e))
-
-
-    dest = root / _resolve_course_folder_name(course_name, org_id)
-    manifest_path = dest / MANIFEST_FILENAME
-
-    if force and manifest_path.exists():
-        manifest_path.unlink()
-    try:
-        manifest = Manifest.load(manifest_path)
-    except Exception as exc:
-        if isinstance(exc, ManifestCorruptError):
-            print(f"Warning: {exc}. Performing full sync.", file=sys.stderr)
-        manifest = Manifest()
-
-    downloadable = _filter_topics_by_type(toc.get("Modules", []), _parse_type_filter(types))
-
-    if not downloadable and not include_assignments:
-        if json_output:
-            _output_json({"course_id": org_id, "course_name": course_name, "downloaded": [], "skipped": [], "updated": [], "orphaned": [], "errors": []})
-        else:
-            print("No downloadable files found.")
-        return 0
-
-    dest.mkdir(parents=True, exist_ok=True)
-
-    downloaded_entries, skipped_entries, updated_entries, errors = [], [], [], []
-
-    manifest_topic_ids = set(manifest.entries.keys())
-
-    for topic in downloadable:
-        tid = str(topic["topic_id"])
-        existing = manifest.get(tid)
-        manifest_topic_ids.discard(tid)
-
-        if existing is not None:
-            if existing.get("last_modified") == (topic.get("last_modified") or ""):
-                skipped_entries.append(_entry(tid, existing.get("filename", ""), existing.get("filename", ""), existing))
-                continue
-            target_list = updated_entries
-        else:
-            target_list = downloaded_entries
-
-        try:
-            content, sanitized_name, filepath = _download_and_persist_topic(client, org_id, topic, dest, manifest)
-            target_list.append(_entry(tid, sanitized_name, str(filepath.relative_to(dest)), content))
-        except Exception as e:
-            errors.append({"topic_id": tid, "error": str(e)})
-
-    orphaned_entries_by_tid = {tid: manifest.get(tid) for tid in manifest_topic_ids if manifest.get(tid)}
-
-    assignments_downloaded, assignments_skipped, assignments_updated, assignment_errors = [], [], [], []
-    if include_assignments:
-        assignments_downloaded, assignments_skipped, assignments_updated, assignment_errors = _sync_assignments_for_course(
-            client, org_id, dest, manifest
-        )
-        for entry in assignments_skipped + assignments_updated + assignments_downloaded:
-            if (key := _assignment_key(entry.get("folder_id", 0), entry.get("file_id", 0))) in orphaned_entries_by_tid:
-                del orphaned_entries_by_tid[key]
-
-    orphaned_entries = [_entry(tid, e.get("filename", ""), "", e) for tid, e in orphaned_entries_by_tid.items()]
-
-    if downloaded_entries or updated_entries or assignments_downloaded or assignments_updated or errors or assignment_errors:
-        manifest.save(manifest_path)
-
-    if json_output:
-        _output_json({
-            "course_id": org_id, "course_name": course_name,
-            "folder": str(dest), "downloaded": downloaded_entries,
-            "skipped": skipped_entries, "updated": updated_entries,
-            "orphaned": orphaned_entries, "errors": errors,
-            **({"assignments_downloaded": assignments_downloaded, "assignments_skipped": assignments_skipped, "assignments_updated": assignments_updated, "assignment_errors": assignment_errors} if include_assignments else {}),
-        })
-    else:
-        parts = [f"{len(downloaded_entries)} new"]
-        if assignments_downloaded:
-            parts.append(f"{len(assignments_downloaded)} assignment new")
-        if assignments_updated:
-            parts.append(f"{len(assignments_updated)} assignment updated")
-        parts.extend([f"{len(updated_entries)} updated", f"{len(skipped_entries)} skipped", f"{len(orphaned_entries)} orphaned", f"{len(errors)} errors"])
-        if assignment_errors:
-            parts.append(f"{len(assignment_errors)} assignment errors")
-        print(f"Synced {course_name}: {', '.join(parts)}")
-
-    return 1 if (errors or assignment_errors) else 0
-
+# ---------------------------------------------------------------------------
+# Scope resolution (multi-course)
+# ---------------------------------------------------------------------------
 
 def _resolve_semester(
     client: LighthouseClient,
@@ -566,290 +480,144 @@ def _resolve_course_scope(
     return all_course_ids, sem.get("Name", "Unknown Semester"), int(sem["OrgUnitId"]), also_errors
 
 
-def _download_single_course(
-    client: LighthouseClient,
-    org_id: int,
-    root: Path,
-    json_output: bool,
-    force: bool,
-    types: str,
-    dry_run: bool = False,
-    include_assignments: bool = False,
-    assignment_id: int | None = None,
-) -> int:
-    """Download a single course by org_id."""
+# ---------------------------------------------------------------------------
+# Read-only commands
+# ---------------------------------------------------------------------------
+
+def cmd_auth_status(json_output: bool = False) -> int:
+    """Check if stored cookies are valid."""
+    client = LighthouseClient()
+    cookies = client.cookies
+    if not cookies:
+        if json_output:
+            _output_json({"valid": False, "error": "No cookies found. Run: lighthouse auth login"})
+            return 1
+        return _error("No cookies found. Run: lighthouse auth login")
+
+    valid = client.check_auth()
+    if json_output:
+        _output_json({"valid": valid, "cookies": list(cookies.keys())})
+        return 0
+
+    if valid:
+        print(f"Session valid. Cookies: {', '.join(cookies.keys())}")
+        warn_if_cookies_stale()
+        return 0
+    return _error("Session expired. Run: lighthouse auth login")
+
+
+def cmd_semesters(json_output: bool = False) -> int:
+    """List all semesters."""
+    client = LighthouseClient()
     try:
-        toc, course_name = _fetch_toc_and_name(client, org_id)
+        semesters = client.get_semesters()
     except Exception as e:
         return _error(str(e))
 
+    if json_output:
+        _output_json(semesters)
+        return 0
 
-    downloadable = _filter_topics_by_type(toc.get("Modules", []), _parse_type_filter(types))
+    _print_table(["ID", "Name", "Code"], [[s.get("OrgUnitId", ""), s.get("Name", ""), s.get("Code", "")] for s in semesters], title="Semesters")
+    return 0
 
-    if not downloadable and not include_assignments:
-        if json_output:
-            _output_json({"course_id": org_id, "files": [], "downloaded": 0, "errors": 0})
+
+def cmd_courses(
+    semester: str | None = None,
+    json_output: bool = False,
+    tracked_only: bool = False,
+) -> int:
+    """List courses, optionally filtered by semester or tracked status."""
+    client = LighthouseClient()
+    try:
+        all_enrollments = client.get_course_enrollments()
+    except Exception as e:
+        return _error(str(e))
+
+    config = _load_course_config()
+    courses = [
+        {
+            "OrgUnitId": int(e["OrgUnit"]["Id"]), "Name": e["OrgUnit"].get("Name", ""),
+            "Code": e["OrgUnit"].get("Code", ""),
+            "IsActive": e.get("Access", {}).get("IsActive", True),
+            "semester": (config.get(str(int(e["OrgUnit"]["Id"]))) or {}).get("semester", ""),
+        }
+        for e in all_enrollments
+    ]
+
+    if (tracked_only or semester) and not config:
+        return _error("No course config found. Run: lighthouse config courses")
+    if tracked_only:
+        courses = [c for c in courses if str(c.get("OrgUnitId", "")) in config]
+    if semester:
+        if not (courses := [
+            c for c in courses
+            if c.get("semester", "").lower().strip() == semester.lower().strip()
+        ]):
+            return _error(
+                f"No tracked courses mapped to semester '{semester}'.\n"
+                "Run: lighthouse config courses --list to see your mappings."
+            )
+
+    if json_output:
+        _output_json(courses)
+        return 0
+
+    _print_table(["ID", "Name", "Semester", "Active"], [
+        [str(c.get("OrgUnitId", "")), _short(c.get("Name", ""), 40), c.get("semester", ""), "Y" if c.get("IsActive") else "N"]
+        for c in courses
+    ], title=f"Courses ({len(courses)})")
+    return 0
+
+def cmd_content(course_id: str, json_output: bool = False) -> int:
+    """Show content tree for a course."""
+    client = LighthouseClient()
+    try:
+        org_id = resolve_course_id(client, course_id)
+        toc = client.get_content_toc(org_id)
+    except Exception as e:
+        return _error(str(e))
+
+    modules = toc.get("Modules", [])
+
+    if json_output:
+        _output_json({"course_id": org_id, "modules": modules})
+        return 0
+
+    if not (items := _walk_content_tree(modules)):
+        print("No content found for this course.")
+        return 0
+
+    for item in items:
+        indent = "  " * item["depth"]
+        if item["type"] == "module":
+            print(f"{indent}📁 {item['title']}")
         else:
-            print("No downloadable files found.")
-        return 0
+            icon = {"File": "📄", "Link": "🔗"}.get(item.get("topic_type", ""), "📎")
+            print(f"{indent}{icon} {item['title']}  [id:{item.get('id', '')}]")
+    return 0
 
-    dest = root / _resolve_course_folder_name(course_name, org_id)
-    manifest_path = dest / MANIFEST_FILENAME
 
-    if force and manifest_path.exists():
-        manifest_path.unlink()
-    manifest = Manifest.load(manifest_path)
+def _walk_content_tree(modules: list[dict], depth: int = 0) -> list[dict[str, Any]]:
+    """Flatten the nested content TOC into a list of display records.
 
-    if dry_run:
-        print(f"Would download {len(downloadable)} files to {dest}/\n")
-        print("\n".join(f"  [{t['topic_id']}] {t['title']}" for t in downloadable))
-        if include_assignments:
-            print("\n  (Assignment downloads not shown in dry-run)")
-        return 0
-
-    dest.mkdir(parents=True, exist_ok=True)
-
-    downloaded, errors = [], []
-    for i, topic in enumerate(downloadable, 1):
-        tid = topic["topic_id"]
-        try:
-            content, sanitized_name, filepath = _download_and_persist_topic(client, org_id, topic, dest, manifest)
-            downloaded.append({"topic_id": tid, "filename": sanitized_name, "size": len(content), "path": str(filepath.relative_to(dest))})
-            if not json_output:
-                print(f"  [{i}/{len(downloadable)}] {filepath.relative_to(dest)} ({len(content)/1024:.0f} KB)")
-        except Exception as e:
-            errors.append({"topic_id": tid, "error": str(e)})
-            print(f"  [{i}/{len(downloadable)}] FAILED topic {tid}: {e}", file=sys.stderr)
-
-    assignments_downloaded, assignment_errors = [], []
-    if include_assignments and not dry_run:
-        assignments_downloaded, assignment_errors = _download_assignments_for_course(
-            client, org_id, dest, manifest, folder_ids=[assignment_id] if assignment_id else None
-        )
-
-    if downloaded or assignments_downloaded or errors or assignment_errors:
-        manifest.save(manifest_path)
-
-    if json_output:
-        _output_json({
-            "course_id": org_id, "course_name": course_name,
-            "folder": str(dest), "manifest": str(manifest_path),
-            "downloaded": downloaded, "errors": errors,
-            **({"assignments_downloaded": assignments_downloaded, "assignment_errors": assignment_errors} if include_assignments else {}),
+    Each record: {depth, type, id, title, url}
+    """
+    items: list[dict[str, Any]] = []
+    for mod in modules:
+        items.append({
+            "depth": depth, "type": "module",
+            "id": mod.get("ModuleId"), "title": mod.get("Title", ""),
+            "url": None,
         })
-        return 0
-    if assignments_downloaded:
-        print(f"\nAssignments: {len(assignments_downloaded)} attachment(s) downloaded")
-    print(f"\nDone: {len(downloaded)}/{len(downloadable)} files downloaded to {dest}")
-    if assignment_errors:
-        print(f"  {len(assignment_errors)} assignment error(s)")
-    return 1 if (errors or assignment_errors) else 0
-
-
-def _download_multi_course(
-    client: LighthouseClient,
-    root: Path,
-    json_output: bool,
-    force: bool,
-    types: str,
-    dry_run: bool,
-    semester_filter: str | None,
-    also_courses: list[str],
-    include_assignments: bool = False,
-) -> int:
-    """Download courses matching --semester filter plus --also additions."""
-    scope = _resolve_course_scope(client, semester_filter, also_courses, "download")
-    if isinstance(scope, int):
-        return scope
-    all_course_ids, sem_name, sem_id, also_errors = scope
-
-
-    if json_output:
-        # Structured JSON multi-course download
-        rc = 0
-        courses_results = []
-        for cid in all_course_ids:
-            try:
-                toc, cname = _fetch_toc_and_name(client, cid)
-            except Exception as e:
-                rc = _error(str(e))
-                continue
-
-            downloadable = _filter_topics_by_type(toc.get("Modules", []), _parse_type_filter(types))
-
-            dest = root / _resolve_course_folder_name(cname, cid)
-
-            if dry_run:
-                courses_results.append({
-                    "course_id": cid, "course_name": cname,
-                    "semester": sem_name, "root": str(dest),
-                    "manifest_total": 0,
-                    "downloaded": [], "skipped": [], "updated": [],
-                    "duplicates": [], "errors": [],
-                })
-                continue
-
-            dest.mkdir(parents=True, exist_ok=True)
-            manifest_path = dest / MANIFEST_FILENAME
-            if force and manifest_path.exists():
-                manifest_path.unlink()
-            manifest = Manifest.load(manifest_path)
-
-            downloaded, errors = [], []
-            sha_hashes: dict[str, list[dict]] = {}
-            for topic in downloadable:
-                tid = topic["topic_id"]
-                try:
-                    content, sanitized_name, filepath = _download_and_persist_topic(client, cid, topic, dest, manifest)
-                    file_hash = compute_sha256(content)
-                    sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": sanitized_name})
-                    downloaded.append(_entry(tid, sanitized_name, str(filepath.relative_to(dest)), content, file_hash))
-                except Exception as e:
-                    errors.append({"topic_id": tid, "filename": topic.get("title", ""), "error": str(e)})
-
-            assignments_downloaded, assignment_errors = [], []
-            if include_assignments:
-                assignments_downloaded, assignment_errors = _download_assignments_for_course(
-                    client, cid, dest, manifest
-                )
-
-            if downloaded or assignments_downloaded or errors or assignment_errors:
-                manifest.save(manifest_path)
-
-
-            courses_results.append({
-                "course_id": cid, "course_name": cname,
-                "semester": sem_name, "root": str(dest),
-                "manifest_total": len(manifest),
-                "downloaded": downloaded, "skipped": [], "updated": [],
-                "duplicates": [{"topic_id": e["topic_id"], "filename": e["filename"], "sha256": h} for h, es in sha_hashes.items() if len(es) > 1 for e in es],
-                "errors": errors,
-                "assignments_downloaded": assignments_downloaded,
-                "assignment_errors": assignment_errors,
+        items.extend(_walk_content_tree(mod.get("Modules", []), depth + 1))
+        for topic in mod.get("Topics", []):
+            items.append({
+                "depth": depth + 1, "type": "topic",
+                "id": topic.get("TopicId"), "title": topic.get("Title", ""),
+                "url": topic.get("Url"), "topic_type": topic.get("TypeIdentifier", ""),
             })
-            if errors:
-                rc = 1
-
-        _output_multi_course_json(sem_id, sem_name, courses_results, also_errors)
-        return rc
-
-    print(f"Downloading courses from {sem_name}...\n")
-    rc = 0
-    for cid in all_course_ids:
-        if _download_single_course(client, cid, root, False, force, types, dry_run, include_assignments) != 0:
-            rc = 1
-    if also_errors:
-        print("\n".join(f"  Error: {err}" for err in also_errors), file=sys.stderr)
-        rc = 1
-    print("\nDownload complete.")
-    return rc
-
-
-def _sync_multi_course(
-    client: LighthouseClient,
-    root: Path,
-    json_output: bool,
-    force: bool,
-    types: str,
-    semester_filter: str | None,
-    also_courses: list[str],
-    include_assignments: bool = False,
-) -> int:
-    """Sync courses matching --semester filter plus --also additions."""
-    scope = _resolve_course_scope(client, semester_filter, also_courses, "sync")
-    if isinstance(scope, int):
-        return scope
-    all_course_ids, sem_name, sem_id, also_errors = scope
-
-
-    if json_output:
-        # Structured JSON multi-course sync
-        rc = 0
-        courses_results = []
-        for cid in all_course_ids:
-            try:
-                toc, cname = _fetch_toc_and_name(client, cid)
-            except Exception as e:
-                rc = _error(str(e))
-                continue
-
-            downloadable = _filter_topics_by_type(toc.get("Modules", []), _parse_type_filter(types))
-
-            dest = root / _resolve_course_folder_name(cname, cid)
-
-            manifest_path = dest / MANIFEST_FILENAME
-            if force and manifest_path.exists():
-                manifest_path.unlink()
-            manifest = Manifest()
-            with suppress(ManifestCorruptError):
-                manifest = Manifest.load(manifest_path)
-
-            downloaded_entries, skipped_entries, updated_entries, orphaned_entries, errors = [], [], [], [], []
-            sha_hashes: dict[str, list[dict]] = {}
-            manifest_topic_ids = set(manifest.entries.keys())
-
-            for topic in downloadable:
-                tid = str(topic["topic_id"])
-                existing = manifest.get(tid)
-                manifest_topic_ids.discard(tid)
-
-                if existing is not None:
-                    if existing.get("last_modified") == (topic.get("last_modified") or ""):
-                        skipped_entries.append(_entry(tid, existing.get("filename", ""), existing.get("filename", ""), existing))
-                        if file_hash := existing.get("sha256", ""):
-                            sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": existing.get("filename", "")})
-                        continue
-                    target_list = updated_entries
-                else:
-                    target_list = downloaded_entries
-
-                try:
-                    content, sanitized_name, filepath = _download_and_persist_topic(client, cid, topic, dest, manifest)
-                    file_hash = compute_sha256(content)
-                    sha_hashes.setdefault(file_hash, []).append({"topic_id": tid, "filename": sanitized_name})
-                    target_list.append(_entry(tid, sanitized_name, str(filepath.relative_to(dest)), content, file_hash))
-                except Exception as e:
-                    errors.append({"topic_id": tid, "filename": topic.get("title", ""), "error": str(e)})
-
-            orphaned_entries = [_entry(tid, e.get("filename", ""), "", e) for tid in manifest_topic_ids if (e := manifest.get(tid))]
-
-            assignments_downloaded, assignments_skipped, assignments_updated, assignment_errors = [], [], [], []
-            if include_assignments:
-                assignments_downloaded, assignments_skipped, assignments_updated, assignment_errors = _sync_assignments_for_course(
-                    client, cid, dest, manifest
-                )
-
-            if downloaded_entries or updated_entries or assignments_downloaded or assignments_updated or errors or assignment_errors:
-                manifest.save(manifest_path)
-
-
-            courses_results.append({
-                "course_id": cid, "course_name": cname,
-                "semester": sem_name, "root": str(dest),
-                "manifest_total": len(manifest),
-                "downloaded": downloaded_entries, "skipped": skipped_entries,
-                "updated": updated_entries, "orphaned": orphaned_entries,
-                "duplicates": [{"topic_id": e["topic_id"], "filename": e["filename"], "sha256": h} for h, es in sha_hashes.items() if len(es) > 1 for e in es],
-                "errors": errors,
-                "assignments_downloaded": assignments_downloaded,
-                "assignments_skipped": assignments_skipped,
-                "assignments_updated": assignments_updated,
-                "assignment_errors": assignment_errors,
-            })
-            if errors or assignment_errors:
-                rc = 1
-
-        _output_multi_course_json(sem_id, sem_name, courses_results, also_errors)
-        return rc
-
-    print(f"Syncing courses from {sem_name}...\n")
-    rc = 0
-    for cid in all_course_ids:
-        if _sync_single_course(client, cid, root, False, force, types, include_assignments) != 0:
-            rc = 1
-    if also_errors:
-        print("\n".join(f"  Error: {err}" for err in also_errors), file=sys.stderr)
-    return rc
+    return items
 
 
 def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> int:
@@ -890,5 +658,3 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
     print("\n   ⚠ Quiz questions and past attempts require instructor-level API access.")
     print(f"   View in browser: {BASE_URL}/d2l/lms/quizzing/user/quizzes_list.d2l?ou={org_id}")
     return 0
-
-

@@ -7,12 +7,11 @@ folders, including disambiguation of duplicate filenames.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 from .api import LighthouseClient
 from .manifest import MANIFEST_FILENAME, Manifest
-from .utils import _sanitize_filename, get_course_name, resolve_course_folder_name
+from .utils import _sanitize_filename, atomic_write, get_course_name, resolve_course_folder_name
 from .display import error as _error, output_json as _output_json
 
 
@@ -36,17 +35,6 @@ def disambiguate_filename(dest_dir: Path, filename: str) -> Path:
 
 
 
-def _write_bytes_atomic(path: Path, content: bytes) -> None:
-    """Write bytes without leaving a partial target file on interruption."""
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        try:
-            tmp.write(content)
-            tmp.flush()
-            tmp_path.replace(path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
 
 
 def _download_and_record(client: LighthouseClient, org_id: int, folder: dict, att_id: int, dest: Path, manifest: Manifest) -> dict:
@@ -58,7 +46,7 @@ def _download_and_record(client: LighthouseClient, org_id: int, folder: dict, at
     assignments_dir = dest / "Assignments" / _sanitize_filename(folder.get("Name", f"Folder-{folder_id}"))
     assignments_dir.mkdir(parents=True, exist_ok=True)
     filepath = disambiguate_filename(assignments_dir, sanitized_name)
-    _write_bytes_atomic(filepath, content)
+    atomic_write(filepath, content, mode=0o600)
     manifest.add_entry(att_key, content=content, filename=sanitized_name, last_modified="")
     return {"file_id": att_id, "folder_id": folder_id, "filename": sanitized_name, "path": str(filepath.relative_to(dest)), "size_kb": round(len(content) / 1024, 1)}
 

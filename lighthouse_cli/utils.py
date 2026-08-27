@@ -2,8 +2,58 @@
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 import urllib.parse
+from contextlib import suppress
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Atomic file writing
+# ---------------------------------------------------------------------------
+
+def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> None:
+    """Write ``data`` to ``path`` atomically: unique temp file in the target
+    directory, fsync, then ``os.replace()``.
+
+    A crash mid-write leaves the previous target intact and never leaves a
+    partially-written file behind; on failure the temp file is removed (only
+    temps this call created — cleanup runs strictly after a successful
+    exclusive temp creation).  ``mode=None`` keeps the umask default (like
+    ``open()``); an explicit mode is applied at temp creation.
+
+    Permission note: the kernel applies the process umask to the requested
+    mode, which can only CLEAR bits (owner bits included) — it can never add
+    group/other access.  ``mode=0o600`` therefore always lands ≤ 0600.
+    """
+    while True:
+        tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            fd = os.open(
+                tmp_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                mode if mode is not None else 0o666,
+            )
+            break
+        except FileExistsError:
+            continue  # uuid collision with a concurrent writer — pick a new name
+    try:
+        text_mode = not isinstance(data, bytes)
+        with os.fdopen(
+            fd,
+            "wb" if not text_mode else "w",
+            **({} if not text_mode else {"encoding": "utf-8"}),
+        ) as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        with suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 # ---------------------------------------------------------------------------
 # Filesystem sanitization
@@ -11,14 +61,25 @@ import urllib.parse
 
 _SANITIZE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Windows reserves these device names regardless of extension (CON.txt is
+# invalid too), so the stem is what must be checked.
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+     *(f"LPT{i}" for i in range(1, 10))}
+)
+
 
 def _sanitize_filename(name: str) -> str:
     """Remove filesystem-unsafe characters from a filename.
 
-    Also URL-decodes percent-encoded sequences and strips leading/trailing
-    dots and spaces (to avoid hidden files and accidental relative paths).
+    Also URL-decodes percent-encoded sequences, strips leading/trailing
+    dots and spaces (to avoid hidden files and accidental relative paths),
+    and prefixes Windows reserved device names (CON, NUL, COM1, ...).
     """
-    return _SANITIZE_RE.sub("_", urllib.parse.unquote(name)).strip(". ")
+    sanitized = _SANITIZE_RE.sub("_", urllib.parse.unquote(name)).strip(". ")
+    if sanitized.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        return f"_{sanitized}"
+    return sanitized
 
 
 

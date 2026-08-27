@@ -2,29 +2,36 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
+from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
     MFA_METHOD_APP,
+    MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
+    MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
-    _prompt_user_proof_choice,
+    MS_ERROR_CODES,
+    VALID_MFA_METHODS,
     MicrosoftSSOClient,
     MicrosoftSSOError,
+    ResponseSnapshot,
     UserProof,
     _absolute_url,
     _extract_config_json,
     _extract_error_code_and_msg,
     _parse_user_proofs,
+    _prompt_user_proof_choice,
     _select_user_proof,
-    BASE_URL,
-    D2L_COOKIE_NAMES,
-    MS_ERROR_CODES,
+    build_sso_error,
+    extract_saml_response,
+    is_error_page,
+    is_mfa_page,
+    kmsi_page_detected,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -167,7 +174,7 @@ class TestCollectTotpAfterChallenge:
         client = MicrosoftSSOClient()
         selected = UserProof("PhoneAppOTP", "Authenticator app", "", True)
         code = client._collect_totp_after_challenge(
-            selected, "123456", read_totp_after_challenge=False, sms_triggered=False
+            selected, "123456", read_totp_after_challenge=False, code_sent_on_begin=False
         )
         assert code == "123456"
         client.close()
@@ -259,77 +266,49 @@ class TestMicrosoftSSOClientInit:
         client.close()
 
 
-class TestMicrosoftSSOClientIsErrorPage:
+class TestIsErrorPage:
+    def _snap(self, status_code: int = 200, html: str = "") -> ResponseSnapshot:
+        return ResponseSnapshot(url="https://x", status_code=status_code, location="", html=html)
+
     def test_detects_400_status(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(400, "")
-        assert client._is_error_page(resp) is True
-        client.close()
+        assert is_error_page(self._snap(400, "")) is True
 
     def test_detects_servererror_in_body(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, "serverError: 50126")
-        assert client._is_error_page(resp) is True
-        client.close()
+        assert is_error_page(self._snap(200, "serverError: 50126")) is True
 
     def test_ok_page_not_error(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, "<html>Login page</html>")
-        assert client._is_error_page(resp) is False
-        client.close()
+        assert is_error_page(self._snap(200, "<html>Login page</html>")) is False
 
 
-class TestMicrosoftSSOClientIsMfaPage:
+class TestIsMfaPage:
     def test_detects_converged_tfa(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, "ConvergedTFA page content")
-        assert client._is_mfa_page(resp) is True
-        client.close()
+        assert is_mfa_page("ConvergedTFA page content") is True
 
     def test_detects_otc_input(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, SAMPLE_MFA_HTML)
-        assert client._is_mfa_page(resp) is True
-        client.close()
+        assert is_mfa_page(SAMPLE_MFA_HTML) is True
 
     def test_enter_code_text(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, '<div>Enter code</div>')
-        assert client._is_mfa_page(resp) is True
-        client.close()
+        assert is_mfa_page('<div>Enter code</div>') is True
 
     def test_saml_page_not_mfa(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, SAMPLE_SAML_HTML)
-        assert client._is_mfa_page(resp) is False
-        client.close()
+        assert is_mfa_page(SAMPLE_SAML_HTML) is False
 
 
-class TestMicrosoftSSOClientExtractSamlResponse:
+class TestExtractSamlResponse:
     def test_extracts_from_hidden_input(self) -> None:
-        client = MicrosoftSSOClient()
-        result = client._extract_saml_response(SAMPLE_SAML_HTML)
+        result = extract_saml_response(SAMPLE_SAML_HTML)
         assert result == "PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPS...long-base64-string..."
-        client.close()
 
     def test_returns_none_when_not_present(self) -> None:
-        client = MicrosoftSSOClient()
-        result = client._extract_saml_response("<html>No SAML here</html>")
-        assert result is None
-        client.close()
+        assert extract_saml_response("<html>No SAML here</html>") is None
 
     def test_extracts_from_name_value_pattern(self) -> None:
         html = '<input name="SAMLResponse" value="BASE64SAMLTOKEN">'
-        client = MicrosoftSSOClient()
-        result = client._extract_saml_response(html)
-        assert result == "BASE64SAMLTOKEN"
-        client.close()
+        assert extract_saml_response(html) == "BASE64SAMLTOKEN"
 
 
 class TestMicrosoftSSOClientExtractD2lCookies:
     def test_extracts_all_four_cookies(self) -> None:
-        import http.cookiejar
-
         client = MicrosoftSSOClient()
         client._session.cookies.set(
             "d2lSecureSessionVal", "sec123", domain="lighthouse.manipal.edu"
@@ -456,7 +435,7 @@ class TestFullLoginFlow:
         mock_session.cookies = requests.cookies.RequestsCookieJar()
 
         # Set up cookie jar simulation
-        for name in D2L_COOKIE_NAMES:
+        for name in COOKIE_NAMES:
             mock_session.cookies.set(
                 name, f"test-{name}",
                 domain="lighthouse.manipal.edu",
@@ -497,7 +476,7 @@ class TestFullLoginFlow:
             cookies = client.login("test@manipal.edu", "password123", "123456")
 
         assert len(cookies) == 4
-        for name in D2L_COOKIE_NAMES:
+        for name in COOKIE_NAMES:
             assert name in cookies
         client.close()
 
@@ -559,7 +538,7 @@ class TestFullLoginFlow:
         mock_session.headers = {}
         mock_session.cookies = requests.cookies.RequestsCookieJar()
 
-        for name in D2L_COOKIE_NAMES:
+        for name in COOKIE_NAMES:
             mock_session.cookies.set(name, f"val-{name}", domain="lighthouse.manipal.edu")
 
         resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
@@ -623,28 +602,19 @@ class TestMSErrorCodes:
         assert 50053 in MS_ERROR_CODES
 
 
-class TestBuildError:
+class TestBuildSsoError:
     def test_known_error_code(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200)
-        err = client._build_error(resp, 50126, None, "POST credentials")
+        err = build_sso_error(50126, None, "POST credentials")
         assert "50126" in str(err)
         assert "Invalid username" in str(err)
-        client.close()
 
     def test_unknown_error_code(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200)
-        err = client._build_error(resp, 99999, "Custom error text", "some step")
+        err = build_sso_error(99999, "Custom error text", "some step")
         assert "[99999]" in str(err)
-        client.close()
 
     def test_error_with_msg_fallback(self) -> None:
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(400)
-        err = client._build_error(resp, None, "Password is incorrect", "POST credentials")
+        err = build_sso_error(None, "Password is incorrect", "POST credentials")
         assert "Password is incorrect" in str(err)
-        client.close()
 
 
 class TestClose:
@@ -673,14 +643,87 @@ class TestConfigExtractionEdgeCases:
         assert config is None  # Invalid JSON
 
 
-class TestMicrosoftSSOClientStaySignedIn:
-    def test_kmsi_page_handling_disabled(self) -> None:
-        """KMSI page detection should not crash."""
+class TestStaySignedInDetection:
+    def test_kmsi_page_is_not_mfa_and_is_detected(self) -> None:
+        """KMSI pages are not MFA pages but are detected for auto-submit."""
         html = '<form><input name="LoginOptions" value="1"></form>KmsiInterrupt'
-        client = MicrosoftSSOClient()
-        resp = make_mock_response(200, text=html)
-        # Just verify is_mfa_page doesn't crash on KMSI
-        is_mfa = client._is_mfa_page(resp)
-        # KMSI is not an MFA page
-        assert is_mfa is False
-        client.close()
+        assert is_mfa_page(html) is False
+        snap = ResponseSnapshot(url="https://x", status_code=200, location="", html=html)
+        assert kmsi_page_detected(snap) is True
+
+
+# ---------------------------------------------------------------------------
+# Voice-call and push MFA vocabulary (TwoWayVoice*, PhoneAppNotification)
+# ---------------------------------------------------------------------------
+
+VOICE_PROOFS_HTML = """<html><body>ConvergedTFA
+<script>
+$Config = {
+    "sFT": "mfa-flow",
+    "sCtx": "mfa-ctx",
+    "arrUserProofs": [
+        {"authMethodId": "TwoWayVoiceMobile", "display": "Call +91 ***1234", "data": "+919876541234", "isDefault": false},
+        {"authMethodId": "TwoWayVoiceAlternateMobile", "display": "Call +91 ***5678", "data": "+919876545678", "isDefault": false},
+        {"authMethodId": "TwoWayVoiceOffice", "display": "Call office", "data": "+918012345678", "isDefault": false},
+        {"authMethodId": "PhoneAppNotification", "display": "Approve in app", "data": "", "isDefault": true},
+        {"authMethodId": "PhoneAppOTP", "display": "Authenticator code", "data": "", "isDefault": false}
+    ]
+};
+</script>
+</body></html>"""
+
+
+class TestVoiceAndPushMethods:
+    def _voice_proofs(self):
+        return _parse_user_proofs(_extract_config_json(VOICE_PROOFS_HTML) or {})
+
+    def test_call_selects_mobile_voice_first(self) -> None:
+        selected = _select_user_proof(self._voice_proofs(), MFA_METHOD_CALL)
+        assert selected.auth_method_id == "TwoWayVoiceMobile"
+
+    def test_call_without_voice_methods_errors_with_options(self) -> None:
+        proofs = [
+            UserProof("PhoneAppOTP", "Authenticator app", "", True),
+        ]
+        with pytest.raises(MicrosoftSSOError, match="not available"):
+            _select_user_proof(proofs, MFA_METHOD_CALL)
+
+    def test_push_selects_notification_only(self) -> None:
+        selected = _select_user_proof(self._voice_proofs(), MFA_METHOD_PUSH)
+        assert selected.auth_method_id == "PhoneAppNotification"
+
+    def test_call_is_a_valid_method(self) -> None:
+        assert MFA_METHOD_CALL in VALID_MFA_METHODS
+        assert MFA_METHOD_PUSH in VALID_MFA_METHODS
+
+    def test_voice_is_codeless_approval(self) -> None:
+        from lighthouse_cli.ms_errors import (
+            CODELESS_APPROVAL_AUTH_IDS,
+            SERVER_SENT_CODE_AUTH_IDS,
+        )
+
+        assert "TwoWayVoiceMobile" in CODELESS_APPROVAL_AUTH_IDS
+        assert "TwoWayVoiceMobile" not in SERVER_SENT_CODE_AUTH_IDS
+
+    def test_end_payload_never_carries_code_for_voice(self) -> None:
+        from lighthouse_cli.ms_auth import build_end_payload
+
+        proof = UserProof("TwoWayVoiceOffice", "Call office", "", False)
+        payload = build_end_payload(
+            proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
+        )
+        assert "AdditionalAuthData" not in payload
+
+    def test_app_selector_does_not_fall_through_to_push(self) -> None:
+        proofs = [UserProof("PhoneAppNotification", "Approve", "", True)]
+        with pytest.raises(MicrosoftSSOError, match="not available"):
+            _select_user_proof(proofs, MFA_METHOD_APP)
+
+    def test_end_payload_never_carries_code_for_push(self) -> None:
+        from lighthouse_cli.ms_auth import build_end_payload
+
+        proof = UserProof("PhoneAppNotification", "Approve in app", "", True)
+        payload = build_end_payload(
+            proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
+        )
+        assert "AdditionalAuthData" not in payload

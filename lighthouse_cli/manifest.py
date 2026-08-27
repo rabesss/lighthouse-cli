@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .utils import atomic_write
 
 
 # ---------------------------------------------------------------------------
@@ -134,23 +135,13 @@ class Manifest:
     # -- saving (atomic) ---------------------------------------------------
 
     def save(self, path: Path) -> None:
-        """Write manifest atomically: write to temp file, then os.replace().
+        """Write manifest atomically (temp file + os.replace).
 
         This ensures that a crash mid-write leaves the old manifest intact,
         never a partially-written file.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        try:
-            tmp.write_text(json.dumps(self.entries, indent=2, ensure_ascii=False), encoding="utf-8")
-            # Atomic on POSIX; on Windows this is still the safest approach
-            os.replace(tmp, path)
-        except Exception:
-            # Clean up temp file on failure
-            if tmp.exists():
-                tmp.unlink()
-            raise
-
+        atomic_write(path, json.dumps(self.entries, indent=2, ensure_ascii=False))
         self.path = path
 
     # -- entry management --------------------------------------------------
