@@ -90,12 +90,20 @@ def auth_refresh(
 @auth.command("login", cls=JsonOutputCommand)
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
 @click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
-@click.option("--totp", "totp", default=None, help="2FA code. Omit for two-phase interactive login.")
+@click.option(
+    "--totp",
+    "totp",
+    default=None,
+    help="Authenticator app code, or '-' to enter a fresh text code after it is sent.",
+)
 @click.option(
     "--mfa-method",
     type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
     default=None,
-    help="MFA: auto (tenant default), sms, call (voice), app (TOTP), push (approve), or choose.",
+    help=(
+        "MFA: sms, call, app, push, choose, or auto. A plain interactive login "
+        "shows the methods Microsoft reports for your account."
+    ),
 )
 @click.option(
     "--save-credentials",
@@ -113,30 +121,33 @@ def auth_login(
     save_credentials: bool,
     json_output: bool,
 ) -> None:
-    """Log in to D2L via Microsoft SSO (pure HTTP, no browser required).
+    """Log in to D2L through Microsoft SSO.
 
-    Credentials can be provided via:
-      --user/--pass flags
-      LIGHTHOUSE_USERNAME/PASSWORD env vars
-      Interactive prompts (if TTY)
+    Credentials come from --user/--pass, LIGHTHOUSE_USERNAME/PASSWORD,
+    encrypted saved credentials, or interactive prompts.
 
-    Two-phase interactive login (TTY): username/password first, then verification
-    code after Microsoft accepts your password.
+    In an interactive terminal, the plain command is the normal path:
 
-    MFA: --mfa-method auto (default), sms, call, app, push, or choose (pick from
-    a list). Text codes may arrive via SMS or WhatsApp depending on Microsoft;
-    the CLI cannot select the delivery channel. Voice calls are approved by
-    answering and pressing #; push is approved in Microsoft Authenticator.
+      lighthouse auth login
+
+    Enter your email and password, choose from the verification methods Microsoft
+    reports for your account, then enter the fresh code or approve the request.
+    The command saves and verifies the session before showing useful next steps.
+
+    MFA flags remain available for scripts and explicit selection: auto, sms,
+    call, app, push, or choose. Text codes may arrive via SMS or WhatsApp
+    depending on Microsoft; the CLI cannot select the delivery channel. Voice
+    calls are approved by answering and pressing #; push is approved in
+    Microsoft Authenticator.
 
     Discover what the account supports first: lighthouse auth mfa-methods
 
     Session cookies typically expire after ~5 days (MAHE tenant policy); re-run
     login when auth status fails. --save-credentials stores email/password only.
 
-    2FA (SMS/WhatsApp): two-step (recommended for agents and scripts):
-
-      lighthouse auth login --mfa-method sms
-      lighthouse auth verify <code>
+    Non-interactive SMS/WhatsApp recovery uses two commands so the fresh code
+    stays tied to the same Microsoft challenge. First run lighthouse auth login
+    --mfa-method sms. Then run lighthouse auth verify <code>.
 
     Do not run login twice — each login sends a new code. In a TTY, login alone
     prompts for the code after it is sent.

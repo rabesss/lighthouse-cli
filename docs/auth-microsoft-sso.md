@@ -8,7 +8,11 @@ How `lighthouse auth login` works for the MAHE tenant (`lighthouse.manipal.edu` 
 
 **Headless Playwright is used only for the username “Next” step** on this tenant. Playwright fills `loginfmt`, clicks Next, exports cookies into the `requests` session, then closes. If the Playwright runtime or Chromium cannot start, the client warns on stderr and falls back to the mirrored HTTP sequence. Once Chromium launches, navigation/selector/page-shape failures remain clean errors rather than being hidden by the fallback.
 
-**Two CLI commands for SMS MFA** (`login` then `verify`) because each `auth login` calls `BeginAuth`, which **sends a new code**. Completing MFA in a second command (or one interactive TTY session) keeps the same `SessionId` / `FlowToken` as the SMS you received.
+**One interactive command for people, two resumable commands for automation.**
+In a terminal, `lighthouse auth login` keeps the same process alive while the
+user chooses a registered method and enters the code or approves the request.
+For non-interactive SMS MFA, `login` then `verify` preserves the same
+`SessionId` / `FlowToken`; a second `login` would send a new code.
 
 ## Architecture
 
@@ -40,7 +44,19 @@ playwright install chromium   # once, for username bootstrap
 
 Environment (optional): `LIGHTHOUSE_USERNAME`, `LIGHTHOUSE_PASSWORD`, `LIGHTHOUSE_MFA_METHOD` (`auto` | `sms` | `app` | `call` | `push` | `choose`).
 
-### Discover available methods first
+### Interactive terminal (recommended for people)
+
+```bash
+lighthouse auth login
+```
+
+After the password is accepted, Microsoft returns the verification methods
+registered on that account. If there is more than one, the CLI shows only
+those methods and asks the user to choose. It then collects the fresh code or
+waits for the approval, saves and verifies the D2L session, and shows useful
+next commands.
+
+### Inspect available methods without starting a challenge
 
 ```bash
 lighthouse auth mfa-methods            # human output
@@ -64,7 +80,7 @@ SMS uses the two-step flow because its fresh code arrives only after
 code after the challenge. `call` and `push` are codeless and reject all
 `--totp` forms. Offline `PhoneAppOTP` accepts a literal code.
 
-### SMS / WhatsApp (two-step — recommended for agents)
+### SMS / WhatsApp (two-step — for agents, scripts, and recovery)
 
 ```bash
 lighthouse auth login --mfa-method sms
@@ -75,13 +91,6 @@ lighthouse auth status
 ```
 
 If verify fails after MFA succeeded but before cookies were saved, run **`auth verify` again once** before starting a new `login` (KMSI checkpoint may be saved in `mfa_pending.json`).
-
-### Interactive terminal (one process)
-
-```bash
-lighthouse auth login --mfa-method sms
-# Prompts for the code after it is sent
-```
 
 ### Pipe OTP after BeginAuth (same session)
 

@@ -423,13 +423,46 @@ def plan_login(
 # Shared success tail
 # ---------------------------------------------------------------------------
 
+def _print_command_guide() -> None:
+    """Print a small map of the CLI without running another command."""
+    print("\nCommand guide:")
+    print(
+        "  Read only:      courses, semesters, content, grades, announcements,\n"
+        "                  calendar, assignments, quizzes, quiz"
+    )
+    print("  Local files:    download, sync")
+    print("  Account/setup:  auth status, config courses")
+    print("  Remote change:  submit (uploads a file to Lighthouse)")
+    print("\nUse lighthouse <command> --help for details.")
+
+
+def _print_login_next_steps() -> None:
+    """Continue a successful interactive login into a short command guide."""
+    print("\nTry next:")
+    print("  lighthouse courses")
+    print("  lighthouse semesters")
+    print("  lighthouse assignments <course>")
+    print("  lighthouse download <course> --dry-run")
+    print("  lighthouse --help")
+    print("\nShow the full command guide? [Y/n]: ", end="", flush=True)
+    try:
+        answer = input().strip().casefold()
+    except (EOFError, KeyboardInterrupt, OSError):
+        print()
+        return
+    if answer in {"", "y", "yes"}:
+        _print_command_guide()
+
+
 def _persist_check_report(
     cookies: dict[str, str],
     *,
     json_output: bool,
     failure_hint: str = "",
     save_credentials_pair: tuple[str, str] | None = None,
-    success_message: str = "Login successful. Session valid.",
+    success_message: str = "Login complete. Session saved and verified.",
+    include_cookie_names: bool = True,
+    show_next_steps: bool = False,
 ) -> int:
     """Shared login/verify success tail: persist → check → report.
 
@@ -461,7 +494,10 @@ def _persist_check_report(
     if json_output:
         print(json.dumps({"success": True, "cookies": list(cookies.keys())}))
     else:
-        print(f"{success_message} Cookies: {', '.join(cookies.keys())}")
+        suffix = f" Cookies: {', '.join(cookies.keys())}" if include_cookie_names else ""
+        print(f"{success_message}{suffix}")
+        if show_next_steps:
+            _print_login_next_steps()
     return 0
 
 
@@ -556,7 +592,12 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
         sso_client.close()
 
     # No save_credentials_pair by construction: verify never stores secrets.
-    return _persist_check_report(cookies, json_output=json_output)
+    return _persist_check_report(
+        cookies,
+        json_output=json_output,
+        include_cookie_names=False,
+        show_next_steps=_is_interactive() and not json_output,
+    )
 
 
 def _cli_method_for_auth_id(auth_method_id: str) -> str | None:
@@ -736,9 +777,17 @@ def cmd_auth_login(
     if not password:
         return _auth_error("Password cannot be empty", json_output)
 
-    resolved_mfa_method = (
-        mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD") or MFA_METHOD_AUTO
-    ).lower()
+    configured_mfa_method = mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD")
+    if configured_mfa_method:
+        resolved_mfa_method = configured_mfa_method.lower()
+    elif interactive and not json_output and totp_code is None and not totp_stdin:
+        # A person running the plain command should see only the verification
+        # methods Microsoft reports for their account. Scripts retain the
+        # tenant-default ``auto`` policy, and a literal app code remains
+        # unambiguous without requiring a new flag.
+        resolved_mfa_method = MFA_METHOD_CHOOSE
+    else:
+        resolved_mfa_method = MFA_METHOD_AUTO
     if resolved_mfa_method not in VALID_MFA_METHODS:
         return _auth_error(
             f"Invalid MFA method {resolved_mfa_method!r}. "
@@ -857,4 +906,6 @@ def cmd_auth_login(
         json_output=json_output,
         failure_hint="Try: lighthouse auth login",
         save_credentials_pair=(username, password) if save_credentials else None,
+        include_cookie_names=False,
+        show_next_steps=interactive and not json_output,
     )

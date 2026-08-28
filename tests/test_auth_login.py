@@ -1080,6 +1080,130 @@ def test_username_prompt_on_stdout_for_humans(
     assert "Username (email):" in result.output
 
 
+def test_interactive_login_defaults_to_registered_method_picker(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain TTY login asks the user to choose from Microsoft's proof list."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, [], input="n\n")
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "choose"
+    assert sso.login.call_args.kwargs["defer_mfa_to_pending"] is False
+    assert "You will be asked to pick a verification method." in result.output
+
+
+def test_interactive_login_preserves_explicit_auto_method(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit automation-style selector is never replaced by the picker."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(
+                cli_runner, ["--mfa-method", "auto"], input="n\n",
+            )
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "auto"
+
+
+def test_interactive_literal_totp_without_method_keeps_auto(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-supplied app code keeps legacy auto selection, not ambiguous choose."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(
+                cli_runner, ["--totp", "123456"], input="n\n",
+            )
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "auto"
+
+
+def test_noninteractive_login_default_remains_auto_and_deferred(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scripts keep tenant-default selection and the resumable verify flow."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+
+    with patch.object(auth_mod, "_is_interactive", return_value=False):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, [])
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "auto"
+    assert sso.login.call_args.kwargs["defer_mfa_to_pending"] is True
+    assert "Show the full command guide?" not in result.output
+
+
+def test_interactive_login_shows_next_steps_and_full_guide(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed TTY login leads into useful commands without running them."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso():
+            result = _invoke_login(cli_runner, [], input="\n")
+
+    assert result.exit_code == 0
+    assert "Login complete. Session saved and verified." in result.output
+    assert "Try next:" in result.output
+    assert "lighthouse courses" in result.output
+    assert "lighthouse download <course> --dry-run" in result.output
+    assert "Show the full command guide? [Y/n]:" in result.output
+    assert "Command guide:" in result.output
+    assert "Read only:" in result.output
+    assert "Remote change:" in result.output
+    assert "Cookies:" not in result.output
+
+
+def test_interactive_login_can_skip_full_guide(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declining the optional guide still leaves the compact next steps visible."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso():
+            result = _invoke_login(cli_runner, [], input="n\n")
+
+    assert result.exit_code == 0
+    assert "Try next:" in result.output
+    assert "Command guide:" not in result.output
+
+
+def test_login_guide_prompt_eof_is_clean(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed stdin after successful login never turns success into a traceback."""
+    monkeypatch.setattr("builtins.input", MagicMock(side_effect=EOFError))
+
+    auth_mod._print_login_next_steps()
+
+    captured = capsys.readouterr()
+    assert "Try next:" in captured.out
+    assert "Show the full command guide? [Y/n]:" in captured.out
+    assert "Command guide:" not in captured.out
+
+
 def test_non_tty_no_credentials_error(
     cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

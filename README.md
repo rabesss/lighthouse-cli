@@ -17,10 +17,9 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[auth,credentials]'
 playwright install chromium   # once — username step on MAHE tenant
 
-# Authenticate (HTTP SSO + MFA)
-lighthouse auth mfa-methods          # discover available 2FA methods (sends no code)
-lighthouse auth login --mfa-method sms
-lighthouse auth verify 123456   # code from the SMS/WhatsApp you just received
+# Authenticate in one interactive command
+lighthouse auth login
+# Enter email/password, choose a registered 2FA method, then enter/approve it.
 
 # Verify the session is alive
 lighthouse auth status
@@ -42,7 +41,7 @@ lighthouse submit -f my_homework.pdf "signals" "Homework 1" --yes
 ```
 
 > **Auth details:** See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md)
-> (hybrid HTTP + Playwright username bootstrap, two-step `login` / `verify` for SMS).
+> (hybrid HTTP + Playwright username bootstrap, plus non-interactive recovery).
 >
 > On Arch Linux, use a **venv** — system `pip install` hits PEP 668.
 
@@ -74,12 +73,13 @@ graph TD
 - **Auth (SSO — primary):** Pure-HTTP Microsoft Entra (Azure AD) SSO
   (`ms_auth.py`, split across `ms_parse`/`ms_session`/`ms_mfa`/`ms_errors`),
   with optional Playwright for the username "Next" step only (falls back to
-  the mirrored HTTP sequence when the browser cannot launch). SMS/WhatsApp
-  uses `auth login` then `auth verify <code>`; codeless voice-call and push
-  approvals use `auth login` then `auth verify ok`, all against the same
-  `BeginAuth` session. Offline Authenticator TOTP completes in one step with
-  `--mfa-method app --totp <code>`. `auth mfa-methods` lists what the account
-  supports.
+  the mirrored HTTP sequence when the browser cannot launch). A plain
+  interactive `auth login` fetches the account's registered verification
+  methods, lets the user choose, and completes the code or approval in one
+  process. Non-interactive SMS, voice, and push flows save a resumable challenge
+  for `auth verify <code|ok>`. Offline Authenticator TOTP can also be supplied
+  with `--mfa-method app --totp <code>`. `auth mfa-methods` lists what the
+  account supports without starting a challenge.
   See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 - **Auth (CDP — `auth refresh` only):** Session cookies
   (`d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
@@ -151,10 +151,12 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|call|push|choose] [--save-credentials] [--json]`
 
-Microsoft SSO login (HTTP + optional Playwright for the username step).
-SMS/WhatsApp uses `auth verify <code>` after login sends the fresh code;
-voice and push are codeless approvals resumed with `auth verify ok`. See
-[docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
+Microsoft SSO login (HTTP + optional Playwright for the username step). In a
+terminal, run `lighthouse auth login`: enter email/password, choose one of the
+methods Microsoft reports for the account, then enter the fresh code or approve
+the request. The command saves and verifies the session, then shows useful next
+commands. Non-interactive runs use `auth verify <code|ok>` to resume the same
+saved challenge. See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 Session cookies usually expire after ~5 days; re-run login when `auth status` fails.
 
 **Credentials (pick one; do not commit secrets):**
@@ -177,7 +179,7 @@ lighthouse auth login
 | `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
 | `--pass` | — | Password for Microsoft SSO (or `LIGHTHOUSE_PASSWORD` env var) |
 | `--totp` | — | Offline `PhoneAppOTP` code, or `-` to read a fresh SMS code after BeginAuth; rejected for voice/push |
-| `--mfa-method` | `auto` | `auto`, `sms`, `app`, `call` (voice), `push` (approve), or `choose` (interactive list) |
+| `--mfa-method` | `choose` in an interactive terminal; `auto` otherwise | `auto`, `sms`, `app`, `call` (voice), `push` (approve), or `choose` (account method list) |
 | `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days |
 | `--json` | — | Machine-readable output |
 
@@ -186,10 +188,11 @@ lighthouse auth login
 1. GET D2L SAML login → Microsoft
 2. Username step (Playwright if `[auth]` installed) → password POST
 3. Session-pull interstitial hop (re-POST echoed params, bounded — Aug 2026 upstream change)
-4. `BeginAuth` sends the SMS code or starts a voice/push approval; may exit and save `mfa_pending.json`
-5. `lighthouse auth verify <code|ok>` → EndAuth, ProcessAuth, KMSI, SAML → D2L cookies
-6. Saves cookies to `~/.config/lighthouse-cli/cookies.json` (encrypted)
-7. Optional `--save-credentials` (encrypted via CredentialStore)
+4. Microsoft returns the account's registered methods; interactive login lets the user choose
+5. `BeginAuth` sends the text code or starts a voice/push approval
+6. Interactive login completes EndAuth inline; non-interactive login saves `mfa_pending.json` for `auth verify <code|ok>`
+7. Saves and verifies cookies in `~/.config/lighthouse-cli/cookies.json` (encrypted)
+8. Optional `--save-credentials` stores email/password (encrypted via CredentialStore)
 
 **Encryption key sources** (checked in order; a usable source is required
 before any login side effect):
