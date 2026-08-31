@@ -38,7 +38,13 @@ def temp_download_dir(tmp_path: Path) -> Path:
 
 @pytest.mark.parametrize(
     "filename",
-    ["pass=TOPSECRET.pdf", "passwordValue=TOPSECRET.pdf", "tokenValue=TOPSECRET.pdf"],
+    [
+        "pass=TOPSECRET.pdf",
+        "passwordValue=TOPSECRET.pdf",
+        "tokenValue=TOPSECRET.pdf",
+        "d2lSameSiteCanaryA%3DTOPSECRET.pdf",
+        "sFT%3DTOPSECRET.pdf",
+    ],
 )
 def test_attachment_filename_rejects_secret_key_aliases(filename: str) -> None:
     projected = safe_attachment_filename(filename, 7)

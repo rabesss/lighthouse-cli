@@ -1559,6 +1559,24 @@ class TestSsoReloadInterstitial:
         assert location not in str(exc.value)
         assert scripted.calls == [("GET", LOGIN_INIT_URL)]
 
+    def test_initial_script_redirect_rejects_relative_target(
+        self,
+        scripted: ScriptedSession,
+    ) -> None:
+        scripted.enqueue(
+            FakeResponse(
+                200,
+                url=LOGIN_INIT_URL,
+                html='<script>window.location="/relative/login"</script>',
+            )
+        )
+        client = make_client(scripted)
+        try:
+            with pytest.raises(MicrosoftSSOError, match="unsafe Microsoft script redirect"):
+                client._step_initiate_saml()
+        finally:
+            client.close()
+
     @pytest.mark.parametrize(
         "url_post",
         [

@@ -44,6 +44,8 @@ _SECRET_SHAPED_COURSE_NAME_RE = re.compile(
     r"(?i)(?:^|[^a-z0-9])(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|"
     r"secret|token(?:[\s_-]?value)?|"
     r"cookie|cookies|samlresponse|otp|totp|canary|authorization|bearer|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|"
     r"(?:d2l(?:secure)?session(?:val|value|token)?|session(?:val|value|token))|"
     r"api[\s_-]?key)(?:$|[^a-z0-9])"
 )
@@ -52,6 +54,8 @@ _SECRET_SHAPED_FILENAME_RE = re.compile(
     r"(?i)(?:^|[^a-z0-9])(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|"
     r"secret|token(?:[\s_-]?value)?|"
     r"cookie|cookies|samlresponse|otp|totp|canary|authorization|bearer|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|"
     r"(?:d2l(?:secure)?session(?:val|value|token)?|session(?:val|value|token))|"
     r"api[\s_-]?key|access[\s_-]?token)(?:$|[^a-z0-9])"
 )
@@ -385,14 +389,23 @@ def _matching_local_attachment(
     return candidate if actual_hash == expected_hash else None
 
 
-def _download_and_record(client: LighthouseClient, org_id: int, folder: dict, att_id: int, dest: Path, manifest: Manifest) -> dict:
+def _download_and_record(
+    client: LighthouseClient,
+    org_id: int,
+    folder: dict,
+    att_id: int,
+    dest: Path,
+    manifest: Manifest,
+    *,
+    existing_entry: dict | None = None,
+) -> dict:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
     folder_id = _positive_int(folder.get("Id"))
     att_id = _positive_int(att_id)
     if folder_id is None or att_id is None:
         raise ValueError(_INVALID_IDENTIFIER)
     att_key = assignment_key(folder_id, att_id)
-    existing = manifest.get(att_key)
+    existing = existing_entry if isinstance(existing_entry, dict) else manifest.get(att_key)
     course_root = _course_boundary(dest)
     assignments_dir = _assignment_dir(course_root, folder)
     content, filename = client.download_attachment(org_id, folder_id, att_id)
@@ -496,6 +509,7 @@ def download_for_course(
     manifest: Manifest,
     folder_ids: list[int] | None = None,
     folder_snapshot: list[dict] | tuple[dict, ...] | None = None,
+    path_manifest: Manifest | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Download all assignment attachments for a course.
 
@@ -607,7 +621,22 @@ def download_for_course(
                 continue
 
             try:
-                downloaded_entries.append(_download_and_record(client, org_id, folder, att_id, dest, manifest))
+                existing_path_entry = (
+                    path_manifest.get(att_key)
+                    if path_manifest is not None
+                    else None
+                )
+                downloaded_entries.append(
+                    _download_and_record(
+                        client,
+                        org_id,
+                        folder,
+                        att_id,
+                        dest,
+                        manifest,
+                        existing_entry=existing_path_entry,
+                    )
+                )
             except _AssignmentDataError as e:
                 safe_error = format_user_error(e)
                 errors.append({

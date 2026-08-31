@@ -111,7 +111,7 @@ def _safe_topic_filename(value: object, topic_id: int) -> str:
     candidate = _safe_label(value)
     if not candidate:
         return fallback
-    sanitized = _sanitize_filename(candidate)
+    sanitized = _safe_label(_sanitize_filename(candidate))
     return _fit_filename(sanitized) if sanitized else fallback
 
 
@@ -151,6 +151,10 @@ def _reserve_topic_path(
         key = candidate.absolute()
         owner = path_owners.get(key)
         if owner == tid or (
+            allow_unowned_overwrite
+            and key in path_owners
+            and owner is None
+        ) or (
             key not in path_owners
             and (allow_unowned_overwrite or not candidate.exists())
         ):
@@ -766,6 +770,7 @@ def run_course(
         ]
         return result
 
+    force_manifest_exists = mode is Mode.FORCE and manifest_path.exists()
     if mode is Mode.FORCE:
         # Keep the prior ownership map long enough to preserve stable paths
         # when same-name topics are reordered, but rebuild the persisted
@@ -802,6 +807,9 @@ def run_course(
                 if isinstance(entry, dict)
             ]
             result["manifest_total"] = len(manifest)
+        elif force_manifest_exists:
+            manifest.save(manifest_path)
+            result["saved"] = True
         return result
 
     downloaded, skipped, updated = result["downloaded"], result["skipped"], result["updated"]
@@ -922,10 +930,17 @@ def run_course(
             manifest,
             folder_ids=[assignment_id] if assignment_id is not None else None,
             folder_snapshot=assignment_folders,
+            path_manifest=ownership_manifest if mode is Mode.FORCE else None,
         )
         assignments["downloaded"], assignments["errors"] = downloaded_a, errors_a
 
-    if downloaded or updated or assignments["downloaded"] or assignments["updated"]:
+    if (
+        force_manifest_exists
+        or downloaded
+        or updated
+        or assignments["downloaded"]
+        or assignments["updated"]
+    ):
         manifest.save(manifest_path)
         result["saved"] = True
     result["duplicates"] = [

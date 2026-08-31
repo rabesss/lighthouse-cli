@@ -72,6 +72,12 @@ def test_content_projection_suppresses_quoted_secret_labels() -> None:
         "data:text/html,unsafe",
         "https://user:CONTENT_SECRET@example.invalid/path",
         "https://example.invalid/path?%74oken=CONTENT_SECRET",
+        "https://example.invalid/path?%2574oken=CONTENT_SECRET",
+        "https://example.invalid/path?ctx=CONTENT_SECRET",
+        "https://example.invalid/path?sFT=CONTENT_SECRET",
+        "https://example.invalid/path?apiCanary=CONTENT_SECRET",
+        "https://example.invalid/path?d2lSameSiteCanaryA=CONTENT_SECRET",
+        "https://example.invalid/path#%74oken=CONTENT_SECRET",
         "//example.invalid/path",
     ],
 )

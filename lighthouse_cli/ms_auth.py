@@ -1340,7 +1340,7 @@ class MicrosoftSSOClient:
             m = re.search(r'window\.location\s*=\s*["\'](.+?)["\']', resp.text)
             if m:
                 return _trusted_url(
-                    "https://login.microsoftonline.com",
+                    login_url,
                     m.group(1),
                     _MICROSOFT_ALLOWED_HOSTS,
                     step="initiate SAML",

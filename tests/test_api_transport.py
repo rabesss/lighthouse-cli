@@ -1263,21 +1263,18 @@ def test_cdp_cookie_receive_has_an_end_to_end_timeout() -> None:
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    class TimeoutContext:
-        def __init__(self, seconds: float) -> None:
-            observed["timeout"] = seconds
-
-        async def __aenter__(self) -> None:
-            return None
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
+    async def timeout(awaitable: object, *, timeout: float) -> object:
+        observed["timeout"] = timeout
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError
 
     fake_websockets = types.SimpleNamespace(
         connect=lambda *_args, **_kwargs: FakeConnection()
     )
     with patch.dict(sys.modules, {"websockets": fake_websockets}), \
-            patch("asyncio.timeout", side_effect=TimeoutContext):
+            patch("asyncio.wait_for", side_effect=timeout):
         with pytest.raises(NetworkError, match="cookie connection failed"):
             asyncio.run(
                 api._cdp_get_cookies_ws(

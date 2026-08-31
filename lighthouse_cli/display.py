@@ -98,6 +98,8 @@ _DISPLAY_SECRET_KEY_RE = re.compile(
     r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
     r"token(?:[\s_-]?value)?|otp|totp|cookie(?:s|value)?|"
     r"saml[\s_-]?(?:response|request)|authorization|bearer|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|"
     r"flow[\s_-]?token|o?postparams|response[\s_-]?(?:body|text)|"
     r"session(?:[\s_-]?(?:val|value|token|id))?|access[\s_-]?token|"
     r"client[\s_-]?secret|x?[\s_-]?api[\s_-]?key"
@@ -129,6 +131,8 @@ _DISPLAY_QUOTED_SECRET_KEY_RE = re.compile(
     r"(?ix)[\"'](?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
     r"token(?:[\s_-]?value)?|otp|totp|"
     r"cookie(?:s|value)?|authorization|bearer|flow[\s_-]?token|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|"
     r"response[\s_-]?(?:body|text)|session(?:[\s_-]?(?:val|value|token|id))?|"
     r"access[\s_-]?token|client[\s_-]?secret|x?[\s_-]?api[\s_-]?key)"
     r"[\"']\s*:"
@@ -140,6 +144,8 @@ _DISPLAY_SECRET_FLAG_RE = re.compile(
 _DISPLAY_SECRET_KEY_ONLY_RE = re.compile(
     r"(?i)(?<![a-z0-9])(?:flow[\s_-]?token|o?postparams|"
     r"cookie(?:s|value)|session[\s_-]?(?:val|value|token|id)|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|"
     r"access[\s_-]?token|client[\s_-]?secret|api[\s_-]?key|"
     r"x[\s_-]?api[\s_-]?key|d2l(?:secure)?session(?:val|value)|"
     r"response[\s_-]?(?:body|text)|saml[\s_-]?(?:response|request)|"
@@ -156,7 +162,8 @@ _DISPLAY_BARE_SECRET_RE = re.compile(
 _DISPLAY_OBJECT_SHAPE_RE = re.compile(r"(?s)(?:\{.*?:.*\}|\[.*?:.*\])")
 _DISPLAY_SENSITIVE_QUERY_RE = re.compile(
     r"(?ix)[?&](?:password|passwd|passphrase|secret|token|otp|totp|cookie(?:s|value)?|"
-    r"session(?:val(?:ue)?)?|access[_-]?token|client[_-]?secret|api[_-]?key)="
+    r"session(?:val(?:ue)?)?|access[_-]?token|client[_-]?secret|api[_-]?key|"
+    r"d2l[_-]?same[_-]?site[_-]?canary[ab]?|api[_-]?canary|s?ctx|sft)="
 )
 _DISPLAY_OBJECT_PREFIXES = ("{", "[")
 

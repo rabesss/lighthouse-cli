@@ -8,7 +8,7 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
 from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
@@ -34,10 +34,21 @@ _ASSIGNMENT_LIST_INVALID = "Assignment folders have an invalid response shape."
 # both a list and a mapping frame).
 _CONTENT_MAX_DEPTH = 32
 _CONTENT_MAX_NODES = 10_000
+_CONTENT_SECRET_KEY_PATTERN = (
+    r"pass(?:word|wd|phrase)?|secret|(?:auth[\s_-]?)?token(?:[\s_-]?value)?|"
+    r"access[\s_-]?token|"
+    r"api[\s_-]?key|client[\s_-]?secret|cookie(?:s|value)?|"
+    r"saml[\s_-]?(?:response|request)|otp|totp|"
+    r"canary|api[\s_-]?canary|d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|"
+    r"authorization|bearer|flow[\s_-]?token|o?postparams|s?ctx|sft|"
+    r"session(?:[\s_-]?(?:val|value|token|id))?|"
+    r"d2l(?:secure)?session(?:val|value|token)?"
+)
 _CONTENT_SECRET_QUERY_KEY_RE = re.compile(
-    r"(?ix)^(?:pass(?:word|wd|phrase)?|secret|token|access[\s_-]?token|"
-    r"api[\s_-]?key|cookie(?:s|value)?|saml[\s_-]?response|otp|totp|"
-    r"canary|authorization|bearer|session(?:[\s_-]?(?:val|value|token|id))?)$"
+    rf"(?ix)^(?:{_CONTENT_SECRET_KEY_PATTERN})$"
+)
+_CONTENT_SECRET_COMPONENT_RE = re.compile(
+    rf"(?ix)(?:^|[?&#;/])\s*(?:{_CONTENT_SECRET_KEY_PATTERN})\s*[:=]"
 )
 _CONTENT_MAX_TEXT = 512
 _CONTENT_TRUNCATED_TITLE = "[content truncated]"
@@ -116,12 +127,27 @@ def _safe_content_url(value: Any) -> str | None:
             return None
     elif parsed.netloc or not safe_url.startswith("/") or safe_url.startswith("//"):
         return None
-    try:
-        query_keys = (key for key, _value in parse_qsl(parsed.query, keep_blank_values=True))
-        if any(_CONTENT_SECRET_QUERY_KEY_RE.fullmatch(key) for key in query_keys):
+    for component in (parsed.query, parsed.fragment):
+        decoded = component
+        for _ in range(8):
+            expanded = unquote(decoded)
+            if expanded == decoded:
+                break
+            decoded = expanded
+        try:
+            query_keys = (
+                key
+                for key, _value in parse_qsl(
+                    decoded.replace(";", "&"),
+                    keep_blank_values=True,
+                )
+            )
+            if any(_CONTENT_SECRET_QUERY_KEY_RE.fullmatch(key) for key in query_keys):
+                return None
+        except ValueError:
             return None
-    except ValueError:
-        return None
+        if _CONTENT_SECRET_COMPONENT_RE.search(decoded):
+            return None
     return safe_url
 
 

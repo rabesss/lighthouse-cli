@@ -985,6 +985,51 @@ class TestDownloadModes:
         assert (course_dir / first_paths["101"]).read_bytes() == b"FIRST"
         assert (course_dir / first_paths["202"]).read_bytes() == b"SECOND"
 
+    def test_force_repairs_legacy_contested_path_without_stale_copy(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (101, "Same", "File", LM_NEW),
+                (202, "Same", "File", LM_NEW),
+            )},
+            names={ORG_ID: "Test"},
+            files={101: (b"FIRST", "same.pdf"), 202: (b"SECOND", "same.pdf")},
+        )
+        course_dir = root / "Test-44347"
+        _seed_manifest(course_dir, {
+            "101": _mentry(filename="same.pdf"),
+            "202": _mentry(filename="same.pdf"),
+        })
+        _materialize(course_dir, "Mod/same.pdf", b"legacy")
+
+        result = run_course(client, ORG_ID, root, mode=Mode.FORCE)
+
+        assert [item["path"] for item in result["downloaded"]] == [
+            "Mod/same.pdf",
+            "Mod/same--topic-202.pdf",
+        ]
+        module_dir = course_dir / "Mod"
+        assert sorted(path.name for path in module_dir.iterdir()) == [
+            "same--topic-202.pdf",
+            "same.pdf",
+        ]
+        assert (module_dir / "same.pdf").read_bytes() == b"FIRST"
+
+    def test_force_empty_selection_replaces_existing_manifest(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((101, "file.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+        )
+        manifest_path = _seed_manifest(
+            root / "Test-44347",
+            {"101": _mentry(filename="file.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.FORCE, types="html")
+
+        assert result["empty"] is True
+        assert result["saved"] is True
+        assert json.loads(manifest_path.read_text(encoding="utf-8")) == {}
+
 
 # ---------------------------------------------------------------------------
 # PLAN mode (--dry-run): zero writes, zero body fetches
@@ -1187,6 +1232,45 @@ class TestAssignmentContract:
         on_disk = json.loads(saves[0].read_text())
         assert "100" in on_disk and "assignment_7_8" in on_disk
         assert result["assignments"]["downloaded"][0]["file_id"] == 8
+
+    def test_repeated_force_reuses_assignment_path(self, root):
+        client = self._client_with_assignments()
+
+        first = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.FORCE,
+            include_assignments=True,
+        )
+        second = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.FORCE,
+            include_assignments=True,
+        )
+
+        assert first["assignments"]["downloaded"][0]["path"] == (
+            second["assignments"]["downloaded"][0]["path"]
+        )
+        folder = root / "Test-44347" / "Assignments" / "HW1"
+        assert sorted(path.name for path in folder.iterdir()) == ["hw.pdf"]
+
+
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "d2lSameSiteCanaryA%3DTOPIC_SECRET",
+            "ctx%3DTOPIC_SECRET",
+            "sFT%3DTOPIC_SECRET",
+        ],
+    )
+    def test_topic_filename_revalidates_secret_shape_after_url_decode(
+        self,
+        filename: str,
+    ) -> None:
+        assert _safe_topic_filename(filename, 7) == "topic_7"
 
     def test_live_assignment_keys_excluded_from_orphaned(self, root):
         client = self._client_with_assignments()

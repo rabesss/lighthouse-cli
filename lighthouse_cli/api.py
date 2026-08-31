@@ -1370,17 +1370,22 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
     import websockets
 
     _validate_cdp_websocket_url(ws_url)
+    async def exchange() -> Any:
+        async with websockets.connect(
+            ws_url,
+            max_size=2**20,
+            open_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
+            close_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
+        ) as ws:
+            await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
+            response_text = await ws.recv()
+            return _json.loads(response_text)
+
     try:
-        async with asyncio.timeout(CDP_RESPONSE_TIMEOUT_SECONDS):
-            async with websockets.connect(
-                ws_url,
-                max_size=2**20,
-                open_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
-                close_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
-            ) as ws:
-                await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
-                response_text = await ws.recv()
-                resp = _json.loads(response_text)
+        resp = await asyncio.wait_for(
+            exchange(),
+            timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
+        )
     except NetworkError:
         raise
     except Exception:
