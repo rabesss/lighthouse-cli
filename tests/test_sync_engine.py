@@ -1030,6 +1030,24 @@ class TestDownloadModes:
         assert result["saved"] is True
         assert json.loads(manifest_path.read_text(encoding="utf-8")) == {}
 
+    def test_force_all_download_failures_preserve_prior_manifest(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((101, "file.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={101: RuntimeError("download failed")},
+        )
+        manifest_path = _seed_manifest(
+            root / "Test-44347",
+            {"101": _mentry(filename="file.pdf")},
+        )
+        before = manifest_path.read_bytes()
+
+        result = run_course(client, ORG_ID, root, mode=Mode.FORCE)
+
+        assert result["errors"]
+        assert result["saved"] is False
+        assert manifest_path.read_bytes() == before
+
 
 # ---------------------------------------------------------------------------
 # PLAN mode (--dry-run): zero writes, zero body fetches

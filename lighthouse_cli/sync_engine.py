@@ -934,8 +934,14 @@ def run_course(
         )
         assignments["downloaded"], assignments["errors"] = downloaded_a, errors_a
 
+    force_completed_without_errors = (
+        mode is Mode.FORCE
+        and force_manifest_exists
+        and not result["errors"]
+        and not assignments["errors"]
+    )
     if (
-        force_manifest_exists
+        force_completed_without_errors
         or downloaded
         or updated
         or assignments["downloaded"]
