@@ -14,6 +14,7 @@ from lighthouse_cli.manifest import (
     ManifestCorruptError,
     ManifestError,
     REQUIRED_ENTRY_KEYS,
+    compute_file_sha256,
     compute_sha256,
     normalize_sha256,
     MANIFEST_FILENAME,
@@ -43,6 +44,14 @@ def manifest_path(temp_course_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 class TestComputeSHA256:
+    def test_compute_file_sha256_streams_file_contents(self, tmp_path: Path) -> None:
+        path = tmp_path / "payload.bin"
+        path.write_bytes(b"chunked payload")
+
+        assert compute_file_sha256(path, chunk_size=3) == compute_sha256(
+            b"chunked payload"
+        )
+
     def test_sha256_from_bytes(self):
         """SHA-256 is computed from raw file bytes, not filename."""
         content = b"Hello, World!"
@@ -302,11 +311,11 @@ class TestManifestAtomicWrite:
         tmp = manifest_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"incomplete": True}), encoding="utf-8")  # Write tmp but don't replace
 
-        # Load should return old manifest or empty (never incomplete)
-        # Since we manually wrote the tmp, the real file still has old content
+        # The committed manifest remains authoritative; a stale temp artifact
+        # is ignored and must never replace it.
         loaded = Manifest.load(manifest_path)
-        # The old manifest should still be readable
-        assert loaded.get("99999") is not None or not manifest_path.exists() or not tmp.exists()
+        assert loaded.entries == old_entries
+        assert json.loads(tmp.read_text(encoding="utf-8")) == {"incomplete": True}
 
     def test_atomic_write_is_valid_json_after_save(self, manifest_path: Path):
         """The written manifest is always valid JSON (no truncation)."""

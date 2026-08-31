@@ -147,7 +147,9 @@ sources"). Sealed inside:
 Only `created_at` and `mfa_method` remain as plaintext metadata beside the
 ciphertext.
 
-Cleared only after D2L cookies are extracted successfully. If `auth verify` fails, the pending file is removed so a stale `end_auth_flow` checkpoint cannot block the next attempt — run `auth login` again for a new code.
+Cleared after D2L cookies are extracted successfully. Recoverable post-EndAuth
+or KMSI failures retain their checkpoint for another `auth verify` attempt;
+other failures discard it so a stale flow cannot block a fresh login.
 
 ## Protocol details (why the payloads look this way)
 
@@ -189,7 +191,9 @@ Without `canary` and `hpgrequestid`, Azure returns `AADSTS165000` (missing user-
 
 ### SAML ACS
 
-POST `SAMLResponse` (and `RelayState` from the HTML form) to D2L’s ACS with **`allow_redirects=True`** so `d2lSecureSessionVal`, `d2lSessionVal`, and SameSite canaries are set on the redirect chain.
+POST `SAMLResponse` (and `RelayState` from the HTML form) to D2L’s ACS with
+automatic redirects disabled. Each same-origin redirect is validated and
+followed manually so the SAML body is never replayed to an untrusted target.
 
 ## What we intentionally do not do
 

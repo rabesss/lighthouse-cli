@@ -1613,7 +1613,8 @@ class TestSubmitConfirmation:
         """
         from lighthouse_cli import submit as submit_module
 
-        stdout = _TtyStringIO()
+        stdin = _TtyStringIO()
+        stdout = io.StringIO()
         stderr = io.StringIO()
 
         with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
@@ -1624,6 +1625,7 @@ class TestSubmitConfirmation:
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
 
             with (
+                patch.object(submit_module.sys, "stdin", stdin),
                 patch.object(submit_module.sys, "stdout", stdout),
                 patch.object(submit_module.sys, "stderr", stderr),
                 patch("builtins.input", return_value="") as input_mock,
@@ -1658,6 +1660,7 @@ class TestSubmitConfirmation:
         """EOF and Ctrl-C at confirmation never produce a traceback or POST."""
         from lighthouse_cli import submit as submit_module
 
+        stdin = _TtyStringIO()
         stdout = _TtyStringIO()
         stderr = io.StringIO()
 
@@ -1669,6 +1672,7 @@ class TestSubmitConfirmation:
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
 
             with (
+                patch.object(submit_module.sys, "stdin", stdin),
                 patch.object(submit_module.sys, "stdout", stdout),
                 patch.object(submit_module.sys, "stderr", stderr),
                 patch("builtins.input", side_effect=input_error),
@@ -1700,6 +1704,7 @@ class TestSubmitConfirmation:
         """Interactive JSON confirmation preserves a JSON-only stdout stream."""
         from lighthouse_cli import submit as submit_module
 
+        stdin = _TtyStringIO()
         stdout = _TtyStringIO()
         stderr = io.StringIO()
 
@@ -1712,6 +1717,7 @@ class TestSubmitConfirmation:
             mock_client.submit_file.return_value = sample_submission_response
 
             with (
+                patch.object(submit_module.sys, "stdin", stdin),
                 patch.object(submit_module.sys, "stdout", stdout),
                 patch.object(submit_module.sys, "stderr", stderr),
                 patch("builtins.input", return_value="yes") as input_mock,
@@ -1741,6 +1747,7 @@ class TestSubmitConfirmation:
         """A human-mode decline keeps the existing friendly text output."""
         from lighthouse_cli import submit as submit_module
 
+        stdin = _TtyStringIO()
         stdout = _TtyStringIO()
         stderr = io.StringIO()
 
@@ -1752,6 +1759,7 @@ class TestSubmitConfirmation:
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
 
             with (
+                patch.object(submit_module.sys, "stdin", stdin),
                 patch.object(submit_module.sys, "stdout", stdout),
                 patch.object(submit_module.sys, "stderr", stderr),
                 patch("builtins.input", return_value="n") as input_mock,

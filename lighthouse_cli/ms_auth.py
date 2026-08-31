@@ -1305,12 +1305,13 @@ class MicrosoftSSOClient:
 
         Returns the Microsoft login page URL.
         """
-        resp = self._get(f"{BASE_URL}{LOGIN_PATH}")
+        login_url = f"{BASE_URL}{LOGIN_PATH}"
+        resp = self._get(login_url)
         if resp.status_code in _REDIRECT_STATUSES:
             ms_url = resp.headers.get("Location", "")
             if ms_url:
                 return _trusted_url(
-                    "https://login.microsoftonline.com",
+                    login_url,
                     str(ms_url),
                     _MICROSOFT_ALLOWED_HOSTS,
                     step="initiate SAML",
@@ -1329,7 +1330,7 @@ class MicrosoftSSOClient:
                     m = re.search(r'url=(.+)', content, re.IGNORECASE)
                     if m:
                         return _trusted_url(
-                            "https://login.microsoftonline.com",
+                            login_url,
                             m.group(1).strip("'\""),
                             _MICROSOFT_ALLOWED_HOSTS,
                             step="initiate SAML",
@@ -2028,12 +2029,18 @@ class MicrosoftSSOClient:
         )
         try:
             begin_data: dict[str, Any] = begin_resp.json()
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             raise MicrosoftSSOError(
                 "Microsoft MFA BeginAuth returned an invalid response.",
                 step="MFA",
                 recovery="Try again or use --mfa-method auto.",
             ) from exc
+        if not isinstance(begin_data, dict):
+            raise MicrosoftSSOError(
+                "Microsoft MFA BeginAuth returned an invalid response.",
+                step="MFA",
+                recovery="Try again or use --mfa-method auto.",
+            )
 
         if not begin_data.get("Success"):
             message = safe_upstream_text(
@@ -2231,11 +2238,16 @@ class MicrosoftSSOClient:
             )
             try:
                 end_data = end_resp.json()
-            except json.JSONDecodeError as exc:
+            except ValueError as exc:
                 raise MicrosoftSSOError(
                     "Microsoft MFA EndAuth returned an invalid response.",
                     step="MFA",
                 ) from exc
+            if not isinstance(end_data, dict):
+                raise MicrosoftSSOError(
+                    "Microsoft MFA EndAuth returned an invalid response.",
+                    step="MFA",
+                )
 
             if end_data.get("Success"):
                 self._checkpoint_mfa_pending(

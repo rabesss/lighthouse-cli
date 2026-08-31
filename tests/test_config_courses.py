@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.cli import cli
@@ -13,6 +16,7 @@ from lighthouse_cli.course_config import (
     load as _load_course_config,
     save as _save_course_config,
 )
+from lighthouse_cli.credential_store import CredentialStoreError
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +73,44 @@ class TestConfigHelpers:
                 "1002": {"name": "Valid", "semester": "Sem V"},
                 "1003": {"name": "", "semester": ""},
             }
+
+    def test_load_canonicalizes_positive_course_id_keys(self, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                " 001002 ": {"name": "Valid", "semester": "Sem V"},
+                "not-an-id": {"name": "Ignored", "semester": "Sem V"},
+            }
+        }))
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
+            assert _load_course_config() == {
+                "1002": {"name": "Valid", "semester": "Sem V"},
+            }
+
+    def test_save_rejects_symlinked_course_config_path(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        linked_parent = tmp_path / "linked-config"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+
+        with patch(
+            "lighthouse_cli.course_config.COURSE_CONFIG_FILE",
+            linked_parent / "course-config.json",
+        ):
+            with pytest.raises(CredentialStoreError, match="symlink"):
+                _save_course_config({"1001": {"name": "Course", "semester": "Sem V"}})
+
+        assert list(outside.iterdir()) == []
+
+    def test_save_uses_private_directory_and_file_modes(self, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "private-config" / "course-config.json"
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
+            _save_course_config({"1001": {"name": "Course", "semester": "Sem V"}})
+
+        assert stat.S_IMODE(cfg_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cfg_path.stat().st_mode) == 0o600
 
 
 # ---------------------------------------------------------------------------

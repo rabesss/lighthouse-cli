@@ -1030,9 +1030,9 @@ All endpoints are relative to `https://lighthouse.manipal.edu`.
 
 ## Gotchas & Notes
 
-- **Cookie expiration:** Cookies expire. When they do, every command will
-  print `Session expired. Run: lighthouse auth refresh` to stderr and exit
-  with code 1. Use `auth login` for headless browser-based re-authentication.
+- **Cookie expiration:** Cookies expire. When they do, commands instruct you
+  to run `lighthouse auth login` and exit with code 1. `auth refresh` only
+  extracts cookies from an already signed-in local browser CDP session.
 - **GradeObjectIdentifier vs GradeObjectId:** The `myGradeValues` API returns
   `GradeObjectIdentifier` (a string), not `GradeObjectId` (an int). The merge
   logic in `cmd_grades` handles this by trying both field names.

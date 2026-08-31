@@ -8,6 +8,7 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
 from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
@@ -33,6 +34,11 @@ _ASSIGNMENT_LIST_INVALID = "Assignment folders have an invalid response shape."
 # both a list and a mapping frame).
 _CONTENT_MAX_DEPTH = 32
 _CONTENT_MAX_NODES = 10_000
+_CONTENT_SECRET_QUERY_KEY_RE = re.compile(
+    r"(?ix)^(?:pass(?:word|wd|phrase)?|secret|token|access[\s_-]?token|"
+    r"api[\s_-]?key|cookie(?:s|value)?|saml[\s_-]?response|otp|totp|"
+    r"canary|authorization|bearer|session(?:[\s_-]?(?:val|value|token|id))?)$"
+)
 _CONTENT_MAX_TEXT = 512
 _CONTENT_TRUNCATED_TITLE = "[content truncated]"
 _QUIZ_RICH_TEXT_MAX_DEPTH = 16
@@ -94,9 +100,29 @@ def _safe_content_id(value: Any) -> int | None:
 
 
 def _safe_content_url(value: Any) -> str | None:
-    """Keep a bounded printable topic URL, or omit malformed values."""
+    """Keep a bounded HTTP(S) or root-relative URL without secret material."""
     safe_url = _safe_server_text(value, max_len=_CONTENT_MAX_TEXT)
-    return safe_url or None
+    if not safe_url:
+        return None
+    try:
+        parsed = urlparse(safe_url)
+        hostname = parsed.hostname
+    except (TypeError, ValueError):
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.scheme:
+        if parsed.scheme.casefold() not in {"http", "https"} or not hostname:
+            return None
+    elif parsed.netloc or not safe_url.startswith("/") or safe_url.startswith("//"):
+        return None
+    try:
+        query_keys = (key for key, _value in parse_qsl(parsed.query, keep_blank_values=True))
+        if any(_CONTENT_SECRET_QUERY_KEY_RE.fullmatch(key) for key in query_keys):
+            return None
+    except ValueError:
+        return None
+    return safe_url
 
 
 def _content_module_projection(module: dict[str, Any]) -> dict[str, Any]:
@@ -1027,11 +1053,16 @@ def _resolve_semester(
 
 def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     """Resolve an --also course identifier (name or numeric ID) to an OrgUnitId."""
+    normalized_identifier = identifier.strip()
+    if not normalized_identifier:
+        raise CourseNotFoundError(
+            "Course identifier cannot be empty. Run: lighthouse courses"
+        )
     courses = get_enrolled_course_catalog(client)
     courses = [course for course in courses if isinstance(course, dict)]
     # Try numeric
     try:
-        cid = int(identifier)
+        cid = int(normalized_identifier)
         if not any(_positive_id(c.get("OrgUnitId")) == cid for c in courses):
             raise CourseNotFoundError(
                 f"Course '{identifier}' not found. Run: lighthouse courses"
@@ -1041,7 +1072,7 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
         pass
 
     # Try name substring
-    needle = str(identifier).lower()
+    needle = normalized_identifier.lower()
     matches = [
         c for c in courses
         if isinstance(c.get("Name"), str) and needle in c["Name"].lower()

@@ -92,6 +92,18 @@ def test_fetch_error_preserves_permission_category_in_json(capsys) -> None:
     assert "Permission denied." in capsys.readouterr().err
 
 
+def test_command_error_preserves_permission_category_in_human_mode(capsys) -> None:
+    rc = show._emit_command_error(
+        42,
+        "items",
+        False,
+        PermissionError("private"),
+    )
+
+    assert rc == 1
+    assert "Permission denied." in capsys.readouterr().err
+
+
 def test_single_json_worker_failure_is_normalized(monkeypatch, capsys) -> None:
     class FakeClient:
         pass
@@ -560,6 +572,10 @@ def test_strip_html_rejects_controls_created_by_entity_decoding(
 def test_strip_html_preserves_benign_encoded_text() -> None:
     assert show._strip_html("A&nbsp;B") == "A B"
     assert show._strip_html("&lt;tag&gt;") == "<tag>"
+
+
+def test_strip_html_normalizes_literal_multiline_whitespace() -> None:
+    assert show._strip_html("<p>Line one\n\tLine two</p>") == "Line one Line two"
 
 
 def test_assignment_view_skips_malformed_attachment_and_keeps_valid_siblings() -> None:

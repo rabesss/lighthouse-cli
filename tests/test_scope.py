@@ -11,7 +11,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, CourseNotFoundError
 from lighthouse_cli.cli import cli
-from lighthouse_cli.commands import _resolve_course_scope
+from lighthouse_cli.commands import _resolve_also_course, _resolve_course_scope
 
 
 @pytest.fixture
@@ -38,6 +38,16 @@ def _config_for(semesters, enrollments):
                 break
         tracked[oid] = {"name": name, "semester": sem_label}
     return {"tracked_courses": tracked}
+
+
+def test_blank_also_selector_never_matches_every_course() -> None:
+    client = MagicMock()
+    client.get_enrolled_courses.return_value = [
+        {"OrgUnitId": 123, "Name": "Course"},
+    ]
+
+    with pytest.raises(CourseNotFoundError, match="cannot be empty"):
+        _resolve_also_course(client, "   ")
 
 
 def test_course_scope_order_is_deterministic_and_does_not_mutate_inputs() -> None:

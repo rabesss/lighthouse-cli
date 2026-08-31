@@ -213,7 +213,7 @@ def _for_course_or_all(
         if json_output:
             results.append(_course_error_payload(None, collection_key, e))
         else:
-            return _error(_exception_message(e))
+            return _error(e)
     finally:
         for worker_client in worker_clients:
             _close_client(worker_client)
@@ -329,7 +329,7 @@ def _emit_single_error(
         _report_course_error(course_id, error)
         _output_json(_course_error_payload(course_id, collection_key, error))
         return 1
-    return _error(_exception_message(error))
+    return _error(error)
 
 
 def _emit_command_error(
@@ -345,7 +345,7 @@ def _emit_command_error(
         payload = _course_error_payload(course_id, collection_key, error)
         _output_json([payload] if all_courses else payload)
         return 1
-    return _error(_exception_message(error))
+    return _error(error)
 
 
 
@@ -816,9 +816,11 @@ def _strip_html(value: Any) -> str:
     if not text or len(text) > _MAX_RICH_TEXT_LENGTH:
         return ""
     # Strip markup before decoding so encoded literal angle brackets stay text.
-    decoded = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    stripped = re.sub(r"<[^>]+>", "", text)
+    stripped = re.sub(r"[\r\n\t\f\v]+", " ", stripped)
+    decoded = html.unescape(stripped).strip()
     if any(
-        character in "\r\n\t"
+        character in "\r\n\t\f\v"
         or (not character.isprintable() and not character.isspace())
         for character in decoded
     ):

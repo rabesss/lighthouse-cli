@@ -869,6 +869,47 @@ def test_endauth_total_deadline_skips_sleep_when_budget_is_exhausted() -> None:
     sleep.assert_not_called()
 
 
+def test_begin_auth_rejects_non_object_json_response() -> None:
+    client = MicrosoftSSOClient()
+    response = MagicMock()
+    response.json.return_value = []
+    client._post = MagicMock(return_value=response)
+    snap = ResponseSnapshot(url=MS_SSO_URL, status_code=200, location="", html="")
+    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
+
+    try:
+        with pytest.raises(MicrosoftSSOError, match="BeginAuth returned an invalid response"):
+            client._step_handle_mfa_converged(
+                snap,
+                {"urlBeginAuth": "/common/SAS/BeginAuth"},
+                [proof],
+                None,
+                mfa_method="sms",
+            )
+    finally:
+        client.close()
+
+
+def test_end_auth_rejects_non_object_json_response() -> None:
+    client = MicrosoftSSOClient()
+    response = MagicMock()
+    response.json.return_value = []
+    client._post = MagicMock(return_value=response)
+    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
+
+    try:
+        with pytest.raises(MicrosoftSSOError, match="EndAuth returned an invalid response"):
+            client._poll_end_auth(
+                MS_SSO_URL,
+                {"urlEndAuth": "/common/SAS/EndAuth"},
+                proof,
+                {"FlowToken": "flow", "Ctx": "ctx"},
+                "123456",
+            )
+    finally:
+        client.close()
+
+
 def test_safe_upstream_text_rejects_prefixed_credential_values() -> None:
     from lighthouse_cli.ms_auth import safe_upstream_text
 

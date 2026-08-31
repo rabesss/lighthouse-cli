@@ -8,7 +8,7 @@ mode:
               matches the TOC's ``LastModifiedDate``
     DOWNLOAD  re-download every matching topic; unrelated manifest entries
               (other topics, assignment attachments) are preserved
-    FORCE     wipe the whole manifest first, then behave like DOWNLOAD
+    FORCE     rebuild the whole manifest, then behave like DOWNLOAD
     PLAN      ``--dry-run``: walk the TOC and decide, but perform NO
               file-body fetches, NO filesystem writes and NO manifest
               mutation (``FORCE`` + ``PLAN`` therefore deletes nothing)
@@ -35,6 +35,7 @@ from .manifest import (
     MAX_MANIFEST_SIZE,
     Manifest,
     ManifestCorruptError,
+    compute_file_sha256,
     compute_sha256,
     normalize_sha256,
 )
@@ -673,8 +674,8 @@ def _matching_local_topic_file(dest: Path, topic: dict[str, Any], entry: dict[st
     if not S_ISREG(file_stat.st_mode) or file_stat.st_size != expected_size:
         return None
     try:
-        actual_hash = compute_sha256(candidate.read_bytes())
-    except OSError:
+        actual_hash = compute_file_sha256(candidate)
+    except (OSError, ValueError):
         return None
     if actual_hash != expected_hash:
         return None
@@ -765,9 +766,18 @@ def run_course(
         ]
         return result
 
-    if mode is Mode.FORCE and manifest_path.exists():
-        manifest_path.unlink()
-    manifest = _load_manifest(manifest_path, result)
+    if mode is Mode.FORCE:
+        # Keep the prior ownership map long enough to preserve stable paths
+        # when same-name topics are reordered, but rebuild the persisted
+        # manifest from only this run's successful downloads.
+        try:
+            ownership_manifest = Manifest.load(manifest_path)
+        except ManifestCorruptError:
+            ownership_manifest = Manifest()
+        manifest = Manifest()
+    else:
+        manifest = _load_manifest(manifest_path, result)
+        ownership_manifest = manifest
 
     live_topic_ids = {
         str(topic_id)
@@ -802,7 +812,7 @@ def run_course(
         topic_id = _positive_int(topic.get("topic_id"))
         if topic_id is None:
             continue
-        entry = manifest.get(str(topic_id))
+        entry = ownership_manifest.get(str(topic_id))
         if not isinstance(entry, dict):
             continue
         filename = entry.get("filename")

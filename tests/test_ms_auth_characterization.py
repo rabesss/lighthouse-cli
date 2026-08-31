@@ -1529,6 +1529,8 @@ class TestSsoReloadInterstitial:
     @pytest.mark.parametrize(
         "location",
         [
+            "/relative/login",
+            "relative/login",
             "//evil.example/login",
             "http://login.microsoftonline.com/common/login",
             "https://login.microsoftonline.com.evil.example/common/login",

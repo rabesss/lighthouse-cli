@@ -248,8 +248,12 @@ def test_normalize_whitespace_code_rejected() -> None:
 
 def test_plan_resume_with_matching_pending_method() -> None:
     plan = plan_login(
-        totp_code="123456", read_totp_after_challenge=False, mfa_method="sms",
-        pending={"mfa_method": "sms"}, interactive=True,
+        totp_code="123456", read_totp_after_challenge=False, mfa_method="app",
+        pending={
+            "mfa_method": "app",
+            "selected_proof": {"auth_method_id": "PhoneAppOTP"},
+        },
+        interactive=True,
     )
     assert plan.mode == "resume"
     assert plan.totp_code == "123456"
@@ -258,7 +262,11 @@ def test_plan_resume_with_matching_pending_method() -> None:
 def test_plan_auto_never_guesses_pending_method_for_literal_code() -> None:
     plan = plan_login(
         totp_code="123456", read_totp_after_challenge=False, mfa_method="auto",
-        pending={"mfa_method": "app"}, interactive=True,
+        pending={
+            "mfa_method": "auto",
+            "selected_proof": {"auth_method_id": "OneWaySMS"},
+        },
+        interactive=True,
     )
     assert plan.mode == "fresh"
 
@@ -267,7 +275,11 @@ def test_plan_method_mismatch_starts_fresh() -> None:
     """An explicit method differing from the pending session never resumes."""
     plan = plan_login(
         totp_code="123456", read_totp_after_challenge=False, mfa_method="app",
-        pending={"mfa_method": "sms"}, interactive=True,
+        pending={
+            "mfa_method": "sms",
+            "selected_proof": {"auth_method_id": "OneWaySMS"},
+        },
+        interactive=True,
     )
     assert plan.mode == "fresh"
     assert plan.defer_mfa_to_pending is False
@@ -279,7 +291,13 @@ def test_plan_never_resumes_without_literal_code() -> None:
         {"totp_code": "123456", "read_totp_after_challenge": True},
     ):
         plan = plan_login(
-            mfa_method="sms", pending={"mfa_method": "sms"}, interactive=True, **kwargs,
+            mfa_method="app",
+            pending={
+                "mfa_method": "app",
+                "selected_proof": {"auth_method_id": "PhoneAppOTP"},
+            },
+            interactive=True,
+            **kwargs,
         )
         assert plan.mode != "resume"
 

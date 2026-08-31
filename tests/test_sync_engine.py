@@ -952,6 +952,39 @@ class TestDownloadModes:
         assert existing.read_bytes() == b"content"
         assert sorted(path.name for path in existing.parent.iterdir()) == ["f.pdf"]
 
+    def test_force_reordered_collisions_keep_each_topics_existing_path(self, root):
+        first_client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (101, "Same", "File", LM_NEW),
+                (202, "Same", "File", LM_NEW),
+            )},
+            names={ORG_ID: "Test"},
+            files={101: (b"FIRST", "same.pdf"), 202: (b"SECOND", "same.pdf")},
+        )
+        first = run_course(first_client, ORG_ID, root, mode=Mode.FORCE)
+        first_paths = {item["topic_id"]: item["path"] for item in first["downloaded"]}
+
+        reordered_client = FakeClient(
+            tocs={ORG_ID: _toc(
+                (202, "Same", "File", LM_NEW),
+                (101, "Same", "File", LM_NEW),
+            )},
+            names={ORG_ID: "Test"},
+            files={101: (b"FIRST", "same.pdf"), 202: (b"SECOND", "same.pdf")},
+        )
+        second = run_course(reordered_client, ORG_ID, root, mode=Mode.FORCE)
+        second_paths = {item["topic_id"]: item["path"] for item in second["downloaded"]}
+
+        assert second_paths == first_paths
+        module_dir = root / "Test-44347" / "Mod"
+        assert sorted(path.name for path in module_dir.iterdir()) == [
+            "same--topic-202.pdf",
+            "same.pdf",
+        ]
+        course_dir = root / "Test-44347"
+        assert (course_dir / first_paths["101"]).read_bytes() == b"FIRST"
+        assert (course_dir / first_paths["202"]).read_bytes() == b"SECOND"
+
 
 # ---------------------------------------------------------------------------
 # PLAN mode (--dry-run): zero writes, zero body fetches

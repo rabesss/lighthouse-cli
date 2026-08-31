@@ -91,6 +91,17 @@ def compute_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def compute_file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Compute a file digest without buffering the whole file in memory."""
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def utc_now() -> str:
     """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

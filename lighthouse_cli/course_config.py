@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from contextlib import suppress
 
 from .api import LighthouseClient
 from .config import CONFIG_DIR
+from .credential_store import _validate_credential_path
 from .display import (
     error as _error,
     output_json as _output_json,
@@ -104,6 +106,7 @@ def semester_state(entry: Mapping[str, object] | None) -> dict[str, str]:
 
 def load() -> dict[str, dict[str, str]]:
     """Load course config from disk. Returns {org_unit_id: {name, semester}}."""
+    _validate_credential_path(COURSE_CONFIG_FILE)
     if not COURSE_CONFIG_FILE.exists():
         return {}
     try:
@@ -122,9 +125,12 @@ def load() -> dict[str, dict[str, str]]:
     for org_id, entry in tracked_courses.items():
         if not isinstance(org_id, str) or not isinstance(entry, dict):
             continue
+        course_id = _positive_course_id(org_id)
+        if course_id is None:
+            continue
         name = entry.get("name", "")
         semester = entry.get("semester", "")
-        normalized[org_id] = {
+        normalized[str(course_id)] = {
             "name": _safe_catalog_text(name, ""),
             "semester": _safe_catalog_text(semester, ""),
         }
@@ -154,10 +160,14 @@ def _entries(config: dict[str, dict[str, str]]) -> list[dict[str, str]]:
 
 def save(config: dict[str, dict[str, str]]) -> None:
     """Save course config to disk atomically."""
-    COURSE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _validate_credential_path(COURSE_CONFIG_FILE)
+    COURSE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with suppress(OSError):
+        COURSE_CONFIG_FILE.parent.chmod(0o700)
     atomic_write(
         COURSE_CONFIG_FILE,
         json.dumps({"tracked_courses": config}, indent=2, ensure_ascii=False),
+        mode=0o600,
     )
 
 

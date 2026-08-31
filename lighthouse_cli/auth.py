@@ -436,6 +436,27 @@ class LoginPlan:
     defer_mfa_to_pending: bool
 
 
+def _cli_method_for_auth_id(auth_method_id: str) -> str | None:
+    """Return the explicit CLI selector for a Microsoft authMethodId."""
+    for method in (MFA_METHOD_SMS, MFA_METHOD_CALL, MFA_METHOD_APP, MFA_METHOD_PUSH):
+        if auth_method_id in MFA_METHOD_AUTH_IDS.get(method, ()):
+            return method
+    return None
+
+
+def _pending_selected_method(pending: dict | None) -> str | None:
+    """Return the explicit method represented by a sealed MFA checkpoint."""
+    if not isinstance(pending, dict):
+        return None
+    selected = pending.get("selected_proof")
+    if not isinstance(selected, dict):
+        return None
+    auth_method_id = selected.get("auth_method_id")
+    if not isinstance(auth_method_id, str):
+        return None
+    return _cli_method_for_auth_id(auth_method_id)
+
+
 def plan_login(
     *,
     totp_code: str | None,
@@ -447,16 +468,17 @@ def plan_login(
     """Decide resume vs fresh vs defer from flags + pending state + interactivity.
 
     ``pending`` is the loaded MFA checkpoint (or None); callers load it only
-    when a literal code is in play.  Resume requires the checkpoint's saved
-    method to match exactly. ``auto`` starts a fresh flow because a literal
-    value alone cannot prove whether the caller intends a saved SMS challenge,
-    an app TOTP, or a codeless approval.
+    when a literal code is in play. Resume requires an explicit method that
+    matches the checkpoint's selected Microsoft proof. ``auto`` and ``choose``
+    always start a fresh flow because a literal value cannot identify the
+    challenge type safely.
     """
     if (
         pending is not None
         and totp_code is not None
         and not read_totp_after_challenge
-        and mfa_method == pending.get("mfa_method")
+        and mfa_method not in (MFA_METHOD_AUTO, MFA_METHOD_CHOOSE)
+        and mfa_method == _pending_selected_method(pending)
     ):
         return LoginPlan("resume", totp_code, False, False)
     defer_mfa_to_pending = (
@@ -650,14 +672,6 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
         include_cookie_names=False,
         show_next_steps=_is_interactive() and not json_output,
     )
-
-
-def _cli_method_for_auth_id(auth_method_id: str) -> str | None:
-    """Return the explicit CLI selector for a Microsoft authMethodId."""
-    for method in (MFA_METHOD_SMS, MFA_METHOD_CALL, MFA_METHOD_APP, MFA_METHOD_PUSH):
-        if auth_method_id in MFA_METHOD_AUTH_IDS.get(method, ()):
-            return method
-    return None
 
 
 @_clean_auth_command

@@ -16,11 +16,14 @@ import lighthouse_cli.api as api
 from lighthouse_cli.api import (
     BASE_URL,
     ContentResponseShapeError,
+    CourseNotFoundError,
     LighthouseClient,
+    MAX_HTML_TOPIC_RESPONSE_BYTES,
     NetworkError,
     SessionExpiredError,
     SubmissionOutcomeUnknownError,
     _extract_filename,
+    resolve_course_id,
 )
 
 
@@ -520,6 +523,16 @@ def test_quiz_and_topic_endpoints_reject_invalid_resource_ids_before_request(
     session.request.assert_not_called()
 
 
+def test_blank_course_selector_never_matches_every_enrollment() -> None:
+    client = MagicMock()
+    client.get_enrolled_courses.return_value = [
+        {"OrgUnitId": 123, "Name": "Course"},
+    ]
+
+    with pytest.raises(CourseNotFoundError, match="cannot be empty"):
+        resolve_course_id(client, "   ")
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -548,13 +561,19 @@ def test_get_topic_html_extracts_bounded_rich_text_as_bytes(
     payload: dict[str, object], expected: bytes
 ) -> None:
     client = LighthouseClient()
-    client.get_json = MagicMock(return_value=payload)
+    client.get_raw = MagicMock(
+        return_value=(json.dumps(payload).encode("utf-8"), {})
+    )
 
     content, filename = client.get_topic_html(1, 1)
 
     assert type(content) is bytes
     assert content == expected
     assert filename.endswith(".html")
+    client.get_raw.assert_called_once_with(
+        "/1/content/topics/1",
+        max_bytes=MAX_HTML_TOPIC_RESPONSE_BYTES,
+    )
 
 
 @pytest.mark.parametrize(
@@ -572,7 +591,9 @@ def test_get_topic_html_rejects_malformed_shapes_with_fixed_error(
     payload: object,
 ) -> None:
     client = LighthouseClient()
-    client.get_json = MagicMock(return_value=payload)
+    client.get_raw = MagicMock(
+        return_value=(json.dumps(payload).encode("utf-8"), {})
+    )
 
     with pytest.raises(ContentResponseShapeError) as exc_info:
         client.get_topic_html(1, 1)
@@ -585,7 +606,9 @@ def test_get_topic_html_rejects_deep_rich_text_without_recursion() -> None:
     for _ in range(api._MAX_RICH_TEXT_DEPTH + 1):
         value = {"Text": value}
     client = LighthouseClient()
-    client.get_json = MagicMock(return_value={"Body": value})
+    client.get_raw = MagicMock(
+        return_value=(json.dumps({"Body": value}).encode("utf-8"), {})
+    )
 
     with pytest.raises(ContentResponseShapeError) as exc_info:
         client.get_topic_html(1, 1)
@@ -597,10 +620,11 @@ def test_get_topic_html_rejects_cyclic_rich_text_without_recursion() -> None:
     value: dict[str, object] = {}
     value["Text"] = value
     client = LighthouseClient()
-    client.get_json = MagicMock(return_value={"Body": value})
+    client.get_raw = MagicMock(return_value=(b"{}", {}))
 
-    with pytest.raises(ContentResponseShapeError) as exc_info:
-        client.get_topic_html(1, 1)
+    with patch("lighthouse_cli.api.json.loads", return_value={"Body": value}):
+        with pytest.raises(ContentResponseShapeError) as exc_info:
+            client.get_topic_html(1, 1)
 
     assert str(exc_info.value) == ContentResponseShapeError._MESSAGE
 
@@ -921,7 +945,6 @@ def test_submit_file_unauthorized_sends_body_once_without_refresh() -> None:
         f"{BASE_URL}/d2l/api/le/1.93/../secret",
         "//attacker.example/d2l/api/le/1.93/page=2",
         "../page=2",
-        "not-a-url",
     ],
 )
 def test_paginated_next_rejects_untrusted_targets_without_echoing_url(
@@ -956,6 +979,37 @@ def test_paginated_next_accepts_https_same_origin_and_relative_d2l_paths() -> No
         {"id": 2},
     ]
     assert client.get_json.call_count == 2
+
+
+def test_paginated_plain_list_tail_keeps_items_from_prior_wrapped_page() -> None:
+    client = LighthouseClient()
+    client.get_json = MagicMock(
+        side_effect=[
+            {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
+            [{"id": 2}],
+        ]
+    )
+
+    assert client._paginate_list("/enrollments", "Items") == [
+        {"id": 1},
+        {"id": 2},
+    ]
+
+
+def test_paginated_bare_relative_next_is_scoped_beneath_api_root() -> None:
+    client = LighthouseClient()
+    client.get_json = MagicMock(
+        side_effect=[
+            {"Items": [{"id": 1}], "Next": "enrollments?page=2"},
+            {"Items": [{"id": 2}], "Next": None},
+        ]
+    )
+
+    assert client._paginate_list("/enrollments", "Items") == [
+        {"id": 1},
+        {"id": 2},
+    ]
+    assert client.get_json.call_args_list[1].args == ("enrollments?page=2",)
 
 
 def test_paginated_next_enforces_maximum_page_count() -> None:
@@ -1197,7 +1251,7 @@ def test_cdp_cookie_receive_has_an_end_to_end_timeout() -> None:
 
     class FakeWebSocket:
         async def send(self, _payload: str) -> None:
-            return None
+            raise TimeoutError
 
         async def recv(self) -> str:
             return "{}"
@@ -1209,18 +1263,21 @@ def test_cdp_cookie_receive_has_an_end_to_end_timeout() -> None:
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    async def timeout(awaitable: object, *, timeout: float) -> object:
-        observed["timeout"] = timeout
-        close = getattr(awaitable, "close", None)
-        if callable(close):
-            close()
-        raise TimeoutError
+    class TimeoutContext:
+        def __init__(self, seconds: float) -> None:
+            observed["timeout"] = seconds
+
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
 
     fake_websockets = types.SimpleNamespace(
         connect=lambda *_args, **_kwargs: FakeConnection()
     )
     with patch.dict(sys.modules, {"websockets": fake_websockets}), \
-            patch("asyncio.wait_for", side_effect=timeout):
+            patch("asyncio.timeout", side_effect=TimeoutContext):
         with pytest.raises(NetworkError, match="cookie connection failed"):
             asyncio.run(
                 api._cdp_get_cookies_ws(

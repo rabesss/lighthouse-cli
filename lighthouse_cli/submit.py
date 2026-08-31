@@ -63,7 +63,7 @@ def cmd_submit(
 
     # Keep the explicit confirmation requirement for non-interactive callers.
     # This check happens after local validation, but before any API work.
-    if not yes and not sys.stdout.isatty():
+    if not yes and not sys.stdin.isatty():
         return _submit_error(
             "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
             json_output,

@@ -65,6 +65,41 @@ def test_content_projection_suppresses_quoted_secret_labels() -> None:
     assert payload["modules"][0]["Topics"][0]["Title"] == ""
 
 
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "javascript:alert(1)",
+        "data:text/html,unsafe",
+        "https://user:CONTENT_SECRET@example.invalid/path",
+        "https://example.invalid/path?%74oken=CONTENT_SECRET",
+        "//example.invalid/path",
+    ],
+)
+def test_content_projection_omits_unsafe_or_secret_bearing_urls(
+    unsafe_url: str,
+) -> None:
+    toc = {
+        "Modules": [{
+            "ModuleId": 1,
+            "Title": "Module",
+            "Modules": [],
+            "Topics": [{
+                "TopicId": 2,
+                "Title": "Topic",
+                "TypeIdentifier": "File",
+                "Url": unsafe_url,
+            }],
+        }],
+    }
+    with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
+        result = CliRunner().invoke(cli, ["content", "123", "--json"])
+
+    assert result.exit_code == 0
+    assert "CONTENT_SECRET" not in result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["modules"][0]["Topics"][0]["Url"] is None
+
+
 def test_quiz_projection_suppresses_quoted_secret_labels_in_human_and_json() -> None:
     quiz = {
         "QuizId": 7,

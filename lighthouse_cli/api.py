@@ -32,6 +32,7 @@ DEFAULT_CDP_PORT = 34165
 DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
 MAX_CONFIGURABLE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
+MAX_HTML_TOPIC_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_DOWNLOAD_BYTES_ENV = "LIGHTHOUSE_MAX_DOWNLOAD_BYTES"
 CDP_RESPONSE_TIMEOUT_SECONDS = 15
 
@@ -584,7 +585,8 @@ class LighthouseClient:
             pages_fetched += 1
             # Handle plain array responses (no pagination wrapper)
             if isinstance(data, list):
-                return data
+                all_items.extend(data)
+                return all_items
             if not isinstance(data, dict):
                 raise NetworkError("Invalid paginated response returned by the server.")
             page_items = data.get(items_key, [])
@@ -653,12 +655,13 @@ class LighthouseClient:
             path = parsed.path or "/"
             return f"{BASE_URL}{path}" + (f"?{parsed.query}" if parsed.query else "")
 
-        # Reject all relative forms except root-relative API paths and a
-        # query continuation.  In particular, ``//evil.example`` has a
-        # parsed netloc and is rejected above, while ``../`` cannot escape
-        # the approved D2L API scope.
-        if parsed.fragment or not (url.startswith("/") or url.startswith("?")):
+        # Relative API paths are scoped beneath API_LE. In particular,
+        # ``//evil.example`` has a parsed netloc and is rejected above, while
+        # decoded ``..`` segments cannot escape the approved D2L API scope.
+        if parsed.fragment:
             raise NetworkError(invalid)
+        if not (url.startswith("/") or url.startswith("?")):
+            return f"{API_LE}/{url}"
         if url.startswith("?") and base_url is not None:
             try:
                 base = LighthouseClient._canonical_pagination_url(
@@ -850,7 +853,14 @@ class LighthouseClient:
         """Download an HTML content topic. Returns (html_bytes, sanitized_filename)."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
         topic_identifier = _require_positive_endpoint_id(topic_id, "topic_id")
-        data = self.get_json(f"/{course_id}/content/topics/{topic_identifier}")
+        raw_data, _headers = self.get_raw(
+            f"/{course_id}/content/topics/{topic_identifier}",
+            max_bytes=MAX_HTML_TOPIC_RESPONSE_BYTES,
+        )
+        try:
+            data = json.loads(raw_data.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            raise ContentResponseShapeError() from None
         if not isinstance(data, dict):
             raise ContentResponseShapeError()
 
@@ -1138,6 +1148,10 @@ def resolve_course_id(client: LighthouseClient, identifier: str) -> int:
 
     # Search by name substring (case-insensitive)
     needle = identifier.strip().casefold()
+    if not needle:
+        raise CourseNotFoundError(
+            "Course identifier cannot be empty. Run: lighthouse courses"
+        )
     courses = get_enrolled_course_catalog(client)
     matches = [
         c for c in courses
@@ -1357,13 +1371,16 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
 
     _validate_cdp_websocket_url(ws_url)
     try:
-        async with websockets.connect(ws_url, max_size=2**20) as ws:
-            await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
-            response_text = await asyncio.wait_for(
-                ws.recv(),
-                timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
-            )
-            resp = _json.loads(response_text)
+        async with asyncio.timeout(CDP_RESPONSE_TIMEOUT_SECONDS):
+            async with websockets.connect(
+                ws_url,
+                max_size=2**20,
+                open_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
+                close_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
+            ) as ws:
+                await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
+                response_text = await ws.recv()
+                resp = _json.loads(response_text)
     except NetworkError:
         raise
     except Exception:

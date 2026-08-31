@@ -335,6 +335,7 @@ class TestSealedCookies:
         warning = capsys.readouterr().err
         assert "cookie-control-sentinel" not in warning
         assert "\\x1b" not in warning
+        assert "\x1b" not in warning
         assert "LIGHTHOUSE_SECRETS_PASSPHRASE" in warning
 
 
@@ -388,6 +389,7 @@ class TestMfaPendingCompatibility:
         assert "VERSION_SENTINEL" not in warning
         assert "VERSION_SECRET_SENTINEL" not in warning
         assert "\\x1b" not in warning
+        assert "\x1b" not in warning
 
     def test_pending_metadata_control_values_are_not_reintroduced(
         self, store_dir: Path

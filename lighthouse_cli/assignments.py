@@ -12,7 +12,12 @@ from pathlib import Path
 from stat import S_ISREG
 
 from .api import LighthouseClient
-from .manifest import MANIFEST_FILENAME, Manifest, compute_sha256, normalize_sha256
+from .manifest import (
+    MANIFEST_FILENAME,
+    Manifest,
+    compute_file_sha256,
+    normalize_sha256,
+)
 from .display import format_user_error, output_json as _output_json
 from .utils import (
     MAX_ATOMIC_TARGET_NAME_BYTES,
@@ -374,8 +379,8 @@ def _matching_local_attachment(
         stat_result = candidate.lstat()
         if not S_ISREG(stat_result.st_mode) or stat_result.st_size != size:
             return None
-        actual_hash = compute_sha256(candidate.read_bytes())
-    except (OSError, RuntimeError):
+        actual_hash = compute_file_sha256(candidate)
+    except (OSError, RuntimeError, ValueError):
         return None
     return candidate if actual_hash == expected_hash else None
 
