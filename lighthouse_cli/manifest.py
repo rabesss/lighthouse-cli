@@ -133,18 +133,18 @@ class Manifest:
             ManifestCorruptError: if file exists but is not valid JSON
         """
         if _path_has_symlink_component(path):
-            raise ManifestCorruptError(f"Manifest at {path} is a symlinked path")
+            raise ManifestCorruptError("Manifest path is symlinked.")
 
         if not path.exists():
             return Manifest()
 
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise ManifestCorruptError(f"Corrupt manifest at {path}: {exc}") from exc
+        except (json.JSONDecodeError, OSError):
+            raise ManifestCorruptError("Manifest is corrupt or unreadable.") from None
 
         if not isinstance(data, dict):
-            raise ManifestCorruptError(f"Manifest at {path} is not a JSON object")
+            raise ManifestCorruptError("Manifest is not a JSON object.")
 
         normalized_entries: dict[str, Any] = {}
         for topic_id, entry in data.items():
@@ -163,7 +163,7 @@ class Manifest:
             detail = "; ".join(errors[:8])
             if len(errors) > 8:
                 detail += f"; and {len(errors) - 8} more"
-            raise ManifestCorruptError(f"Invalid manifest at {path}: {detail}")
+            raise ManifestCorruptError(f"Invalid manifest data: {detail}")
         manifest.path = path
         return manifest
 
@@ -177,10 +177,10 @@ class Manifest:
         """
         errors: list[str] = []
         if not isinstance(entry, dict):
-            return [f"Entry for {topic_id} is not a dict"]
+            return ["Manifest entry is not an object"]
 
         if missing := REQUIRED_ENTRY_KEYS - set(entry.keys()):
-            errors.append(f"Entry for {topic_id} missing keys: {missing}")
+            errors.append(f"Manifest entry missing keys: {missing}")
 
         # Type checks
         type_map = {
@@ -193,7 +193,7 @@ class Manifest:
         for key, expected_type in type_map.items():
             if key in entry and not isinstance(entry[key], expected_type):
                 errors.append(
-                    f"Entry for {topic_id}: {key} must be a {expected_type}"
+                    f"Manifest entry: {key} must be a {expected_type}"
                 )
 
         if (
@@ -203,7 +203,7 @@ class Manifest:
             and not is_valid_sha256(entry["sha256"])
         ):
             errors.append(
-                f"Entry for {topic_id}: sha256 must be a 64-character hexadecimal digest"
+                "Manifest entry: sha256 must be a 64-character hexadecimal digest"
             )
 
         if "size" in entry:
@@ -216,11 +216,11 @@ class Manifest:
             )
             if invalid_size:
                 errors.append(
-                    f"Entry for {topic_id}: size must be a finite non-negative number"
+                    "Manifest entry: size must be a finite non-negative number"
                 )
 
         if "filename" in entry and isinstance(entry["filename"], str) and not entry["filename"]:
-            errors.append(f"Entry for {topic_id}: filename must not be empty")
+            errors.append("Manifest entry: filename must not be empty")
 
         return errors
 
@@ -243,7 +243,7 @@ class Manifest:
         never a partially-written file.
         """
         if _path_has_symlink_component(path):
-            raise ManifestError(f"Refusing to write manifest through a symlinked path: {path}")
+            raise ManifestError("Refusing to write through a symlinked manifest path.")
         if errors := self.validate():
             detail = "; ".join(errors[:8])
             if len(errors) > 8:

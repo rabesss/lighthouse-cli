@@ -205,8 +205,21 @@ class TestManifestSchema:
     def test_manifest_load_rejects_non_object_entries(self, manifest_path: Path, entry):
         manifest_path.write_text(json.dumps({"100": entry}), encoding="utf-8")
 
-        with pytest.raises(ManifestCorruptError, match="Entry for 100"):
+        with pytest.raises(ManifestCorruptError, match="Manifest entry"):
             Manifest.load(manifest_path)
+
+    def test_manifest_validation_never_embeds_untrusted_identifier(
+        self,
+        manifest_path: Path,
+    ) -> None:
+        sentinel = "SAMLResponse=MANIFEST_SECRET_SENTINEL"
+        manifest_path.write_text(json.dumps({sentinel: None}), encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError) as exc_info:
+            Manifest.load(manifest_path)
+
+        assert "MANIFEST_SECRET_SENTINEL" not in str(exc_info.value)
+        assert "SAMLResponse" not in str(exc_info.value)
 
     def test_normalize_sha256_rejects_arbitrary_hash_text(self):
         assert normalize_sha256("not-a-digest") == ""
