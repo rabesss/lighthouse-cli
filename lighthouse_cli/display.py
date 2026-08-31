@@ -65,19 +65,20 @@ class JsonOutputCommand(click.Command):
 # ---------------------------------------------------------------------------
 
 # Cache rich imports at module level to avoid re-import per table render.
-_RICH_CACHE: tuple | None = None
+_RICH_CACHE: tuple[Any, Any, Any] | None = None
 _RICH_CHECKED: bool = False
 
 
 def _try_rich():
-    """Import rich if available, return (Table, console) or None. Cached."""
+    """Import Rich types, returning ``(Table, Text, console)`` when available."""
     global _RICH_CACHE, _RICH_CHECKED
     if not _RICH_CHECKED:
         _RICH_CHECKED = True
         try:
             from rich.console import Console
             from rich.table import Table
-            _RICH_CACHE = (Table, Console())
+            from rich.text import Text
+            _RICH_CACHE = (Table, Text, Console())
         except ImportError:
             _RICH_CACHE = None
     return _RICH_CACHE
@@ -550,12 +551,12 @@ def command_error(
 def print_table(columns: list[str], rows: list[list[str]], title: str = "") -> None:
     """Print a table using rich if available, else plain aligned text."""
     if rich := _try_rich():
-        Table, console = rich
-        table = Table(title=title, show_lines=False, pad_edge=False)
+        Table, Text, console = rich
+        table = Table(title=Text(title), show_lines=False, pad_edge=False)
         for col in columns:
-            table.add_column(col, overflow="ellipsis")
+            table.add_column(Text(col), overflow="ellipsis")
         for row in rows:
-            table.add_row(*row)
+            table.add_row(*(Text(cell) for cell in row))
         console.print(table)
         return
 

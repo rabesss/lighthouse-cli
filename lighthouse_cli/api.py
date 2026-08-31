@@ -26,6 +26,14 @@ from .utils import _sanitize_filename, get_enrolled_course_catalog
 # CDP port for browser-harness
 DEFAULT_CDP_PORT = 34165
 
+# Keep the bytes-returning download API bounded. Operators can raise the
+# default for a known tenant, but the environment value itself is capped so a
+# typo cannot restore an unlimited allocation.
+DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+MAX_CONFIGURABLE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_MAX_DOWNLOAD_BYTES_ENV = "LIGHTHOUSE_MAX_DOWNLOAD_BYTES"
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -79,6 +87,19 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 class CourseNotFoundError(Exception):
     """Raised when a requested org-unit-id is not in the user's course list."""
+
+
+def _download_size_limit() -> int:
+    """Return the bounded binary-download limit configured for this process."""
+    raw = os.getenv(_MAX_DOWNLOAD_BYTES_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_DOWNLOAD_BYTES
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 10:
+        raise NetworkError("Binary download size limit is invalid.")
+    limit = int(raw)
+    if limit <= 0 or limit > MAX_CONFIGURABLE_DOWNLOAD_BYTES:
+        raise NetworkError("Binary download size limit is invalid.")
+    return limit
 
 
 def _safe_http_error(response: Any) -> requests.HTTPError:
@@ -634,10 +655,56 @@ class LighthouseClient:
             return f"{BASE_URL}{url}"
         return f"{API_LE}{url}"
 
-    def get_raw(self, path: str, **kwargs: Any) -> tuple[bytes, dict[str, str]]:
-        """GET request returning (content_bytes, headers_dict)."""
-        resp = self.get(path, **kwargs)
-        return resp.content, dict(resp.headers)
+    def get_raw(
+        self,
+        path: str,
+        *,
+        max_bytes: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[bytes, dict[str, str]]:
+        """GET a binary response with an enforced actual-byte ceiling."""
+        limit = _download_size_limit() if max_bytes is None else max_bytes
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or limit > MAX_CONFIGURABLE_DOWNLOAD_BYTES
+        ):
+            raise NetworkError("Binary download size limit is invalid.")
+
+        kwargs.pop("stream", None)
+        resp = self.get(path, stream=True, **kwargs)
+        try:
+            headers = dict(resp.headers)
+            raw_length = resp.headers.get("Content-Length")
+            if (
+                isinstance(raw_length, str)
+                and raw_length.isascii()
+                and raw_length.isdecimal()
+                and len(raw_length) <= 10
+                and int(raw_length) > limit
+            ):
+                raise NetworkError("Binary download exceeds the configured size limit.")
+
+            content = bytearray()
+            for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                if not isinstance(chunk, bytes):
+                    raise NetworkError("Binary download returned an unsupported chunk.")
+                if len(content) + len(chunk) > limit:
+                    raise NetworkError("Binary download exceeds the configured size limit.")
+                content.extend(chunk)
+            return bytes(content), headers
+        except NetworkError:
+            raise
+        except requests.RequestException:
+            raise NetworkError("Binary download failed while reading the response.") from None
+        except Exception:
+            raise NetworkError("Binary download response could not be processed.") from None
+        finally:
+            with suppress(Exception):
+                resp.close()
 
     # -- convenience API methods -------------------------------------------
 

@@ -153,6 +153,34 @@ def _materialize(course_dir: Path, relative_path: str, content: bytes) -> Path:
     return path
 
 
+def test_distinct_topic_ids_cannot_share_a_persisted_path(tmp_path: Path) -> None:
+    client = FakeClient(
+        tocs={ORG_ID: _toc(
+            (101, "Same title", "File", LM_NEW),
+            (202, "Same title", "File", LM_NEW),
+            module="Module",
+        )},
+        names={ORG_ID: "Course"},
+        files={
+            101: (b"FIRST", "same.pdf"),
+            202: (b"SECOND", "same.pdf"),
+        },
+    )
+
+    first = run_course(client, ORG_ID, tmp_path, mode=Mode.SYNC)
+    course_dir = tmp_path / f"Course-{ORG_ID}"
+    first_path = course_dir / first["downloaded"][0]["path"]
+    second_path = course_dir / first["downloaded"][1]["path"]
+
+    assert first_path != second_path
+    assert first_path.read_bytes() == b"FIRST"
+    assert second_path.read_bytes() == b"SECOND"
+
+    second = run_course(client, ORG_ID, tmp_path, mode=Mode.SYNC)
+    assert [item["topic_id"] for item in second["skipped"]] == ["101", "202"]
+    assert second["updated"] == []
+
+
 def _tree(root: Path) -> dict[str, bytes]:
     """Snapshot every file under root (path -> bytes)."""
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
@@ -1784,7 +1812,7 @@ class TestPathContainment:
             client, ORG_ID,
             {"topic_id": 100, "title": "innocent.pdf",
              "path": f"../../{outside.name}/evil/f.pdf", "last_modified": LM_NEW},
-            course_root, manifest, warnings=warnings,
+            course_root, manifest, path_owners={}, warnings=warnings,
         )
         assert filepath.resolve().is_relative_to(course_root.resolve())
         assert not outside.exists()

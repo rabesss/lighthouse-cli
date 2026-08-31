@@ -149,7 +149,7 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 
 ---
 
-### `lighthouse auth login [--user EMAIL] [--pass PASSWORD] [--totp CODE] [--mfa-method auto|sms|app|call|push|choose] [--save-credentials] [--json]`
+### `lighthouse auth login [--user EMAIL] [--totp CODE] [--mfa-method auto|sms|app|call|push|choose] [--save-credentials] [--json]`
 
 Microsoft SSO login (HTTP + optional Playwright for the username step). In a
 terminal, run `lighthouse auth login`: enter email/password, choose one of the
@@ -177,7 +177,6 @@ lighthouse auth login
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
-| `--pass` | — | Password for Microsoft SSO (or `LIGHTHOUSE_PASSWORD` env var) |
 | `--totp` | — | Offline `PhoneAppOTP` code, or `-` to read a fresh SMS code after BeginAuth; rejected for voice/push |
 | `--mfa-method` | `choose` in an interactive terminal; `auto` otherwise | `auto`, `sms`, `app`, `call` (voice), `push` (approve), or `choose` (account method list) |
 | `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days |
@@ -217,12 +216,16 @@ do not run `login` again before verifying). Pass the SMS/WhatsApp code, or the
 literal `ok` after a codeless voice-call or push approval. Required for non-TTY
 / agent workflows.
 
-### `lighthouse auth mfa-methods [--user EMAIL] [--pass PASSWORD] [--json]`
+### `lighthouse auth mfa-methods [--user EMAIL] [--json]`
 
 Performs a real Microsoft sign-in through the post-password stage and may
 advance KMSI/session state, but stops before `BeginAuth`, so it sends no SMS,
 places no call, and triggers no push. Reports each `authMethodId`, Microsoft's
 masked display, default flag, and the `--mfa-method` selector.
+
+Passwords come from the hidden interactive prompt, encrypted saved credentials,
+or `LIGHTHOUSE_PASSWORD`. The CLI has no password argument because process
+listings can expose command-line values.
 
 **Human output:**
 ```
@@ -1239,13 +1242,14 @@ extra.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LIGHTHOUSE_USERNAME` | — | Username for `auth login` and `auth mfa-methods` when flags are omitted |
-| `LIGHTHOUSE_PASSWORD` | — | Password for `auth login` and `auth mfa-methods` when flags are omitted |
+| `LIGHTHOUSE_USERNAME` | — | Username for `auth login` and `auth mfa-methods` when `--user` is omitted |
+| `LIGHTHOUSE_PASSWORD` | — | Non-interactive password source for `auth login` and `auth mfa-methods` |
 | `LIGHTHOUSE_MFA_METHOD` | `auto` | Default MFA selector (`auto`, `sms`, `app`, `call`, `push`, or `choose`) |
 | `LIGHTHOUSE_SECRETS_PASSPHRASE` | — | Fernet key source for encrypted credentials, cookies, and pending MFA state |
 | `LIGHTHOUSE_CONFIG_DIR` | `~/.config/lighthouse-cli` | Directory for cookies, credentials, MFA state, and course tracking config |
 | `LIGHTHOUSE_CDP_PORT` | `34165` | Default CDP port for `auth refresh` |
 | `LIGHTHOUSE_DEBUG_FLOW` | — | Path for sanitized, secret-free HTTP flow diagnostics during SSO |
+| `LIGHTHOUSE_MAX_DOWNLOAD_BYTES` | `134217728` | Maximum binary topic or attachment response size; valid range is 1 byte through 1 GiB |
 
 ## Contributing & AI Code Review
 

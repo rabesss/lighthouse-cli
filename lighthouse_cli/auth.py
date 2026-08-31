@@ -88,8 +88,8 @@ _AUTH_UNSAFE_BRACKET_RE = re.compile(r"[{}]|\[(?!\d{3,8}\])|(?<!\])\]")
 _AUTH_SAFE_TYPE_RE = re.compile(r"^Unexpected error \([A-Za-z0-9_.]+\)\.")
 
 _SAFE_CREDENTIALS_ERROR = (
-    "Credentials required. Provide --user/--pass, "
-    "LIGHTHOUSE_USERNAME/LIGHTHOUSE_PASSWORD env vars, or run interactively."
+    "Credentials required. Provide LIGHTHOUSE_USERNAME/LIGHTHOUSE_PASSWORD "
+    "environment variables, use encrypted saved credentials, or run interactively."
 )
 _SAFE_MFA_RECOVERY_COMMANDS = (
     "lighthouse auth login --mfa-method sms",
@@ -650,12 +650,7 @@ def cmd_auth_mfa_methods(
             _prompt,
         )
     except _PromptUnavailable:
-        return _auth_error(
-            "Credentials required. Provide --user/--pass, "
-            "LIGHTHOUSE_USERNAME/LIGHTHOUSE_PASSWORD env vars, "
-            "or run interactively.",
-            json_output,
-        )
+        return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
     if not username or not password:
         return _auth_error("Username and password are required", json_output)
 
@@ -730,7 +725,7 @@ def cmd_auth_login(
 
     Args:
         username: Username from --user flag
-        password: Password from --pass flag
+        password: Password supplied by an internal caller, environment, store, or prompt
         totp_code: 2FA code from --totp flag (omit for two-phase interactive login)
         totp_stdin: If True, read TOTP from stdin
         save_credentials: If True, save credentials encrypted
@@ -765,12 +760,7 @@ def cmd_auth_login(
             _prompt,
         )
     except _PromptUnavailable:
-        return _auth_error(
-            "Credentials required. Provide --user/--pass, "
-            "LIGHTHOUSE_USERNAME/LIGHTHOUSE_PASSWORD env vars, "
-            "or run interactively.",
-            json_output,
-        )
+        return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
 
     if not username:
         return _auth_error("Username cannot be empty", json_output)

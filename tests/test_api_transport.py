@@ -60,6 +60,76 @@ def _client_with_session(responses: list[FakeResponse]) -> tuple[LighthouseClien
     return client, session
 
 
+class StreamingResponse(FakeResponse):
+    def __init__(self, chunks: list[bytes], headers: dict[str, str] | None = None) -> None:
+        super().__init__(headers=headers)
+        self.chunks = chunks
+        self.closed = False
+        self.iterated = False
+
+    def iter_content(self, chunk_size: int) -> object:
+        assert chunk_size > 0
+        self.iterated = True
+        return iter(self.chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_get_raw_streams_and_rejects_actual_bytes_above_limit() -> None:
+    response = StreamingResponse([b"abcd", b"efgh"])
+    client = LighthouseClient()
+    client.get = MagicMock(return_value=response)
+
+    with pytest.raises(NetworkError, match="configured size limit"):
+        client.get_raw("/file", max_bytes=7)
+
+    client.get.assert_called_once_with("/file", stream=True)
+    assert response.closed is True
+
+
+def test_get_raw_rejects_oversized_content_length_before_reading() -> None:
+    response = StreamingResponse(
+        [b"must not be read"],
+        headers={"Content-Length": "9"},
+    )
+    client = LighthouseClient()
+    client.get = MagicMock(return_value=response)
+
+    with pytest.raises(NetworkError, match="configured size limit"):
+        client.get_raw("/file", max_bytes=8)
+
+    assert response.closed is True
+    assert response.iterated is False
+
+
+def test_get_raw_returns_bounded_streamed_content() -> None:
+    response = StreamingResponse([b"ab", b"", b"cd"])
+    client = LighthouseClient()
+    client.get = MagicMock(return_value=response)
+
+    content, headers = client.get_raw("/file", max_bytes=4)
+
+    assert content == b"abcd"
+    assert headers == {}
+    assert response.closed is True
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "not-a-number", "1073741825"])
+def test_get_raw_rejects_invalid_environment_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    client = LighthouseClient()
+    client.get = MagicMock()
+    monkeypatch.setenv("LIGHTHOUSE_MAX_DOWNLOAD_BYTES", raw)
+
+    with pytest.raises(NetworkError, match="size limit is invalid"):
+        client.get_raw("/file")
+
+    client.get.assert_not_called()
+
+
 def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
     client = LighthouseClient()
     client.get_json = MagicMock(

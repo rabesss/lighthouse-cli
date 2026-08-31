@@ -20,6 +20,7 @@ including warnings — is returned as data for the caller to render.
 
 from __future__ import annotations
 
+import hashlib
 from enum import Enum
 from pathlib import Path
 import re
@@ -104,6 +105,46 @@ def _safe_topic_filename(value: object, topic_id: int) -> str:
         return fallback
     sanitized = _sanitize_filename(candidate)
     return sanitized or fallback
+
+
+def _collision_filename(filename: str, topic_id: int, attempt: int) -> str:
+    """Add a bounded topic identity suffix to a colliding filename."""
+    path = Path(filename)
+    suffix = path.suffix
+    stem = path.name[:-len(suffix)] if suffix else path.name
+    topic_token = str(topic_id)
+    if len(topic_token) > 20:
+        topic_token = hashlib.sha256(topic_token.encode("ascii")).hexdigest()[:16]
+    marker = f"--topic-{topic_token}" + (f"-{attempt}" if attempt > 1 else "")
+    max_stem_bytes = 255 - len((marker + suffix).encode("utf-8"))
+    while stem and len(stem.encode("utf-8")) > max_stem_bytes:
+        stem = stem[:-1]
+    return f"{stem or 'topic'}{marker}{suffix}"
+
+
+def _reserve_topic_path(
+    file_dest: Path,
+    filename: str,
+    topic_id: int,
+    path_owners: dict[Path, str],
+) -> Path:
+    """Reserve one local path for a topic without overwriting another owner."""
+    tid = str(topic_id)
+    candidate = file_dest / filename
+    if candidate.is_symlink():
+        raise ValueError("Topic filename is a symlink; refusing to overwrite it")
+
+    attempt = 0
+    while True:
+        key = candidate.absolute()
+        owner = path_owners.get(key)
+        if owner == tid or (owner is None and not candidate.exists()):
+            path_owners[key] = tid
+            return candidate
+        attempt += 1
+        candidate = file_dest / _collision_filename(filename, topic_id, attempt)
+        if candidate.is_symlink():
+            raise ValueError("Topic filename is a symlink; refusing to overwrite it")
 
 
 def _safe_unknown_type(value: object) -> str | None:
@@ -292,6 +333,7 @@ def download_and_persist_topic(
     dest: Path,
     manifest: Manifest,
     *,
+    path_owners: dict[Path, str],
     warnings: list[str] | None = None,
 ) -> tuple[bytes, str, Path]:
     """Download a topic, write to disk, update manifest. Returns (content, name, path).
@@ -320,9 +362,13 @@ def download_and_persist_topic(
     if _has_symlink_component(file_dest, course_root):
         raise ValueError("Topic path contains a symlinked course directory")
     file_dest.mkdir(parents=True, exist_ok=True)
-    filepath = file_dest / sanitized_name
-    if filepath.is_symlink():
-        raise ValueError("Topic filename is a symlink; refusing to overwrite it")
+    filepath = _reserve_topic_path(
+        file_dest,
+        sanitized_name,
+        topic_id,
+        path_owners,
+    )
+    sanitized_name = filepath.name
     try:
         filepath_resolved = filepath.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
@@ -735,6 +781,22 @@ def run_course(
     downloaded, skipped, updated = result["downloaded"], result["skipped"], result["updated"]
     errors = result["errors"]
     sha_hashes: dict[str, list[dict]] = {}
+    path_owners: dict[Path, str] = {}
+    for topic in downloadable:
+        topic_id = _positive_int(topic.get("topic_id"))
+        if topic_id is None:
+            continue
+        entry = manifest.get(str(topic_id))
+        if not isinstance(entry, dict):
+            continue
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or _safe_display_filename(filename) != filename:
+            continue
+        try:
+            _course_root, file_dest = _topic_directory(dest, topic.get("path", ""))
+        except (OSError, RuntimeError, ValueError):
+            continue
+        path_owners.setdefault((file_dest / filename).absolute(), str(topic_id))
 
     for topic in downloadable:
         topic_id = _positive_int(topic.get("topic_id"))
@@ -765,7 +827,13 @@ def run_course(
 
         try:
             _, sanitized_name, filepath = download_and_persist_topic(
-                client, org_id, topic, dest, manifest, warnings=result["warnings"],
+                client,
+                org_id,
+                topic,
+                dest,
+                manifest,
+                path_owners=path_owners,
+                warnings=result["warnings"],
             )
             entry = manifest.get(tid)
             if entry is None:

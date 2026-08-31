@@ -89,7 +89,6 @@ def auth_refresh(
 
 @auth.command("login", cls=JsonOutputCommand)
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
-@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
 @click.option(
     "--totp",
     "totp",
@@ -115,7 +114,6 @@ def auth_refresh(
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
 def auth_login(
     username: str | None,
-    password: str | None,
     totp: str | None,
     mfa_method: str | None,
     save_credentials: bool,
@@ -123,8 +121,9 @@ def auth_login(
 ) -> None:
     """Log in to D2L through Microsoft SSO.
 
-    Credentials come from --user/--pass, LIGHTHOUSE_USERNAME/PASSWORD,
-    encrypted saved credentials, or interactive prompts.
+    Credentials come from --user, LIGHTHOUSE_USERNAME/PASSWORD, encrypted
+    saved credentials, or interactive prompts. Passwords are never accepted
+    as command-line arguments because process metadata can expose them.
 
     In an interactive terminal, the plain command is the normal path:
 
@@ -161,7 +160,7 @@ def auth_login(
     """
     raise SystemExit(cmd_auth_login(
         username=username,
-        password=password,
+        password=None,
         totp_code=totp,
         totp_stdin=(totp == "-"),
         save_credentials=save_credentials,
@@ -184,11 +183,9 @@ def auth_verify(code: str, json_output: bool) -> None:
 
 @auth.command("mfa-methods", cls=JsonOutputCommand)
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
-@click.option("--pass", "password", default=None, help="Password for Microsoft SSO.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
 def auth_mfa_methods(
     username: str | None,
-    password: str | None,
     json_output: bool,
 ) -> None:
     """List the account's MFA methods without triggering a challenge.
@@ -199,7 +196,7 @@ def auth_mfa_methods(
     """
     raise SystemExit(cmd_auth_mfa_methods(
         username=username,
-        password=password,
+        password=None,
         json_output=json_output,
     ))
 

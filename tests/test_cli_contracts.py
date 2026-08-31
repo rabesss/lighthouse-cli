@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import math
 from pathlib import Path
@@ -564,6 +565,40 @@ def test_safe_display_text_preserves_normal_prose_and_rejects_controls() -> None
     assert safe_display_text("Password Security") == "Password Security"
     assert safe_display_text("Signals\nSystems", "[omitted]") == "[omitted]"
     assert safe_display_text("a" * 513, "[omitted]") == "[omitted]"
+
+
+def test_semester_rich_cells_render_remote_markup_literally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rich_console = pytest.importorskip("rich.console")
+    rich_table = pytest.importorskip("rich.table")
+    rich_text = pytest.importorskip("rich.text")
+    from lighthouse_cli import display
+
+    stream = io.StringIO()
+    console = rich_console.Console(file=stream, force_terminal=True, width=200)
+    monkeypatch.setattr(
+        display,
+        "_RICH_CACHE",
+        (rich_table.Table, rich_text.Text, console),
+    )
+    monkeypatch.setattr(display, "_RICH_CHECKED", True)
+    payload = "Course [link=//attacker.invalid]trusted.example[/link]"
+    style = "Course [bold red]FAILED[/bold red]"
+
+    with patch.object(
+        LighthouseClient,
+        "get_semesters",
+        return_value=[{"OrgUnitId": 1, "Name": payload, "Code": style}],
+    ):
+        result = CliRunner().invoke(cli, ["semesters"])
+
+    rendered = stream.getvalue()
+    assert result.exit_code == 0
+    assert payload in rendered
+    assert style in rendered
+    assert "\x1b]8;" not in rendered
+    assert "\x1b[1mFAILED\x1b[0m" not in rendered
 
 
 @pytest.mark.parametrize(

@@ -536,6 +536,20 @@ def test_custom_instructions_rich_text_is_string_and_preview_is_safe(
         assert "Unexpected" not in preview
 
 
+@pytest.mark.parametrize(
+    ("encoded", "control"),
+    [("Normal&#10;forged", "\n"), ("Normal&#13;forged", "\r"), ("Normal&Tab;forged", "\t")],
+)
+def test_strip_html_rejects_controls_created_by_entity_decoding(
+    encoded: str,
+    control: str,
+) -> None:
+    preview = show._strip_html(encoded)
+
+    assert preview == ""
+    assert control not in preview
+
+
 def test_assignment_view_skips_malformed_attachment_and_keeps_valid_siblings() -> None:
     client = Mock(spec=LighthouseClient)
     client.get_dropbox_folders.return_value = [

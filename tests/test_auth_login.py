@@ -99,7 +99,7 @@ def test_auth_login_registered_as_subcommand(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     output = result.output
     assert "--user" in output
-    assert "--pass" in output
+    assert "--pass" not in output
     assert "--totp" in output
     assert "--save-credentials" in output
     assert "--json" in output
@@ -360,19 +360,41 @@ def test_tail_without_pair_never_saves_credentials(monkeypatch: pytest.MonkeyPat
 # Credentials via flags / env / store (CliRunner smokes)
 # ---------------------------------------------------------------------------
 
-def test_credentials_via_flags_skip_prompt(
-    cli_runner: CliRunner, isolated_config: Path,
+@pytest.mark.parametrize("json_args", [[], ["--json"]])
+def test_removed_password_flag_never_echoes_its_value(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+    json_args: list[str],
 ) -> None:
-    """--user and --pass flags supply credentials without prompting."""
-    with _mock_sso():
-        result = _invoke_login(
-            cli_runner,
-            ["--user", "user@manipal.edu", "--pass", "secret", "--totp", "123456"],
-        )
+    """The removed argv password interface fails without reflecting the secret."""
+    sentinel = "ARGV_PASSWORD_SENTINEL"
 
-    assert result.exit_code == 0
-    assert "Username:" not in result.output
-    assert "Password:" not in result.output
+    result = _invoke_login(
+        cli_runner,
+        ["--user", "user@manipal.edu", "--pass", sentinel, *json_args],
+    )
+
+    assert result.exit_code == 2
+    assert sentinel not in result.stdout + result.stderr
+    assert "Invalid command arguments" in result.output
+
+
+def test_mfa_methods_has_no_password_flag_and_never_echoes_removed_value(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+) -> None:
+    help_result = cli_runner.invoke(cli, ["auth", "mfa-methods", "--help"])
+    sentinel = "ARGV_PASSWORD_SENTINEL"
+    rejected = cli_runner.invoke(
+        cli,
+        ["auth", "mfa-methods", "--user", "user@manipal.edu", "--pass", sentinel],
+    )
+
+    assert help_result.exit_code == 0
+    assert "--pass" not in help_result.output
+    assert rejected.exit_code == 2
+    assert sentinel not in rejected.stdout + rejected.stderr
+    assert "Invalid command arguments" in rejected.output
 
 
 def test_credentials_via_env_vars(
@@ -393,21 +415,21 @@ def test_credentials_via_env_vars(
 def test_flags_take_precedence_over_env_vars(
     cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--user/--pass flags take precedence over LIGHTHOUSE_USERNAME/PASSWORD."""
+    """The username flag combines with the environment-only password channel."""
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "env_user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "env_secret")
 
     with _mock_sso() as (sso, _client):
         result = _invoke_login(
             cli_runner,
-            ["--user", "flag_user@manipal.edu", "--pass", "flag_secret", "--totp", "123456"],
+            ["--user", "flag_user@manipal.edu", "--totp", "123456"],
         )
 
     assert result.exit_code == 0
     sso.login.assert_called_once()
     call_args = sso.login.call_args.args
     assert call_args[0] == "flag_user@manipal.edu"
-    assert call_args[1] == "flag_secret"
+    assert call_args[1] == "env_secret"
 
 
 def test_mixed_per_field_sources_preserve_precedence(

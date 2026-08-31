@@ -817,7 +817,7 @@ def _strip_html(value: Any) -> str:
         return ""
     # First decode HTML entities (e.g. &amp; -> &, &lt; -> <), then strip tags.
     stripped = re.sub(r"<[^>]+>", "", html.unescape(text)).strip()
-    return stripped if len(stripped) <= _MAX_RICH_TEXT_LENGTH else ""
+    return safe_display_text(stripped, max_len=_MAX_RICH_TEXT_LENGTH)
 
 
 def _positive_projection_id(value: Any) -> int | None:
