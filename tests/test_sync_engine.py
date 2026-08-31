@@ -985,12 +985,18 @@ class TestDownloadModes:
         assert (course_dir / first_paths["101"]).read_bytes() == b"FIRST"
         assert (course_dir / first_paths["202"]).read_bytes() == b"SECOND"
 
-    def test_force_repairs_legacy_contested_path_without_stale_copy(self, root):
+    @pytest.mark.parametrize("topic_order", [(101, 202), (202, 101)])
+    def test_force_repairs_legacy_contested_path_without_stale_copy(
+        self,
+        root,
+        topic_order,
+    ):
+        topics = {
+            101: (101, "Same", "File", LM_NEW),
+            202: (202, "Same", "File", LM_NEW),
+        }
         client = FakeClient(
-            tocs={ORG_ID: _toc(
-                (101, "Same", "File", LM_NEW),
-                (202, "Same", "File", LM_NEW),
-            )},
+            tocs={ORG_ID: _toc(*(topics[topic_id] for topic_id in topic_order))},
             names={ORG_ID: "Test"},
             files={101: (b"FIRST", "same.pdf"), 202: (b"SECOND", "same.pdf")},
         )
@@ -1003,16 +1009,18 @@ class TestDownloadModes:
 
         result = run_course(client, ORG_ID, root, mode=Mode.FORCE)
 
-        assert [item["path"] for item in result["downloaded"]] == [
-            "Mod/same.pdf",
-            "Mod/same--topic-202.pdf",
-        ]
+        paths = {item["topic_id"]: item["path"] for item in result["downloaded"]}
+        assert paths == {
+            "101": "Mod/same.pdf",
+            "202": "Mod/same--topic-202.pdf",
+        }
         module_dir = course_dir / "Mod"
         assert sorted(path.name for path in module_dir.iterdir()) == [
             "same--topic-202.pdf",
             "same.pdf",
         ]
         assert (module_dir / "same.pdf").read_bytes() == b"FIRST"
+        assert (module_dir / "same--topic-202.pdf").read_bytes() == b"SECOND"
 
     def test_force_empty_selection_replaces_existing_manifest(self, root):
         client = FakeClient(

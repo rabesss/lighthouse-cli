@@ -620,10 +620,9 @@ def _load_manifest(manifest_path: Path, result: dict[str, Any]) -> Manifest:
     try:
         return Manifest.load(manifest_path)
     except ManifestCorruptError as exc:
-        # Manifest errors include the path and parser detail.  Keep those
-        # details in the typed error for the normal safe projection, but never
-        # put user-controlled paths or control characters in the warning that
-        # is printed directly to stderr.
+        # Manifest error text is fixed-string sanitized. Keep the printed
+        # warning constant so this direct stderr path remains safe if those
+        # messages gain detail in the future.
         result["warnings"].append("Corrupt manifest; performing full sync.")
         result["errors"].append({"error": str(exc), "type": "manifest_corrupt"})
         return manifest
@@ -833,7 +832,14 @@ def run_course(
         key = (file_dest / filename).absolute()
         tid = str(topic_id)
         if key in path_owners and path_owners[key] != tid:
-            path_owners[key] = None
+            prior_owner = path_owners[key]
+            if mode is Mode.FORCE:
+                candidates = [tid]
+                if prior_owner is not None:
+                    candidates.append(prior_owner)
+                path_owners[key] = min(candidates, key=int)
+            else:
+                path_owners[key] = None
         else:
             path_owners[key] = tid
 
