@@ -1300,8 +1300,12 @@ class TestAssignmentContract:
         assert first["assignments"]["downloaded"][0]["path"] == (
             second["assignments"]["downloaded"][0]["path"]
         )
+        attachment_calls = [call for call in client.calls if call[0] == "attachment"]
+        assert len(attachment_calls) == 2
         folder = root / "Test-44347" / "Assignments" / "HW1"
         assert sorted(path.name for path in folder.iterdir()) == ["hw.pdf"]
+        manifest = Manifest.load(root / "Test-44347" / MANIFEST_FILENAME)
+        assert manifest.get("assignment_7_8") is not None
 
     @pytest.mark.parametrize("mode", [Mode.DOWNLOAD, Mode.FORCE, Mode.SYNC])
     def test_download_repairs_legacy_contested_assignment_path(self, root, mode):

@@ -703,9 +703,10 @@ def download_for_course(
                 claimed_prior_paths,
                 allow_contested_claim=True,
             )
+            skip_entry = existing if path_manifest is None else None
             if _matching_local_attachment(
                 dest,
-                existing,
+                skip_entry,
                 att.get("Size", 0),
                 expected_folder=folder,
             ) is not None:
