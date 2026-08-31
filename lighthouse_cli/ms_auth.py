@@ -963,8 +963,11 @@ class MicrosoftSSOClient:
             location = response.headers.get("Location", "")
             if not location:
                 return response
+            redirect_base = getattr(response, "url", current)
+            if not isinstance(redirect_base, str) or not redirect_base:
+                redirect_base = current
             current = _trusted_url(
-                BASE_URL,
+                redirect_base,
                 str(location),
                 _D2L_ALLOWED_HOSTS,
                 step="POST SAML",
@@ -978,6 +981,8 @@ class MicrosoftSSOClient:
             }
             if not missing_cookie_names(d2l_cookies):
                 return response
+            with suppress(Exception):
+                response.close()
             if response.status_code in (307, 308) and post_mode:
                 response = post_current()
                 continue
@@ -1164,6 +1169,12 @@ class MicrosoftSSOClient:
                 step="MFA",
             )
 
+        # Starting a new login invalidates any previous BeginAuth checkpoint.
+        # Resume uses ``complete_mfa_pending`` and never enters this method.
+        from lighthouse_cli.config import clear_mfa_pending
+
+        clear_mfa_pending()
+
         # Create a fresh session for each login attempt (safe reuse).
         self._session = requests.Session()
         self._session.headers.update({
@@ -1235,8 +1246,6 @@ class MicrosoftSSOClient:
         # Step 6: Extract D2L cookies. Only after the complete inline flow has
         # produced a valid session do we remove a stale/recovery checkpoint.
         cookies = self._extract_d2l_cookies()
-        from lighthouse_cli.config import clear_mfa_pending
-
         clear_mfa_pending()
         return cookies
 
@@ -1588,6 +1597,8 @@ class MicrosoftSSOClient:
                     label="Microsoft page",
                 )
                 pw_cookies = context.cookies()
+            except MicrosoftSSOError:
+                raise
             except Exception as exc:
                 raise MicrosoftSSOError(
                     f"Playwright username step failed ({exc.__class__.__name__}).",

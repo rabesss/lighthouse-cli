@@ -16,6 +16,11 @@ from typing import Any
 # Atomic file writing
 # ---------------------------------------------------------------------------
 
+# ``atomic_write`` appends ``.<32 hex>.tmp`` to the destination name. Keeping
+# the base name at 218 UTF-8 bytes fits that suffix under the usual 255-byte
+# per-component filesystem limit.
+MAX_ATOMIC_TARGET_NAME_BYTES = 218
+
 def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> None:
     """Write ``data`` to ``path`` atomically: unique temp file in the target
     directory, fsync, then ``os.replace()``.
@@ -71,6 +76,19 @@ _WINDOWS_RESERVED = frozenset(
 )
 
 
+def _fit_filename(name: str, *, max_bytes: int = MAX_ATOMIC_TARGET_NAME_BYTES) -> str:
+    """Trim a basename to a UTF-8 byte budget while preserving a short suffix."""
+    if len(name.encode("utf-8")) <= max_bytes:
+        return name
+    path = Path(name)
+    suffix = path.suffix if len(path.suffix.encode("utf-8")) <= 17 else ""
+    stem = path.name[:-len(suffix)] if suffix else path.name
+    budget = max_bytes - len(suffix.encode("utf-8"))
+    while stem and len(stem.encode("utf-8")) > budget:
+        stem = stem[:-1]
+    return f"{stem or 'file'}{suffix}"
+
+
 def _sanitize_filename(name: str) -> str:
     """Remove filesystem-unsafe characters from a filename.
 
@@ -105,18 +123,24 @@ def _positive_course_id(value: Any) -> int | None:
 
 
 def _is_unmodified_bound_method(client: Any, name: str, candidate: Any) -> bool:
-    """Return whether ``candidate`` is the class-defined bound method.
+    """Return whether ``candidate`` is inherited from the production client.
 
     This lets compatibility doubles override ``get_courses`` without making a
     failed native enrollment request look like a successful legacy response.
     ``inspect`` checks also keep monkeypatched methods out of the production
     path: a patched enrollment helper still propagates its failure.
     """
-    class_method = getattr(type(client), name, None)
+    declaring_class = next(
+        (cls for cls in type(client).__mro__ if name in cls.__dict__),
+        None,
+    )
     return (
-        isfunction(class_method)
+        declaring_class is not None
+        and declaring_class.__module__ == "lighthouse_cli.api"
+        and declaring_class.__name__ == "LighthouseClient"
+        and isfunction(declaring_class.__dict__.get(name))
         and ismethod(candidate)
-        and candidate.__func__ is class_method
+        and candidate.__func__ is declaring_class.__dict__[name]
     )
 
 
@@ -236,4 +260,9 @@ def resolve_course_folder_name(course_name: str, org_unit_id: int) -> str:
 
     Two courses with the same Name get disambiguated by appending -OrgUnitId.
     """
-    return f"{_sanitize_filename(course_name)}-{org_unit_id}"
+    suffix = f"-{org_unit_id}"
+    safe_name = _fit_filename(
+        _sanitize_filename(course_name),
+        max_bytes=255 - len(suffix.encode("utf-8")),
+    )
+    return f"{safe_name}{suffix}"

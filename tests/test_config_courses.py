@@ -259,6 +259,23 @@ class TestConfigCoursesAddRemove:
         assert "1001" in data["tracked_courses"]
         assert data["tracked_courses"]["1001"]["semester"] == "Sem IV"
 
+    def test_add_by_name_ignores_surrounding_whitespace(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "course-config.json"
+        enrollments = [
+            {"OrgUnit": {"Id": 1001, "Name": "Intro to CS", "Code": "CS101"}},
+        ]
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
+            result = cli_runner.invoke(
+                cli,
+                ["config", "courses", "--add", "  Intro to CS  ", "--json"],
+            )
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)[0]["id"] == "1001"
+
     def test_json_add_mutates_config_and_outputs_json(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:

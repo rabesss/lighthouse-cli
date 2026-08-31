@@ -481,6 +481,23 @@ class TestMicrosoftSSOClientExtractD2lCookies:
 # Full login flow tests with mocked HTTP
 # ---------------------------------------------------------------------------
 
+def test_fresh_login_clears_stale_pending_checkpoint_before_network() -> None:
+    client = MicrosoftSSOClient()
+    try:
+        with patch("lighthouse_cli.config.clear_mfa_pending") as clear_pending, \
+                patch.object(
+                    client,
+                    "_step_initiate_saml",
+                    side_effect=MicrosoftSSOError("stopped", step="test"),
+                ):
+            with pytest.raises(MicrosoftSSOError, match="stopped"):
+                client.login("user@example.invalid", "not-a-real-password")
+    finally:
+        client.close()
+
+    clear_pending.assert_called_once_with()
+
+
 class TestFullLoginFlow:
     """Test the complete login flow using mocked requests.Session."""
 

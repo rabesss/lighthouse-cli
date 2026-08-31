@@ -85,6 +85,13 @@ def test_show_with_error_handling_human_failure_returns_error(capsys) -> None:
     assert "Warning: failed to fetch items: fetch failed" in capsys.readouterr().err
 
 
+def test_fetch_error_preserves_permission_category_in_json(capsys) -> None:
+    payload = show._fetch_error_result(42, "items", True, PermissionError("private"))
+
+    assert payload == {"course_id": 42, "items": [], "error": "Permission denied."}
+    assert "Permission denied." in capsys.readouterr().err
+
+
 def test_single_json_worker_failure_is_normalized(monkeypatch, capsys) -> None:
     class FakeClient:
         pass
@@ -548,6 +555,11 @@ def test_strip_html_rejects_controls_created_by_entity_decoding(
 
     assert preview == ""
     assert control not in preview
+
+
+def test_strip_html_preserves_benign_encoded_text() -> None:
+    assert show._strip_html("A&nbsp;B") == "A B"
+    assert show._strip_html("&lt;tag&gt;") == "<tag>"
 
 
 def test_assignment_view_skips_malformed_attachment_and_keeps_valid_siblings() -> None:

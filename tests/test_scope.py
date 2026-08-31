@@ -892,14 +892,18 @@ class TestAlsoAmbiguousMatch:
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
                  {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
-             ]):
+             ]), patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value={"Modules": []},
+             ):
 
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "math", "-o", str(output_dir)],
             )
 
-            assert result.exit_code == 1
+            assert result.exit_code == 0
             assert "Ambiguous course match" in result.output
             assert "111" not in result.output
             assert "222" not in result.output
@@ -929,14 +933,18 @@ class TestAlsoAmbiguousMatch:
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-             ]):
+             ]), patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value={"Modules": []},
+             ):
 
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "nonexistent", "-o", str(output_dir)],
             )
 
-            assert result.exit_code == 1
+            assert result.exit_code == 0
             assert "Course not found. Run: lighthouse courses" in result.output
             assert "nonexistent" not in result.output
             assert "lighthouse courses" in result.output

@@ -33,6 +33,7 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
 MAX_CONFIGURABLE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _MAX_DOWNLOAD_BYTES_ENV = "LIGHTHOUSE_MAX_DOWNLOAD_BYTES"
+CDP_RESPONSE_TIMEOUT_SECONDS = 15
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,10 @@ class ContentResponseShapeError(NetworkError):
         super().__init__(self._MESSAGE)
 
 
+class _BrowserHarnessFallback(NetworkError):
+    """Signal that direct CDP extraction should try after helper failure."""
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Stop local CDP discovery before urllib follows an untrusted redirect."""
 
@@ -117,6 +122,14 @@ def _safe_http_error(response: Any) -> requests.HTTPError:
     else:
         message = "HTTP request failed"
     return requests.HTTPError(message, response=response)
+
+
+def _close_response(response: Any) -> None:
+    """Close a response without surfacing adapter-specific cleanup errors."""
+    close = getattr(response, "close", None)
+    if callable(close):
+        with suppress(Exception):
+            close()
 
 
 def _positive_org_unit_id(value: Any) -> int | None:
@@ -454,12 +467,14 @@ class LighthouseClient:
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location", "").lower()
                 if "login" in location or "auth" in location:
+                    _close_response(resp)
                     raise SessionExpiredError(
                         _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
                         recovery=_SESSION_EXPIRED_RECOVERY,
                     )
 
             if resp.status_code == 401:
+                _close_response(resp)
                 raise SessionExpiredError(
                     _session_expired_msg("HTTP 401 Unauthorized"),
                     recovery=_SESSION_EXPIRED_RECOVERY,
@@ -483,6 +498,7 @@ class LighthouseClient:
                     delay = fallback
                 else:
                     delay = min(server_delay, self._MAX_RETRY_AFTER)
+                _close_response(resp)
                 time.sleep(delay)
                 continue
 
@@ -492,11 +508,14 @@ class LighthouseClient:
                 except requests.HTTPError:
                     # Do not let requests copy the URL (or any adapter
                     # diagnostics) into the exception text.
-                    raise _safe_http_error(resp) from None
+                    error = _safe_http_error(resp)
+                    _close_response(resp)
+                    raise error from None
                 except Exception:
                     # A custom response adapter should not be able to leak a
                     # raw response/URL through an unexpected validation
                     # exception either.
+                    _close_response(resp)
                     raise NetworkError("Network response validation failed.") from None
             return resp
 
@@ -703,8 +722,7 @@ class LighthouseClient:
         except Exception:
             raise NetworkError("Binary download response could not be processed.") from None
         finally:
-            with suppress(Exception):
-                resp.close()
+            _close_response(resp)
 
     # -- convenience API methods -------------------------------------------
 
@@ -1165,8 +1183,10 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
         raise NetworkError("CDP port must be an integer from 1 to 65535.")
 
     # Strategy 1: try browser-harness CLI if available
-    with suppress(FileNotFoundError):
+    try:
         return _refresh_via_browser_harness(port)
+    except (FileNotFoundError, _BrowserHarnessFallback):
+        pass
 
     # Strategy 2: direct CDP WebSocket via Python websockets library
     return _refresh_via_cdp_websocket(port)
@@ -1192,17 +1212,23 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
         # direct CDP path when browser-harness is not installed.
         raise
     except Exception:
-        raise NetworkError("Could not run the local browser cookie helper.") from None
+        raise _BrowserHarnessFallback(
+            "Could not run the local browser cookie helper."
+        ) from None
     if result.returncode != 0:
-        raise NetworkError("The local browser cookie helper failed.")
+        raise _BrowserHarnessFallback("The local browser cookie helper failed.")
 
     try:
         entries = json.loads(result.stdout)
     except (TypeError, ValueError):
-        raise NetworkError("The local browser cookie helper returned invalid data.") from None
+        raise _BrowserHarnessFallback(
+            "The local browser cookie helper returned invalid data."
+        ) from None
     d2l_cookies = d2l_cookies_from_entries(entries)
     if not d2l_cookies:
-        raise NetworkError("No usable Lighthouse cookies were found in the browser.")
+        raise _BrowserHarnessFallback(
+            "No usable Lighthouse cookies were found in the browser."
+        )
 
     return d2l_cookies
 
@@ -1324,6 +1350,7 @@ def _validate_cdp_websocket_url(
 
 async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
     """Extract cookies via CDP using the websockets Python library."""
+    import asyncio
     import json as _json
 
     import websockets
@@ -1332,7 +1359,11 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
     try:
         async with websockets.connect(ws_url, max_size=2**20) as ws:
             await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
-            resp = _json.loads(await ws.recv())
+            response_text = await asyncio.wait_for(
+                ws.recv(),
+                timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
+            )
+            resp = _json.loads(response_text)
     except NetworkError:
         raise
     except Exception:

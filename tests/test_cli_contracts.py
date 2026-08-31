@@ -299,6 +299,22 @@ def test_quiz_json_renderer_projects_malformed_deep_fields() -> None:
     assert "QUIZ_SECRET_SENTINEL" not in result.stdout + result.stderr
 
 
+def test_quiz_rich_text_normalizes_benign_multiline_content() -> None:
+    quiz = {
+        "QuizId": 7,
+        "Name": "Safe quiz",
+        "Description": "Line one\nLine two",
+        "Instructions": "Read this\r\nthen answer",
+    }
+    with patch.object(LighthouseClient, "get_quiz_detail", return_value=quiz):
+        result = CliRunner().invoke(cli, ["quiz", "123", "7", "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["quiz"]["Description"] == "Line one Line two"
+    assert payload["quiz"]["Instructions"] == "Read this then answer"
+
+
 def test_multi_course_scope_uses_fixed_name_for_malformed_semester_with_also() -> None:
     client = Mock(spec=LighthouseClient)
     client.get_semesters.return_value = [
@@ -576,7 +592,12 @@ def test_semester_rich_cells_render_remote_markup_literally(
     from lighthouse_cli import display
 
     stream = io.StringIO()
-    console = rich_console.Console(file=stream, force_terminal=True, width=200)
+    console = rich_console.Console(
+        file=stream,
+        force_terminal=True,
+        width=200,
+        height=25,
+    )
     monkeypatch.setattr(
         display,
         "_RICH_CACHE",
@@ -605,6 +626,9 @@ def test_semester_rich_cells_render_remote_markup_literally(
     "raw",
     [
         "password=SECRET_VALUE",
+        "pass=TOPSECRET",
+        "passwordValue=TOPSECRET",
+        "tokenValue=TOPSECRET",
         'headers={"Cookie":"abcd1234"}',
         'data={"password":"abcd1234"}',
         'headers={"X-Api-Key":"abcdef123"}',
@@ -721,6 +745,17 @@ def test_course_catalog_falls_back_for_legacy_client_without_projection() -> Non
             return [{"OrgUnitId": "7", "Name": "Legacy", "Code": "L"}]
 
     assert get_enrolled_course_catalog(Client()) == [
+        {"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}
+    ]
+
+
+def test_course_catalog_accepts_subclass_legacy_getter_override() -> None:
+    class LegacySubclass(LighthouseClient):
+        def get_courses(self) -> list[dict[str, object]]:
+            return [{"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}]
+
+    client = LegacySubclass()
+    assert get_enrolled_course_catalog(client) == [
         {"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}
     ]
 

@@ -1543,11 +1543,11 @@ def _safe_quiz_rich_text(value: Any) -> str:
     while pending:
         current, depth = pending.pop()
         if isinstance(current, str):
-            if len(current) > _QUIZ_RICH_TEXT_MAX_TEXT or not current.isprintable():
+            if len(current) > _QUIZ_RICH_TEXT_MAX_TEXT:
                 continue
             # Keep the historical HTML stripping behavior, but normalize the
             # resulting text before it reaches the terminal.
-            stripped = re.sub(r"<[^>]+>", "", current).strip()
+            stripped = " ".join(re.sub(r"<[^>]+>", "", current).split())
             safe_text = _safe_server_text(
                 stripped,
                 max_len=_QUIZ_RICH_TEXT_MAX_TEXT,

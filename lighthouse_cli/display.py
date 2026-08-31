@@ -95,7 +95,8 @@ def _try_rich():
 _DEFAULT_DISPLAY_TEXT_LENGTH = 512
 _DISPLAY_SECRET_KEY_RE = re.compile(
     r"(?ix)(?<![a-z0-9])(?:"
-    r"password|passwd|passphrase|secret|token|otp|totp|cookie(?:s|value)?|"
+    r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
+    r"token(?:[\s_-]?value)?|otp|totp|cookie(?:s|value)?|"
     r"saml[\s_-]?(?:response|request)|authorization|bearer|"
     r"flow[\s_-]?token|o?postparams|response[\s_-]?(?:body|text)|"
     r"session(?:[\s_-]?(?:val|value|token|id))?|access[\s_-]?token|"
@@ -125,7 +126,8 @@ _DISPLAY_SECRET_UPPER_VALUE_RE = re.compile(
 )
 _DISPLAY_BEARER_RE = re.compile(r"(?ix)(?<![a-z0-9])bearer\s+[^\s,;}\]]+")
 _DISPLAY_QUOTED_SECRET_KEY_RE = re.compile(
-    r"(?ix)[\"'](?:password|passwd|passphrase|secret|token|otp|totp|"
+    r"(?ix)[\"'](?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
+    r"token(?:[\s_-]?value)?|otp|totp|"
     r"cookie(?:s|value)?|authorization|bearer|flow[\s_-]?token|"
     r"response[\s_-]?(?:body|text)|session(?:[\s_-]?(?:val|value|token|id))?|"
     r"access[\s_-]?token|client[\s_-]?secret|x?[\s_-]?api[\s_-]?key)"
@@ -145,7 +147,8 @@ _DISPLAY_SECRET_KEY_ONLY_RE = re.compile(
     r"(?![a-z0-9])"
 )
 _DISPLAY_BARE_SECRET_RE = re.compile(
-    r"(?i)^(?:password|passwd|passphrase|secret|token|otp|totp|cookie|"
+    r"(?i)^(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
+    r"token(?:[\s_-]?value)?|otp|totp|cookie|"
     r"cookies|authorization|bearer|session|sessionval|sessionvalue|"
     r"sessiontoken|access_token|accesstoken|client_secret|clientsecret|"
     r"api_key|apikey|x-api-key)$"
@@ -341,6 +344,10 @@ def _safe_local_message(raw: str) -> str | None:
         return "COURSE_ID is required when using --assignment or --attachment"
     if lowered.startswith("--dry-run cannot be used with --assignment"):
         return "--dry-run cannot be used with --assignment"
+    if lowered.startswith("--semester and --also are only supported"):
+        return "--semester and --also are only supported when COURSE_ID is omitted"
+    if lowered in {"permission denied.", "file or resource not found."}:
+        return normalized
     if lowered.startswith("no course config found"):
         return "No course config found. Run: lighthouse config courses"
     if lowered.startswith("no semester matching"):

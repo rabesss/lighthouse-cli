@@ -38,7 +38,14 @@ from .manifest import (
     compute_sha256,
     normalize_sha256,
 )
-from .utils import atomic_write, _sanitize_filename, get_course_name, resolve_course_folder_name
+from .utils import (
+    MAX_ATOMIC_TARGET_NAME_BYTES,
+    _fit_filename,
+    _sanitize_filename,
+    atomic_write,
+    get_course_name,
+    resolve_course_folder_name,
+)
 
 
 class Mode(Enum):
@@ -104,7 +111,7 @@ def _safe_topic_filename(value: object, topic_id: int) -> str:
     if not candidate:
         return fallback
     sanitized = _sanitize_filename(candidate)
-    return sanitized or fallback
+    return _fit_filename(sanitized) if sanitized else fallback
 
 
 def _collision_filename(filename: str, topic_id: int, attempt: int) -> str:
@@ -116,7 +123,9 @@ def _collision_filename(filename: str, topic_id: int, attempt: int) -> str:
     if len(topic_token) > 20:
         topic_token = hashlib.sha256(topic_token.encode("ascii")).hexdigest()[:16]
     marker = f"--topic-{topic_token}" + (f"-{attempt}" if attempt > 1 else "")
-    max_stem_bytes = 255 - len((marker + suffix).encode("utf-8"))
+    max_stem_bytes = MAX_ATOMIC_TARGET_NAME_BYTES - len(
+        (marker + suffix).encode("utf-8")
+    )
     while stem and len(stem.encode("utf-8")) > max_stem_bytes:
         stem = stem[:-1]
     return f"{stem or 'topic'}{marker}{suffix}"
@@ -126,7 +135,9 @@ def _reserve_topic_path(
     file_dest: Path,
     filename: str,
     topic_id: int,
-    path_owners: dict[Path, str],
+    path_owners: dict[Path, str | None],
+    *,
+    allow_unowned_overwrite: bool,
 ) -> Path:
     """Reserve one local path for a topic without overwriting another owner."""
     tid = str(topic_id)
@@ -138,7 +149,10 @@ def _reserve_topic_path(
     while True:
         key = candidate.absolute()
         owner = path_owners.get(key)
-        if owner == tid or (owner is None and not candidate.exists()):
+        if owner == tid or (
+            key not in path_owners
+            and (allow_unowned_overwrite or not candidate.exists())
+        ):
             path_owners[key] = tid
             return candidate
         attempt += 1
@@ -333,7 +347,8 @@ def download_and_persist_topic(
     dest: Path,
     manifest: Manifest,
     *,
-    path_owners: dict[Path, str],
+    path_owners: dict[Path, str | None],
+    allow_unowned_overwrite: bool = False,
     warnings: list[str] | None = None,
 ) -> tuple[bytes, str, Path]:
     """Download a topic, write to disk, update manifest. Returns (content, name, path).
@@ -367,6 +382,7 @@ def download_and_persist_topic(
         sanitized_name,
         topic_id,
         path_owners,
+        allow_unowned_overwrite=allow_unowned_overwrite,
     )
     sanitized_name = filepath.name
     try:
@@ -781,8 +797,8 @@ def run_course(
     downloaded, skipped, updated = result["downloaded"], result["skipped"], result["updated"]
     errors = result["errors"]
     sha_hashes: dict[str, list[dict]] = {}
-    path_owners: dict[Path, str] = {}
-    for topic in downloadable:
+    path_owners: dict[Path, str | None] = {}
+    for topic in all_topics:
         topic_id = _positive_int(topic.get("topic_id"))
         if topic_id is None:
             continue
@@ -796,7 +812,12 @@ def run_course(
             _course_root, file_dest = _topic_directory(dest, topic.get("path", ""))
         except (OSError, RuntimeError, ValueError):
             continue
-        path_owners.setdefault((file_dest / filename).absolute(), str(topic_id))
+        key = (file_dest / filename).absolute()
+        tid = str(topic_id)
+        if key in path_owners and path_owners[key] != tid:
+            path_owners[key] = None
+        else:
+            path_owners[key] = tid
 
     for topic in downloadable:
         topic_id = _positive_int(topic.get("topic_id"))
@@ -812,7 +833,11 @@ def run_course(
         if mode is Mode.SYNC and existing is not None:
             if existing.get("last_modified") == (topic.get("last_modified") or ""):
                 filename = existing.get("filename", "")
-                if _matching_local_topic_file(dest, topic, existing) is not None:
+                matching_file = _matching_local_topic_file(dest, topic, existing)
+                if (
+                    matching_file is not None
+                    and path_owners.get(matching_file.absolute()) == tid
+                ):
                     # Strip a leading separator from display-only skipped paths.
                     # Download writes have their own resolved-path containment clamp.
                     safe_filename = _safe_display_filename(filename)
@@ -833,6 +858,7 @@ def run_course(
                 dest,
                 manifest,
                 path_owners=path_owners,
+                allow_unowned_overwrite=mode is Mode.FORCE,
                 warnings=result["warnings"],
             )
             entry = manifest.get(tid)

@@ -42,6 +42,25 @@ def _make_d2l_cookies() -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("2FA verification timed out waiting for approval.", "2FA verification timed out waiting for approval."),
+        ("D2L ACS redirect limit exceeded.", "D2L ACS redirect limit exceeded."),
+        ("D2L home redirect limit exceeded.", "D2L home redirect limit exceeded."),
+        ("Microsoft session-pull requested an unsafe re-POST target.", "Microsoft session-pull requested an unsafe re-POST target."),
+        ("2FA code required after verification was sent.", "2FA code required after verification was sent."),
+        ("A pre-provided --totp code is valid only for PhoneAppOTP.", "A pre-provided --totp code is valid only for PhoneAppOTP."),
+        ("Pending MFA session is incomplete (missing state).", "Pending MFA session is incomplete."),
+    ],
+)
+def test_first_party_auth_failures_keep_safe_actionable_categories(
+    message: str,
+    expected: str,
+) -> None:
+    assert auth_mod._safe_auth_error_message(message) == expected
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
@@ -236,12 +255,12 @@ def test_plan_resume_with_matching_pending_method() -> None:
     assert plan.totp_code == "123456"
 
 
-def test_plan_auto_resumes_any_pending_method() -> None:
+def test_plan_auto_never_guesses_pending_method_for_literal_code() -> None:
     plan = plan_login(
         totp_code="123456", read_totp_after_challenge=False, mfa_method="auto",
         pending={"mfa_method": "app"}, interactive=True,
     )
-    assert plan.mode == "resume"
+    assert plan.mode == "fresh"
 
 
 def test_plan_method_mismatch_starts_fresh() -> None:
@@ -1137,6 +1156,21 @@ def test_interactive_login_preserves_explicit_auto_method(
     assert sso.login.call_args.kwargs["mfa_method"] == "auto"
 
 
+def test_environment_mfa_method_ignores_surrounding_whitespace(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.setenv("LIGHTHOUSE_MFA_METHOD", " app ")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=False):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, ["--totp", "123456"])
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "app"
+
+
 def test_interactive_literal_totp_without_method_keeps_auto(
     cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1189,7 +1223,7 @@ def test_interactive_login_shows_next_steps_and_full_guide(
     assert "Try next:" in result.output
     assert "lighthouse courses" in result.output
     assert "lighthouse download <course> --dry-run" in result.output
-    assert "Show the full command guide? [Y/n]:" in result.output
+    assert "Show the full command guide? [Y/n]:" in result.stderr
     assert "Command guide:" in result.output
     assert "Read only:" in result.output
     assert "Remote change:" in result.output
@@ -1222,7 +1256,7 @@ def test_login_guide_prompt_eof_is_clean(
 
     captured = capsys.readouterr()
     assert "Try next:" in captured.out
-    assert "Show the full command guide? [Y/n]:" in captured.out
+    assert "Show the full command guide? [Y/n]:" in captured.err
     assert "Command guide:" not in captured.out
 
 

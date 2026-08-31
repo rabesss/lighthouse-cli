@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+import types
 import urllib.request
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +18,7 @@ from lighthouse_cli.api import (
     ContentResponseShapeError,
     LighthouseClient,
     NetworkError,
+    SessionExpiredError,
     SubmissionOutcomeUnknownError,
     _extract_filename,
 )
@@ -32,6 +36,7 @@ class FakeResponse:
         self.status_code = status_code
         self._json_data = json_data
         self.headers = headers or {}
+        self.closed = False
 
     def json(self) -> object:
         return self._json_data
@@ -39,6 +44,9 @@ class FakeResponse:
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeSession:
@@ -64,17 +72,12 @@ class StreamingResponse(FakeResponse):
     def __init__(self, chunks: list[bytes], headers: dict[str, str] | None = None) -> None:
         super().__init__(headers=headers)
         self.chunks = chunks
-        self.closed = False
         self.iterated = False
 
     def iter_content(self, chunk_size: int) -> object:
         assert chunk_size > 0
         self.iterated = True
         return iter(self.chunks)
-
-    def close(self) -> None:
-        self.closed = True
-
 
 def test_get_raw_streams_and_rejects_actual_bytes_above_limit() -> None:
     response = StreamingResponse([b"abcd", b"efgh"])
@@ -128,6 +131,35 @@ def test_get_raw_rejects_invalid_environment_limits(
         client.get_raw("/file")
 
     client.get.assert_not_called()
+
+
+def test_retry_closes_streamed_rate_limit_response() -> None:
+    limited = FakeResponse(429)
+    success = FakeResponse(200)
+    client, _session = _client_with_session([limited, success])
+
+    with patch.object(api.time, "sleep"):
+        assert client._do_request("GET", "https://example.test", False, 30) is success
+
+    assert limited.closed is True
+    assert success.closed is False
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(401),
+        FakeResponse(302, headers={"Location": "/login"}),
+        FakeResponse(500),
+    ],
+)
+def test_terminal_error_responses_are_closed(response: FakeResponse) -> None:
+    client, _session = _client_with_session([response])
+
+    with pytest.raises((SessionExpiredError, requests.HTTPError)):
+        client._do_request("GET", "https://example.test", False, 30)
+
+    assert response.closed is True
 
 
 def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
@@ -1141,3 +1173,59 @@ def test_browser_harness_failure_does_not_expose_stderr() -> None:
             api._refresh_via_browser_harness(9222)
 
     assert "COOKIE_SECRET_SENTINEL" not in str(exc_info.value)
+
+
+def test_browser_harness_failure_falls_back_to_direct_cdp() -> None:
+    expected = {"d2lSessionVal": "session"}
+
+    with patch.object(
+        api,
+        "_refresh_via_browser_harness",
+        side_effect=api._BrowserHarnessFallback("helper failed"),
+    ), patch.object(
+        api,
+        "_refresh_via_cdp_websocket",
+        return_value=expected,
+    ) as direct:
+        assert api.refresh_auth_from_browser(9222) == expected
+
+    direct.assert_called_once_with(9222)
+
+
+def test_cdp_cookie_receive_has_an_end_to_end_timeout() -> None:
+    observed: dict[str, float] = {}
+
+    class FakeWebSocket:
+        async def send(self, _payload: str) -> None:
+            return None
+
+        async def recv(self) -> str:
+            return "{}"
+
+    class FakeConnection:
+        async def __aenter__(self) -> FakeWebSocket:
+            return FakeWebSocket()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    async def timeout(awaitable: object, *, timeout: float) -> object:
+        observed["timeout"] = timeout
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError
+
+    fake_websockets = types.SimpleNamespace(
+        connect=lambda *_args, **_kwargs: FakeConnection()
+    )
+    with patch.dict(sys.modules, {"websockets": fake_websockets}), \
+            patch("asyncio.wait_for", side_effect=timeout):
+        with pytest.raises(NetworkError, match="cookie connection failed"):
+            asyncio.run(
+                api._cdp_get_cookies_ws(
+                    "ws://127.0.0.1:9222/devtools/browser/1"
+                )
+            )
+
+    assert observed["timeout"] == api.CDP_RESPONSE_TIMEOUT_SECONDS

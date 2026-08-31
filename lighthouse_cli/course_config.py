@@ -266,12 +266,13 @@ def cmd_config_courses(
 
     if add is not None:
         # Find the course in enrollments
+        needle = add.strip()
         match = next(
             (
                 (course["OrgUnitId"], course["Name"])
                 for course in courses
-                if course["OrgUnitId"] == add.strip()
-                or course["Name"].casefold() == add.casefold()
+                if course["OrgUnitId"] == needle
+                or course["Name"].casefold() == needle.casefold()
             ),
             None,
         )

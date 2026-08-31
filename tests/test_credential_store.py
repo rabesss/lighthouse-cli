@@ -377,6 +377,13 @@ def test_non_finite_secret_data_is_rejected_without_raw_exception(
         )
 
 
+def test_strict_json_loader_rejects_overflowing_floats() -> None:
+    from lighthouse_cli.credential_store import _loads_strict
+
+    with pytest.raises(ValueError, match="non-finite JSON number"):
+        _loads_strict('{"value": 1e999}')
+
+
 # ---------------------------------------------------------------------------
 # F1: any malformed artifact or key raises CredentialStoreError, never a raw
 # binascii.Error / UnicodeEncodeError / ValueError traceback.

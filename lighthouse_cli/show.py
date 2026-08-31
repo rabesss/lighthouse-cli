@@ -387,12 +387,12 @@ def _fetch_error_result(
     if isinstance(error, SessionExpiredError):
         print(f"Error: {message}", file=sys.stderr)
         if json_output:
-            return _course_error_payload(org_id, data_key, message)
+            return _course_error_payload(org_id, data_key, error)
         return 1
 
     print(f"Warning: failed to fetch {data_key}: {message}", file=sys.stderr)
     if json_output:
-        return _course_error_payload(org_id, data_key, message)
+        return _course_error_payload(org_id, data_key, error)
     return generic_human_rc
 
 
@@ -668,7 +668,7 @@ def _show_course_grades(
         value = values.get(g["id"], {})
         num = value.get("numerator")
         den = value.get("denominator")
-        if den is None:
+        if den is None or den == 0:
             den = g["max_points"]
         display_denominator = den if den is not None else "–"
         merged.append({
@@ -815,9 +815,16 @@ def _strip_html(value: Any) -> str:
     text = _rich_text_string(value)
     if not text or len(text) > _MAX_RICH_TEXT_LENGTH:
         return ""
-    # First decode HTML entities (e.g. &amp; -> &, &lt; -> <), then strip tags.
-    stripped = re.sub(r"<[^>]+>", "", html.unescape(text)).strip()
-    return safe_display_text(stripped, max_len=_MAX_RICH_TEXT_LENGTH)
+    # Strip markup before decoding so encoded literal angle brackets stay text.
+    decoded = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    if any(
+        character in "\r\n\t"
+        or (not character.isprintable() and not character.isspace())
+        for character in decoded
+    ):
+        return ""
+    normalized = " ".join(decoded.split())
+    return safe_display_text(normalized, max_len=_MAX_RICH_TEXT_LENGTH)
 
 
 def _positive_projection_id(value: Any) -> int | None:

@@ -102,6 +102,16 @@ graph TD
   ends or D2L rotates them). Re-run `lighthouse auth refresh` or
   `lighthouse auth login` when commands fail with "Session expired".
 
+## Upgrade notes
+
+- Password arguments were removed. Use the hidden prompt, encrypted saved
+  credentials, or `LIGHTHOUSE_PASSWORD` for non-interactive runs.
+- `auth refresh` now extracts cookies from a signed-in browser. Use
+  `auth login` for the HTTP SSO flow.
+- Legacy plaintext cookie files require an encryption key source and a fresh
+  login before read-only commands can use them.
+- Config and download roots must be real directories, not symlinked paths.
+
 ## Command Reference
 
 `--json` is a leaf-command option, not a global flag. Use it only on the

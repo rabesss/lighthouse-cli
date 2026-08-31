@@ -20,7 +20,13 @@ from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _run_and_render_multi
 from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest, compute_sha256 as manifest_compute_sha256
-from lighthouse_cli.sync_engine import Mode, build_entry, flatten_all_topics, run_course
+from lighthouse_cli.sync_engine import (
+    Mode,
+    _safe_topic_filename,
+    build_entry,
+    flatten_all_topics,
+    run_course,
+)
 from lighthouse_cli.utils import atomic_write as shared_atomic_write
 
 ORG_ID = 44347
@@ -179,6 +185,57 @@ def test_distinct_topic_ids_cannot_share_a_persisted_path(tmp_path: Path) -> Non
     second = run_course(client, ORG_ID, tmp_path, mode=Mode.SYNC)
     assert [item["topic_id"] for item in second["skipped"]] == ["101", "202"]
     assert second["updated"] == []
+
+
+@pytest.mark.parametrize("name", ["a" * 230 + ".pdf", "é" * 115 + ".pdf"])
+def test_topic_filename_fits_atomic_temp_name_limit(name: str) -> None:
+    projected = _safe_topic_filename(name, 7)
+
+    assert len(projected.encode("utf-8")) <= 218
+    assert projected.endswith(".pdf")
+
+
+def test_legacy_manifest_collision_cannot_alias_or_overwrite_on_partial_sync(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient(
+        tocs={ORG_ID: _toc(
+            (101, "Same title", "File", LM_NEW),
+            (202, "Same title", "File", LM_NEW),
+            module="Module",
+        )},
+        names={ORG_ID: "Course"},
+        files={
+            101: (b"A", "same.pdf"),
+            202: RuntimeError("second download failed"),
+        },
+    )
+    course_dir = tmp_path / f"Course-{ORG_ID}"
+    _seed_manifest(course_dir, {
+        "101": _mentry(
+            lm=LM_OLD,
+            filename="same.pdf",
+            sha=manifest_compute_sha256(b"A"),
+            size=1,
+        ),
+        "202": _mentry(
+            lm=LM_NEW,
+            filename="same.pdf",
+            sha=manifest_compute_sha256(b"B"),
+            size=1,
+        ),
+    })
+    shared = _materialize(course_dir, "Module/Same title/same.pdf", b"B")
+
+    result = run_course(client, ORG_ID, tmp_path, mode=Mode.SYNC)
+    manifest = json.loads((course_dir / MANIFEST_FILENAME).read_text())
+
+    assert shared.read_bytes() == b"B"
+    assert manifest["202"]["filename"] == "same.pdf"
+    assert manifest["202"]["sha256"] == manifest_compute_sha256(b"B")
+    assert manifest["101"]["filename"] != "same.pdf"
+    assert [item["topic_id"] for item in result["updated"]] == ["101"]
+    assert result["errors"][0]["topic_id"] == "202"
 
 
 def _tree(root: Path) -> dict[str, bytes]:
@@ -877,6 +934,23 @@ class TestDownloadModes:
         assert [e["topic_id"] for e in result["downloaded"]] == ["100"]
         on_disk = json.loads((root / "Test-44347" / MANIFEST_FILENAME).read_text())
         assert list(on_disk) == ["100"], "FORCE must leave only freshly downloaded entries"
+
+    def test_repeated_force_reuses_each_topics_reserved_path(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+        course_dir = root / "Test-44347"
+        existing = _materialize(course_dir, "Mod/f.pdf", b"old")
+
+        first = run_course(client, ORG_ID, root, mode=Mode.FORCE)
+        second = run_course(client, ORG_ID, root, mode=Mode.FORCE)
+
+        assert first["downloaded"][0]["path"] == "Mod/f.pdf"
+        assert second["downloaded"][0]["path"] == "Mod/f.pdf"
+        assert existing.read_bytes() == b"content"
+        assert sorted(path.name for path in existing.parent.iterdir()) == ["f.pdf"]
 
 
 # ---------------------------------------------------------------------------

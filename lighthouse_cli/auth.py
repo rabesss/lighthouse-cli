@@ -25,7 +25,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from .api import LighthouseClient, refresh_auth_from_browser
+from .api import LighthouseClient, NetworkError, refresh_auth_from_browser
 from .config import (
     clear_mfa_pending,
     ensure_config_dir,
@@ -98,6 +98,30 @@ _SAFE_MFA_RECOVERY_COMMANDS = (
     "lighthouse auth verify <current-app-code>",
     "lighthouse auth verify ok",
 )
+_SAFE_BROWSER_NETWORK_ERRORS = frozenset({
+    "Could not run the local browser cookie helper.",
+    "The local browser cookie helper failed.",
+    "The local browser cookie helper returned invalid data.",
+    "No usable Lighthouse cookies were found in the browser.",
+})
+_SAFE_FIRST_PARTY_AUTH_PREFIXES = (
+    ("2fa verification timed out", "2FA verification timed out waiting for approval."),
+    ("d2l acs redirect limit exceeded", "D2L ACS redirect limit exceeded."),
+    ("d2l home redirect limit exceeded", "D2L home redirect limit exceeded."),
+    (
+        "microsoft session-pull requested an unsafe re-post target",
+        "Microsoft session-pull requested an unsafe re-POST target.",
+    ),
+    (
+        "2fa code required after verification was sent",
+        "2FA code required after verification was sent.",
+    ),
+    (
+        "a pre-provided --totp code is valid only for phoneappotp",
+        "A pre-provided --totp code is valid only for PhoneAppOTP.",
+    ),
+    ("pending mfa session is incomplete", "Pending MFA session is incomplete."),
+)
 
 
 def _safe_mfa_recovery(value: object) -> str | None:
@@ -139,6 +163,14 @@ def _safe_auth_category(text: str, code: str | None) -> str:
         )
     if lowered.startswith("browser session is missing required d2l cookies"):
         return "Browser session is missing required D2L cookies."
+    if lowered.startswith("the local browser cookie helper failed"):
+        return "The local browser cookie helper failed."
+    if lowered.startswith("could not run the local browser cookie helper"):
+        return "Could not run the local browser cookie helper."
+    if lowered.startswith("the local browser cookie helper returned invalid data"):
+        return "The local browser cookie helper returned invalid data."
+    if lowered.startswith("no usable lighthouse cookies"):
+        return "No usable Lighthouse cookies were found in the browser."
     if lowered.startswith("cdp port must be an integer"):
         return "CDP port must be an integer from 1 to 65535"
     if lowered.startswith("invalid mfa method"):
@@ -194,6 +226,12 @@ def _safe_auth_error_message(msg: object) -> str:
     if not isinstance(msg, str) or not msg:
         return _AUTH_ERROR_FALLBACK
     text = " ".join(msg.split())
+    if text in _SAFE_BROWSER_NETWORK_ERRORS:
+        return text
+    lowered = text.casefold()
+    for prefix, safe_message in _SAFE_FIRST_PARTY_AUTH_PREFIXES:
+        if lowered.startswith(prefix):
+            return safe_message
     if (
         not text
         or len(text) > 512
@@ -253,6 +291,14 @@ def _clean_auth_command(fn: Callable[..., int]) -> Callable[..., int]:
             # First-party errors: messages are authored to be actionable and
             # secret-free (key resolution, unsealing, sealing failures).
             return _auth_error(str(exc), json_output)
+        except NetworkError as exc:
+            message = str(exc)
+            safe_message = (
+                message
+                if message in _SAFE_BROWSER_NETWORK_ERRORS
+                else _safe_auth_error_message(message)
+            )
+            return _auth_error(safe_message, json_output)
         except Exception as exc:  # deliberate last-resort guard
             # Never forward raw third-party exception text — str(exc) may
             # embed URLs, tokens, or page content. Only the type is shown.
@@ -402,14 +448,15 @@ def plan_login(
 
     ``pending`` is the loaded MFA checkpoint (or None); callers load it only
     when a literal code is in play.  Resume requires the checkpoint's saved
-    method to match (auto matches anything) — an explicit method that differs
-    starts fresh rather than verifying a stale session.
+    method to match exactly. ``auto`` starts a fresh flow because a literal
+    value alone cannot prove whether the caller intends a saved SMS challenge,
+    an app TOTP, or a codeless approval.
     """
     if (
         pending is not None
         and totp_code is not None
         and not read_totp_after_challenge
-        and mfa_method in (MFA_METHOD_AUTO, pending.get("mfa_method"))
+        and mfa_method == pending.get("mfa_method")
     ):
         return LoginPlan("resume", totp_code, False, False)
     defer_mfa_to_pending = (
@@ -444,11 +491,16 @@ def _print_login_next_steps() -> None:
     print("  lighthouse assignments <course>")
     print("  lighthouse download <course> --dry-run")
     print("  lighthouse --help")
-    print("\nShow the full command guide? [Y/n]: ", end="", flush=True)
+    print(
+        "\nShow the full command guide? [Y/n]: ",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
         answer = input().strip().casefold()
     except (EOFError, KeyboardInterrupt, OSError):
-        print()
+        print(file=sys.stderr)
         return
     if answer in {"", "y", "yes"}:
         _print_command_guide()
@@ -767,7 +819,7 @@ def cmd_auth_login(
     if not password:
         return _auth_error("Password cannot be empty", json_output)
 
-    configured_mfa_method = mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD")
+    configured_mfa_method = mfa_method or os.getenv("LIGHTHOUSE_MFA_METHOD", "").strip()
     if configured_mfa_method:
         resolved_mfa_method = configured_mfa_method.lower()
     elif interactive and not json_output and totp_code is None and not totp_stdin:

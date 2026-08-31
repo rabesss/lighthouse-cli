@@ -1682,6 +1682,26 @@ class TestSsoReloadInterstitial:
         assert hostile not in str(exc.value)
         assert scripted.calls == [("POST", ACS_URL)]
 
+    def test_saml_path_relative_redirect_uses_response_url(
+        self, scripted: ScriptedSession
+    ) -> None:
+        next_url = f"{BASE}/d2l/lp/auth/saml/next"
+        scripted.enqueue(
+            FakeResponse(302, url=ACS_URL, headers={"Location": "next"}),
+            FakeResponse(200, url=next_url),
+        )
+        client = make_client(scripted)
+        try:
+            response = client._post_with_redirects(
+                ACS_URL,
+                data={"SAMLResponse": SAML_TOKEN},
+            )
+        finally:
+            client.close()
+
+        assert response.status_code == 200
+        assert scripted.calls == [("POST", ACS_URL), ("GET", next_url)]
+
     def test_explicit_default_https_port_is_same_origin(self) -> None:
         from lighthouse_cli.ms_auth import sso_reload_transition
 

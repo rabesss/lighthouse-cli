@@ -8,6 +8,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from lighthouse_cli import auth
+from lighthouse_cli.api import NetworkError
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES
 
@@ -97,3 +98,24 @@ def test_auth_refresh_missing_cookies_returns_json_without_persisting(
     assert "missing required D2L cookies" in payload["error"]
     assert "present" not in payload["error"]
     persist_mock.assert_not_called()
+
+
+def test_auth_refresh_preserves_safe_network_error_in_json(
+    monkeypatch, capsys
+) -> None:
+    class FakeStore:
+        def preflight(self) -> None:
+            return None
+
+    def fail_refresh(_port: int) -> dict[str, str]:
+        raise NetworkError("The local browser cookie helper failed.")
+
+    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
+    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
+    monkeypatch.setattr(auth, "refresh_auth_from_browser", fail_refresh)
+
+    rc = auth.cmd_auth_refresh(9222, json_output=True)
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "The local browser cookie helper failed."

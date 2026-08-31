@@ -14,7 +14,14 @@ from stat import S_ISREG
 from .api import LighthouseClient
 from .manifest import MANIFEST_FILENAME, Manifest, compute_sha256, normalize_sha256
 from .display import format_user_error, output_json as _output_json
-from .utils import _sanitize_filename, atomic_write, get_course_name, resolve_course_folder_name
+from .utils import (
+    MAX_ATOMIC_TARGET_NAME_BYTES,
+    _fit_filename,
+    _sanitize_filename,
+    atomic_write,
+    get_course_name,
+    resolve_course_folder_name,
+)
 
 
 def assignment_key(folder_id: int, file_id: int) -> str:
@@ -29,15 +36,18 @@ _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
 _MAX_COURSE_NAME_LENGTH = 256
 _MAX_FOLDER_NAME_LENGTH = 256
 _SECRET_SHAPED_COURSE_NAME_RE = re.compile(
-    r"(?i)(?:^|[^a-z0-9])(?:password|passwd|passphrase|secret|token|"
+    r"(?i)(?:^|[^a-z0-9])(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|"
+    r"secret|token(?:[\s_-]?value)?|"
     r"cookie|cookies|samlresponse|otp|totp|canary|authorization|bearer|"
-    r"session|api[\s_-]?key)(?:$|[^a-z0-9])"
+    r"(?:d2l(?:secure)?session(?:val|value|token)?|session(?:val|value|token))|"
+    r"api[\s_-]?key)(?:$|[^a-z0-9])"
 )
 _SECRET_SHAPED_FOLDER_NAME_RE = _SECRET_SHAPED_COURSE_NAME_RE
 _SECRET_SHAPED_FILENAME_RE = re.compile(
-    r"(?i)(?:^|[^a-z0-9])(?:password|passwd|passphrase|secret|token|"
+    r"(?i)(?:^|[^a-z0-9])(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|"
+    r"secret|token(?:[\s_-]?value)?|"
     r"cookie|cookies|samlresponse|otp|totp|canary|authorization|bearer|"
-    r"(?:d2l)?(?:secure)?session(?:val|value|token)?|"
+    r"(?:d2l(?:secure)?session(?:val|value|token)?|session(?:val|value|token))|"
     r"api[\s_-]?key|access[\s_-]?token)(?:$|[^a-z0-9])"
 )
 
@@ -97,7 +107,7 @@ def safe_assignment_folder_name(
         or _SECRET_SHAPED_FOLDER_NAME_RE.search(sanitized)
     ):
         return safe_fallback if fallback else ""
-    return sanitized
+    return _fit_filename(sanitized, max_bytes=255)
 
 
 def _safe_filename_suffix(value: str) -> str:
@@ -137,7 +147,10 @@ def safe_attachment_filename(
         if not fallback:
             return ""
         return safe_fallback + _safe_filename_suffix(sanitized)
-    return sanitized
+    return _fit_filename(
+        sanitized,
+        max_bytes=MAX_ATOMIC_TARGET_NAME_BYTES - 18,
+    )
 
 
 def disambiguate_filename(dest_dir: Path, filename: str) -> Path:

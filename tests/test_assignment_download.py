@@ -15,6 +15,8 @@ from lighthouse_cli.assignments import (
     _manifest_attachment_path,
     download_for_course,
     download_single_attachment,
+    safe_attachment_filename,
+    safe_assignment_folder_name,
     sync_for_course,
 )
 from lighthouse_cli.cli import cli
@@ -32,6 +34,30 @@ def temp_download_dir(tmp_path: Path) -> Path:
     d = tmp_path / "downloads"
     d.mkdir()
     return d
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["pass=TOPSECRET.pdf", "passwordValue=TOPSECRET.pdf", "tokenValue=TOPSECRET.pdf"],
+)
+def test_attachment_filename_rejects_secret_key_aliases(filename: str) -> None:
+    projected = safe_attachment_filename(filename, 7)
+
+    assert "TOPSECRET" not in projected
+    assert projected == "attachment_7.pdf"
+
+
+@pytest.mark.parametrize("filename", ["a" * 230 + ".pdf", "é" * 115 + ".pdf"])
+def test_attachment_filename_fits_atomic_temp_name_limit(filename: str) -> None:
+    projected = safe_attachment_filename(filename, 7)
+
+    assert len(projected.encode("utf-8")) <= 218
+    assert projected.endswith(".pdf")
+
+
+def test_session_words_are_not_treated_as_session_cookie_values() -> None:
+    assert safe_assignment_folder_name("Session 1 Intro", 7) == "Session 1 Intro"
+    assert safe_attachment_filename("session-notes.pdf", 7) == "session-notes.pdf"
 
 
 def test_manifest_attachment_path_rejects_normalized_traversal(tmp_path: Path) -> None:
