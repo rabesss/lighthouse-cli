@@ -13,6 +13,7 @@ from typing import Any
 
 from .api import LighthouseClient, SessionExpiredError, resolve_course_id
 from .assignments import (
+    _AssignmentDataError,
     folder_with_attachments,
     safe_assignment_folder_name,
     safe_attachment_filename,
@@ -897,12 +898,17 @@ def _show_course_assignments(
         folder_input["Id"] = folder_id
         try:
             f, attachment_items = folder_with_attachments(client, org_id, folder_input)
-        except Exception as e:
-            # A malformed folder/detail should not discard valid sibling
-            # assignments.  The API may return a partial list, so skip only
-            # the unusable folder and continue rendering the rest.
-            print(f"Warning: failed to fetch assignment details: {format_user_error(e)}", file=sys.stderr)
+        except _AssignmentDataError as e:
+            print(
+                f"Warning: skipped malformed assignment folder: {format_user_error(e)}",
+                file=sys.stderr,
+            )
             continue
+        except Exception as e:
+            # Required detail fetches are part of the assignment collection.
+            # Returning success after dropping one would make an incomplete
+            # response indistinguishable from a complete one to automation.
+            return _fetch_error_result(org_id, "assignments", json_output, e)
         if not isinstance(f, dict):
             print("Warning: skipped malformed assignment folder.", file=sys.stderr)
             continue

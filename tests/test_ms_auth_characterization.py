@@ -371,6 +371,27 @@ class TestPasswordFlow:
             run_login(scripted)
         assert ("GET", f"{BASE}/d2l/home") in scripted.calls
 
+    def test_home_redirects_resolve_against_response_url(
+        self,
+        scripted: ScriptedSession,
+        isolated_config: Path,
+    ) -> None:
+        nested_home = f"{BASE}/d2l/home/nested/"
+        expected_next = f"{nested_home}landing"
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=SAML_HTML, url=CREDS_POST_URL),
+            FakeResponse(200, html="<html>acs landing</html>", url=ACS_URL),
+            FakeResponse(302, url=nested_home, headers={"Location": "landing"}),
+            FakeResponse(200, html="<html>no cookies</html>", url=expected_next),
+        )
+
+        with pytest.raises(MicrosoftSSOError, match="cookies"):
+            run_login(scripted)
+
+        assert ("GET", expected_next) in scripted.calls
+
     def test_unexpected_response_error_carries_page_shape(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """The neither-MFA-nor-error-nor-SAML branch enriches its error with the
         sanitized page-shape summary (status/url/pgid/markers)."""

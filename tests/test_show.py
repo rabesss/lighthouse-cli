@@ -468,6 +468,23 @@ def test_assignments_deduplicates_folder_ids_first_record_wins() -> None:
     client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
 
 
+def test_assignment_detail_failure_returns_non_success_payload(capsys) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [
+        {"Id": 101, "Name": "Assignment"},
+    ]
+    client.get_dropbox_folder_detail.side_effect = RuntimeError("detail failed")
+
+    payload = show._show_course_assignments(client, 44347, True)
+
+    assert payload == {
+        "course_id": 44347,
+        "assignments": [],
+        "error": "Command failed.",
+    }
+    assert "failed to fetch assignments" in capsys.readouterr().err
+
+
 def test_assignments_allows_valid_duplicate_after_malformed_first_record(capsys) -> None:
     client = Mock(spec=LighthouseClient)
     client.get_dropbox_folders.return_value = [

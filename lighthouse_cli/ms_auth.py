@@ -2525,7 +2525,7 @@ class MicrosoftSSOClient:
             if not location:
                 break
             next_home = _trusted_url(
-                BASE_URL,
+                str(getattr(home_resp, "url", "") or home_url),
                 str(location),
                 _D2L_ALLOWED_HOSTS,
                 step="extract cookies",
