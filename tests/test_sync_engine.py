@@ -1257,6 +1257,61 @@ class TestAssignmentContract:
         folder = root / "Test-44347" / "Assignments" / "HW1"
         assert sorted(path.name for path in folder.iterdir()) == ["hw.pdf"]
 
+    def test_force_repairs_legacy_contested_assignment_path(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": []}},
+            names={ORG_ID: "Test"},
+            folders={ORG_ID: [{
+                "Id": 7,
+                "Name": "HW1",
+                "Attachments": [
+                    {"Id": 8, "FileName": "shared.pdf", "Size": 3, "Type": "File"},
+                    {"Id": 9, "FileName": "shared.pdf", "Size": 3, "Type": "File"},
+                ],
+            }]},
+            details={(ORG_ID, 7): {
+                "Id": 7,
+                "Name": "HW1",
+                "Attachments": [
+                    {"Id": 8, "FileName": "shared.pdf", "Size": 3, "Type": "File"},
+                    {"Id": 9, "FileName": "shared.pdf", "Size": 3, "Type": "File"},
+                ],
+            }},
+            attachments={
+                (ORG_ID, 8): (b"ONE", "shared.pdf"),
+                (ORG_ID, 9): (b"TWO", "shared.pdf"),
+            },
+        )
+        course_dir = root / "Test-44347"
+        contested = "Assignments/HW1/shared.pdf"
+        _seed_manifest(course_dir, {
+            "assignment_7_8": {
+                **_mentry(filename="shared.pdf", size=3),
+                "path": contested,
+            },
+            "assignment_7_9": {
+                **_mentry(filename="shared.pdf", size=3),
+                "path": contested,
+            },
+        })
+        _materialize(course_dir, contested, b"OLD")
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.FORCE,
+            include_assignments=True,
+        )
+
+        paths = [item["path"] for item in result["assignments"]["downloaded"]]
+        assert paths == [
+            "Assignments/HW1/shared.pdf",
+            "Assignments/HW1/shared_1.pdf",
+        ]
+        assert (course_dir / paths[0]).read_bytes() == b"ONE"
+        assert (course_dir / paths[1]).read_bytes() == b"TWO"
+
 
     @pytest.mark.parametrize(
         "filename",
