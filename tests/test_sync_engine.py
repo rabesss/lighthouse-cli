@@ -1048,6 +1048,34 @@ class TestDownloadModes:
         assert result["saved"] is False
         assert manifest_path.read_bytes() == before
 
+    def test_force_malformed_empty_toc_preserves_prior_manifest(self, root):
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": [{
+                "ModuleId": 1,
+                "Title": "Mod",
+                "Modules": [],
+                "Topics": [{
+                    "TopicId": "invalid",
+                    "Title": "file.pdf",
+                    "TypeIdentifier": "File",
+                    "Url": "",
+                    "LastModifiedDate": LM_NEW,
+                }],
+            }]}},
+            names={ORG_ID: "Test"},
+        )
+        manifest_path = _seed_manifest(
+            root / "Test-44347",
+            {"101": _mentry(filename="file.pdf")},
+        )
+        before = manifest_path.read_bytes()
+
+        result = run_course(client, ORG_ID, root, mode=Mode.FORCE)
+
+        assert result["errors"]
+        assert result["saved"] is False
+        assert manifest_path.read_bytes() == before
+
 
 # ---------------------------------------------------------------------------
 # PLAN mode (--dry-run): zero writes, zero body fetches
@@ -1275,7 +1303,7 @@ class TestAssignmentContract:
         folder = root / "Test-44347" / "Assignments" / "HW1"
         assert sorted(path.name for path in folder.iterdir()) == ["hw.pdf"]
 
-    @pytest.mark.parametrize("mode", [Mode.DOWNLOAD, Mode.FORCE])
+    @pytest.mark.parametrize("mode", [Mode.DOWNLOAD, Mode.FORCE, Mode.SYNC])
     def test_download_repairs_legacy_contested_assignment_path(self, root, mode):
         client = FakeClient(
             tocs={ORG_ID: {"Modules": []}},
@@ -1323,7 +1351,8 @@ class TestAssignmentContract:
             include_assignments=True,
         )
 
-        paths = [item["path"] for item in result["assignments"]["downloaded"]]
+        result_key = "updated" if mode is Mode.SYNC else "downloaded"
+        paths = [item["path"] for item in result["assignments"][result_key]]
         assert paths == [
             "Assignments/HW1/shared.pdf",
             "Assignments/HW1/shared_1.pdf",

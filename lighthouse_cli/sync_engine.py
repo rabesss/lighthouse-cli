@@ -807,7 +807,7 @@ def run_course(
                 if isinstance(entry, dict)
             ]
             result["manifest_total"] = len(manifest)
-        elif force_manifest_exists:
+        elif force_manifest_exists and not result["errors"]:
             manifest.save(manifest_path)
             result["saved"] = True
         return result

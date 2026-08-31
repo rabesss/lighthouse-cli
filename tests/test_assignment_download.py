@@ -66,6 +66,51 @@ def test_session_words_are_not_treated_as_session_cookie_values() -> None:
     assert safe_attachment_filename("session-notes.pdf", 7) == "session-notes.pdf"
 
 
+def test_single_attachment_disambiguates_contested_legacy_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = Mock(spec=LighthouseClient)
+    client.get_enrolled_courses.return_value = [
+        {"OrgUnitId": 44347, "Name": "Course"},
+    ]
+    client.get_dropbox_folder_detail.return_value = {
+        "Id": 7,
+        "Name": "HW1",
+        "Attachments": [
+            {"Id": 8, "FileName": "shared.pdf", "Size": 3, "Type": "File"},
+        ],
+    }
+    client.download_attachment.return_value = (b"NEW", "shared.pdf")
+    course_dir = tmp_path / "Course-44347"
+    shared_path = course_dir / "Assignments" / "HW1" / "shared.pdf"
+    shared_path.parent.mkdir(parents=True)
+    shared_path.write_bytes(b"OLD")
+    entry = {
+        "sha256": compute_sha256(b"OLD"),
+        "filename": "shared.pdf",
+        "size": 3,
+        "downloaded_at": "2026-01-01T00:00:00Z",
+        "last_modified": "",
+        "path": "Assignments/HW1/shared.pdf",
+    }
+    Manifest({
+        "assignment_7_8": dict(entry),
+        "assignment_7_9": dict(entry),
+    }).save(course_dir / MANIFEST_FILENAME)
+
+    rc = download_single_attachment(client, 44347, 7, 8, tmp_path, True)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert Path(payload["path"]).name == "shared_1.pdf"
+    assert shared_path.read_bytes() == b"OLD"
+    assert (shared_path.parent / "shared_1.pdf").read_bytes() == b"NEW"
+    manifest = Manifest.load(course_dir / MANIFEST_FILENAME)
+    assert manifest.get("assignment_7_8")["path"].endswith("shared_1.pdf")
+    assert manifest.get("assignment_7_9")["path"].endswith("shared.pdf")
+
+
 def test_manifest_attachment_path_rejects_normalized_traversal(tmp_path: Path) -> None:
     """A recorded attachment path cannot escape the Assignments subtree."""
     course_dir = tmp_path / "course"

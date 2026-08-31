@@ -392,6 +392,63 @@ def _matching_local_attachment(
     return candidate if actual_hash == expected_hash else None
 
 
+def _assignment_path_owners(dest: Path, manifest: Manifest) -> dict[Path, str | None]:
+    """Return validated manifest path owners, marking legacy aliases contested."""
+    owners: dict[Path, str | None] = {}
+    for manifest_key, manifest_entry in manifest.entries.items():
+        key = str(manifest_key)
+        if not key.startswith("assignment_") or not isinstance(manifest_entry, dict):
+            continue
+        prior_path = _manifest_attachment_path(dest, manifest_entry)
+        if prior_path is None:
+            continue
+        absolute_path = prior_path.absolute()
+        owner = owners.get(absolute_path)
+        if absolute_path in owners and owner != key:
+            owners[absolute_path] = None
+        else:
+            owners[absolute_path] = key
+    return owners
+
+
+def _claim_assignment_entry(
+    dest: Path,
+    manifest: Manifest,
+    att_key: str,
+    folder: dict,
+    owners: dict[Path, str | None],
+    claimed_paths: set[Path],
+    *,
+    allow_contested_claim: bool,
+) -> dict | None:
+    """Claim one safe prior path without letting manifest aliases overwrite."""
+    entry = manifest.get(att_key)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        prior_path = _manifest_attachment_path(
+            dest,
+            entry,
+            expected_parent=_assignment_dir(dest, folder),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if prior_path is None:
+        return None
+    path_key = prior_path.absolute()
+    owner = owners.get(path_key)
+    can_claim = owner == att_key or (
+        allow_contested_claim
+        and path_key in owners
+        and owner is None
+        and path_key not in claimed_paths
+    )
+    if not can_claim:
+        return None
+    claimed_paths.add(path_key)
+    return entry
+
+
 def _download_and_record(
     client: LighthouseClient,
     org_id: int,
@@ -486,7 +543,25 @@ def download_single_attachment(
         dest = _course_boundary(dest)
         manifest_path = dest / MANIFEST_FILENAME
         manifest = Manifest.load(manifest_path)
-        entry = _download_and_record(client, org_id, folder_detail, attachment_id, dest, manifest)
+        att_key = assignment_key(folder_id, attachment_id)
+        existing = _claim_assignment_entry(
+            dest,
+            manifest,
+            att_key,
+            folder_detail,
+            _assignment_path_owners(dest, manifest),
+            set(),
+            allow_contested_claim=False,
+        )
+        entry = _download_and_record(
+            client,
+            org_id,
+            folder_detail,
+            attachment_id,
+            dest,
+            manifest,
+            existing_entry=existing,
+        )
         manifest.save(manifest_path)
     except _AssignmentDataError as e:
         return _attachment_error(e, json_output, error_type="assignment_data")
@@ -557,19 +632,7 @@ def download_for_course(
     matched_ids: set[int] = set()
     seen_folder_ids: set[int] = set()
     ownership_manifest = path_manifest if path_manifest is not None else manifest
-    prior_path_owners: dict[Path, str | None] = {}
-    for prior_key, prior_entry in ownership_manifest.entries.items():
-        if not str(prior_key).startswith("assignment_") or not isinstance(prior_entry, dict):
-            continue
-        prior_path = _manifest_attachment_path(dest, prior_entry)
-        if prior_path is None:
-            continue
-        absolute_path = prior_path.absolute()
-        owner = prior_path_owners.get(absolute_path)
-        if absolute_path in prior_path_owners and owner != str(prior_key):
-            prior_path_owners[absolute_path] = None
-        else:
-            prior_path_owners[absolute_path] = str(prior_key)
+    prior_path_owners = _assignment_path_owners(dest, ownership_manifest)
     claimed_prior_paths: set[Path] = set()
 
     for folder in folders:
@@ -631,39 +694,15 @@ def download_for_course(
                 continue
 
             att_key = assignment_key(folder_id, att_id)
-            prior_entry = ownership_manifest.get(att_key)
-            try:
-                expected_parent = _assignment_dir(dest, folder)
-                prior_path = (
-                    _manifest_attachment_path(
-                        dest,
-                        prior_entry,
-                        expected_parent=expected_parent,
-                    )
-                    if isinstance(prior_entry, dict)
-                    else None
-                )
-            except (OSError, RuntimeError, ValueError):
-                prior_path = None
-            prior_path_key = prior_path.absolute() if prior_path is not None else None
-            prior_owner = (
-                prior_path_owners.get(prior_path_key)
-                if prior_path_key is not None
-                else None
+            existing = _claim_assignment_entry(
+                dest,
+                ownership_manifest,
+                att_key,
+                folder,
+                prior_path_owners,
+                claimed_prior_paths,
+                allow_contested_claim=True,
             )
-            may_claim_prior_path = (
-                prior_path_key is not None
-                and (
-                    prior_owner == att_key
-                    or (
-                        prior_owner is None
-                        and prior_path_key not in claimed_prior_paths
-                    )
-                )
-            )
-            existing = prior_entry if may_claim_prior_path else None
-            if prior_path_key is not None and may_claim_prior_path:
-                claimed_prior_paths.add(prior_path_key)
             if _matching_local_attachment(
                 dest,
                 existing,
@@ -726,6 +765,8 @@ def sync_for_course(
         return [], [], [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]
     folders = all_folders
     seen_folder_ids: set[int] = set()
+    prior_path_owners = _assignment_path_owners(dest, manifest)
+    claimed_prior_paths: set[Path] = set()
     for folder in folders:
         if not isinstance(folder, dict):
             errors.append({"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"})
@@ -782,7 +823,16 @@ def sync_for_course(
                 continue
 
             att_key = assignment_key(folder_id, att_id)
-            existing = manifest.get(att_key)
+            manifest_entry = manifest.get(att_key)
+            existing = _claim_assignment_entry(
+                dest,
+                manifest,
+                att_key,
+                folder,
+                prior_path_owners,
+                claimed_prior_paths,
+                allow_contested_claim=True,
+            )
 
             matched_path = _matching_local_attachment(
                 dest,
@@ -801,10 +851,24 @@ def sync_for_course(
                     )
                     skipped_entries.append(skipped_entry)
                     continue
-            target_list = updated_entries if isinstance(existing, dict) else downloaded_entries
+            target_list = (
+                updated_entries
+                if isinstance(manifest_entry, dict)
+                else downloaded_entries
+            )
 
             try:
-                target_list.append(_download_and_record(client, org_id, folder, att_id, dest, manifest))
+                target_list.append(
+                    _download_and_record(
+                        client,
+                        org_id,
+                        folder,
+                        att_id,
+                        dest,
+                        manifest,
+                        existing_entry=existing,
+                    )
+                )
             except _AssignmentDataError as e:
                 errors.append({
                     "folder_id": folder_id,
