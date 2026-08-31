@@ -64,6 +64,8 @@ def test_attachment_filename_fits_atomic_temp_name_limit(filename: str) -> None:
 def test_session_words_are_not_treated_as_session_cookie_values() -> None:
     assert safe_assignment_folder_name("Session 1 Intro", 7) == "Session 1 Intro"
     assert safe_attachment_filename("session-notes.pdf", 7) == "session-notes.pdf"
+    assert safe_assignment_folder_name("Pass Fail Grading", 7) == "Pass Fail Grading"
+    assert safe_attachment_filename("Pass Criteria.pdf", 7) == "Pass Criteria.pdf"
 
 
 def test_single_attachment_disambiguates_contested_legacy_path(

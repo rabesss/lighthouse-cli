@@ -40,25 +40,20 @@ _INVALID_IDENTIFIER = "Assignment record has an invalid identifier."
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
 _MAX_COURSE_NAME_LENGTH = 256
 _MAX_FOLDER_NAME_LENGTH = 256
-_SECRET_SHAPED_COURSE_NAME_RE = re.compile(
-    r"(?i)(?:^|[^a-z0-9])(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|"
-    r"secret|token(?:[\s_-]?value)?|"
-    r"cookie|cookies|samlresponse|otp|totp|canary|authorization|bearer|"
+_SECRET_KEY_PATTERN = (
+    r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
+    r"token(?:[\s_-]?value)?|cookie(?:s|value)?|samlresponse|otp|totp|"
+    r"canary|authorization|bearer|"
     r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
-    r"s?ctx|sft|"
-    r"(?:d2l(?:secure)?session(?:val|value|token)?|session(?:val|value|token))|"
-    r"api[\s_-]?key)(?:$|[^a-z0-9])"
+    r"s?ctx|sft|d2l(?:secure)?session(?:val|value|token)?|"
+    r"session(?:val|value|token)|api[\s_-]?key|access[\s_-]?token"
+)
+_SECRET_SHAPED_COURSE_NAME_RE = re.compile(
+    rf"(?ix)(?:^|[^a-z0-9])(?:{_SECRET_KEY_PATTERN})"
+    r"\s*(?::|=|\bis\b|\bwas\b)\s*[^\s,;]+"
 )
 _SECRET_SHAPED_FOLDER_NAME_RE = _SECRET_SHAPED_COURSE_NAME_RE
-_SECRET_SHAPED_FILENAME_RE = re.compile(
-    r"(?i)(?:^|[^a-z0-9])(?:pass(?:word|wd|phrase)?(?:[\s_-]?value)?|"
-    r"secret|token(?:[\s_-]?value)?|"
-    r"cookie|cookies|samlresponse|otp|totp|canary|authorization|bearer|"
-    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
-    r"s?ctx|sft|"
-    r"(?:d2l(?:secure)?session(?:val|value|token)?|session(?:val|value|token))|"
-    r"api[\s_-]?key|access[\s_-]?token)(?:$|[^a-z0-9])"
-)
+_SECRET_SHAPED_FILENAME_RE = _SECRET_SHAPED_COURSE_NAME_RE
 
 
 class _AssignmentDataError(ValueError):
@@ -210,7 +205,7 @@ def _course_boundary(dest: Path) -> Path:
     for component in absolute.parts[1:]:
         current /= component
         if current.is_symlink():
-            raise ValueError(f"Course path contains a symlinked component: {current}")
+            raise ValueError("Course path contains a symlinked component")
     return absolute
 
 

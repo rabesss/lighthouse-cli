@@ -411,7 +411,7 @@ def test_removed_password_flag_never_echoes_its_value(
         ["--user", "user@manipal.edu", "--pass", sentinel, *json_args],
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == (1 if json_args else 2)
     assert sentinel not in result.stdout + result.stderr
     assert "Invalid command arguments" in result.output
 

@@ -200,7 +200,7 @@ def _course_boundary(dest: Path) -> Path:
     for component in absolute.parts[1:]:
         current /= component
         if current.is_symlink():
-            raise ValueError(f"Course path contains a symlinked component: {current}")
+            raise ValueError("Course path contains a symlinked component")
     return absolute
 
 
@@ -236,22 +236,22 @@ def validate_output_root(root: Path) -> Path:
     """
     try:
         candidate = Path(root).expanduser().absolute()
-    except (TypeError, ValueError, OSError) as exc:
-        raise ValueError("Unable to validate output directory") from exc
+    except (TypeError, ValueError, OSError):
+        raise ValueError("Unable to validate output directory") from None
     current = Path(candidate.anchor)
     for component in candidate.parts[1:]:
         current /= component
         try:
             if current.is_symlink():
                 raise ValueError("Output directory contains a symlinked path")
-        except OSError as exc:
-            raise ValueError("Unable to validate output directory") from exc
+        except OSError:
+            raise ValueError("Unable to validate output directory") from None
     if candidate.exists() and not candidate.is_dir():
         raise ValueError("Output directory is not a directory")
     try:
         return candidate.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError("Unable to validate output directory") from exc
+    except (OSError, RuntimeError):
+        raise ValueError("Unable to validate output directory") from None
 
 
 def _topic_directory(
@@ -271,12 +271,28 @@ def _topic_directory(
     course_root = _course_boundary(dest)
     try:
         topic_path = Path(raw_path)
-    except (TypeError, ValueError, OSError) as exc:
-        raise ValueError(f"Invalid topic path: {raw_path!r}") from exc
+    except (TypeError, ValueError, OSError):
+        raise ValueError("Invalid topic path") from None
 
     file_dest = topic_path.parent
     if not file_dest.is_absolute():
         file_dest = course_root / file_dest
+
+    try:
+        relative_dest = file_dest.absolute().relative_to(course_root)
+    except ValueError:
+        relative_dest = None
+    if (
+        relative_dest is not None
+        and relative_dest.parts
+        and relative_dest.parts[0].casefold() == "assignments"
+    ):
+        file_dest = course_root / "_Content" / relative_dest
+        if warnings is not None:
+            warnings.append(
+                "Topic path overlapped the reserved Assignments directory; "
+                "moved under _Content."
+            )
 
     if _has_symlink_component(file_dest, course_root):
         raise ValueError("Topic path contains a symlinked course directory")
@@ -287,8 +303,8 @@ def _topic_directory(
     try:
         lexical_inside = file_dest.absolute().is_relative_to(course_root)
         resolved = file_dest.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError("Unable to validate topic path") from exc
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError("Unable to validate topic path") from None
     if not lexical_inside or not resolved.is_relative_to(course_root):
         if warnings is not None:
             warnings.append(
@@ -304,17 +320,17 @@ def _validate_course_destination(output_root: Path, dest: Path) -> None:
     try:
         root_resolved = output_root.resolve(strict=False)
         dest_resolved = dest.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"Unable to validate course destination: {dest}") from exc
+    except (OSError, RuntimeError):
+        raise ValueError("Unable to validate course destination") from None
     if not dest_resolved.is_relative_to(root_resolved):
-        raise ValueError(f"Course destination escapes the output root: {dest}")
+        raise ValueError("Course destination escapes the output root")
     if dest.is_symlink() or _has_symlink_component(dest, output_root):
-        raise ValueError(f"Course destination is a symlink: {dest}")
+        raise ValueError("Course destination is a symlink")
     if dest.exists() and not dest.is_dir():
-        raise ValueError(f"Course destination is not a directory: {dest}")
+        raise ValueError("Course destination is not a directory")
     manifest_path = dest / MANIFEST_FILENAME
     if _has_symlink_component(manifest_path, output_root):
-        raise ValueError(f"Course manifest is a symlinked path: {manifest_path}")
+        raise ValueError("Course manifest is a symlinked path")
 
 
 def build_entry(tid: str, name: str, path: str, content_or_entry: bytes | dict, sha: str = "") -> dict:
@@ -392,8 +408,8 @@ def download_and_persist_topic(
     sanitized_name = filepath.name
     try:
         filepath_resolved = filepath.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError("Unable to validate topic file path") from exc
+    except (OSError, RuntimeError):
+        raise ValueError("Unable to validate topic file path") from None
     if not filepath.absolute().is_relative_to(course_root) or not filepath_resolved.is_relative_to(course_root):
         raise ValueError("Topic file path escapes the course root")
     atomic_write(filepath, content, mode=0o600)
@@ -753,7 +769,20 @@ def run_course(
 
     dest = output_root / resolve_course_folder_name(course_name, org_id)
     manifest_path = dest / MANIFEST_FILENAME
-    result["dest"], result["manifest_path"] = dest, manifest_path
+    safe_dest = safe_display_text(
+        str(dest),
+        "Output directory",
+        max_len=4096,
+    )
+    safe_manifest_path = safe_display_text(
+        str(manifest_path),
+        "Manifest",
+        max_len=4096,
+    )
+    result["dest"], result["manifest_path"] = (
+        Path(safe_dest),
+        Path(safe_manifest_path),
+    )
 
     try:
         _validate_course_destination(output_root, dest)

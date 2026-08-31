@@ -43,8 +43,9 @@ class JsonOutputCommand(click.Command):
     normally useful, but it means a callback cannot honour ``--json`` when a
     required argument is missing or an option has an invalid value.  This
     small command class handles that one boundary: it emits a generic JSON
-    object to stdout, then raises a sanitized UsageError so Click keeps its
-    normal usage text and exit code (2) without echoing invalid values.
+    object to stdout, then raises a sanitized UsageError without echoing
+    invalid values. JSON usage failures use the repository's error code 1;
+    human-only usage failures keep Click's conventional code 2.
     """
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
@@ -56,8 +57,11 @@ class JsonOutputCommand(click.Command):
                 output_json({"error": JSON_USAGE_ERROR})
             # Click's original UsageError includes the invalid value. Replace
             # it before rendering so a pasted password, token, or URL cannot
-            # reach stderr. Keep the command usage and exit code intact.
-            raise click.UsageError(JSON_USAGE_ERROR, ctx=ctx) from None
+            # reach stderr.
+            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
+            if requested_json:
+                safe_error.exit_code = 1
+            raise safe_error from None
 
 
 # ---------------------------------------------------------------------------

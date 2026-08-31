@@ -470,7 +470,7 @@ def test_quiz_json_failure_has_one_command_shaped_document() -> None:
 def test_json_usage_error_is_parseable_but_human_usage_stays_on_stderr() -> None:
     result = CliRunner().invoke(cli, ["content", "--json"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == 1
     assert json.loads(result.stdout) == {
         "error": "Invalid command arguments. See --help."
     }
@@ -485,7 +485,7 @@ def test_json_usage_error_is_parseable_but_human_usage_stays_on_stderr() -> None
 def test_json_usage_errors_cover_nested_leaf_commands() -> None:
     result = CliRunner().invoke(cli, ["auth", "verify", "--json"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]
     assert "Invalid command arguments. See --help." in result.stderr
 
@@ -505,7 +505,7 @@ def test_json_usage_errors_never_echo_invalid_secret_like_values(
 
     result = CliRunner().invoke(cli, argv)
 
-    assert result.exit_code == 2
+    assert result.exit_code == 1
     assert json.loads(result.stdout) == {
         "error": "Invalid command arguments. See --help."
     }

@@ -1287,6 +1287,63 @@ class TestAssignmentContract:
         assert "100" in on_disk and "assignment_7_8" in on_disk
         assert result["assignments"]["downloaded"][0]["file_id"] == 8
 
+    def test_topics_cannot_claim_reserved_assignments_subtree(self, root):
+        toc = {
+            "Modules": [{
+                "ModuleId": 1,
+                "Title": "Assignments",
+                "Topics": [],
+                "Modules": [{
+                    "ModuleId": 2,
+                    "Title": "HW1",
+                    "Modules": [],
+                    "Topics": [{
+                        "TopicId": 500,
+                        "Title": "hw.pdf",
+                        "TypeIdentifier": "File",
+                        "Url": "",
+                        "LastModifiedDate": LM_NEW,
+                    }],
+                }],
+            }],
+        }
+        client = FakeClient(
+            tocs={ORG_ID: toc},
+            names={ORG_ID: "Test"},
+            files={500: (b"TOPIC", "hw.pdf")},
+            folders={ORG_ID: [{
+                "Id": 7,
+                "Name": "HW1",
+                "Attachments": [
+                    {"Id": 8, "FileName": "hw.pdf", "Size": 4, "Type": "File"},
+                ],
+            }]},
+            details={(ORG_ID, 7): {
+                "Id": 7,
+                "Name": "HW1",
+                "Attachments": [
+                    {"Id": 8, "FileName": "hw.pdf", "Size": 4, "Type": "File"},
+                ],
+            }},
+            attachments={(ORG_ID, 8): (b"ATT!", "hw.pdf")},
+        )
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.SYNC,
+            include_assignments=True,
+        )
+
+        course_dir = root / "Test-44347"
+        topic_path = course_dir / result["downloaded"][0]["path"]
+        assignment_path = course_dir / result["assignments"]["downloaded"][0]["path"]
+        assert topic_path != assignment_path
+        assert topic_path.read_bytes() == b"TOPIC"
+        assert assignment_path.read_bytes() == b"ATT!"
+        assert topic_path.relative_to(course_dir).parts[0] == "_Content"
+
     def test_repeated_force_reuses_assignment_path(self, root):
         client = self._client_with_assignments()
 
@@ -2063,6 +2120,24 @@ class TestPathContainment:
         )
         assert client.body_calls() == []
         assert list(outside.rglob("*")) == []
+
+    def test_course_destination_error_never_embeds_selected_path(self, tmp_path):
+        sentinel = "password=OUTPUT_PATH_SECRET"
+        root = tmp_path / sentinel
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "Test-44347").symlink_to(outside, target_is_directory=True)
+        client = FakeClient(
+            tocs={ORG_ID: _toc((100, "f.pdf", "File", LM_NEW))},
+            names={ORG_ID: "Test"},
+            files={100: (b"content", "f.pdf")},
+        )
+
+        result = run_course(client, ORG_ID, root, mode=Mode.SYNC)
+
+        assert result["errors"]
+        assert "OUTPUT_PATH_SECRET" not in json.dumps(result, default=str)
 
     def test_symlinked_topic_directory_is_rejected(self, root, tmp_path):
         course_dir = root / "Test-44347"

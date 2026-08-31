@@ -526,7 +526,7 @@ class TestDownloadAssignmentValidation:
                 ],
             )
 
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == 1, result.output
         assert json.loads(result.stdout)["error"]
         client_cls.assert_not_called()
         attachment.assert_not_called()
