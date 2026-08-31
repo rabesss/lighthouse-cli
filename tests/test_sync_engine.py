@@ -1275,7 +1275,8 @@ class TestAssignmentContract:
         folder = root / "Test-44347" / "Assignments" / "HW1"
         assert sorted(path.name for path in folder.iterdir()) == ["hw.pdf"]
 
-    def test_force_repairs_legacy_contested_assignment_path(self, root):
+    @pytest.mark.parametrize("mode", [Mode.DOWNLOAD, Mode.FORCE])
+    def test_download_repairs_legacy_contested_assignment_path(self, root, mode):
         client = FakeClient(
             tocs={ORG_ID: {"Modules": []}},
             names={ORG_ID: "Test"},
@@ -1318,7 +1319,7 @@ class TestAssignmentContract:
             client,
             ORG_ID,
             root,
-            mode=Mode.FORCE,
+            mode=mode,
             include_assignments=True,
         )
 

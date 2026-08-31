@@ -65,6 +65,9 @@ class _AssignmentDataError(ValueError):
     """Raised when a folder detail cannot be trusted as the listed folder."""
 
 
+_USE_MANIFEST_ENTRY = object()
+
+
 def _positive_int(value: object) -> int | None:
     """Return a strictly positive integer identifier, or ``None``.
 
@@ -397,7 +400,7 @@ def _download_and_record(
     dest: Path,
     manifest: Manifest,
     *,
-    existing_entry: dict | None = None,
+    existing_entry: dict | None | object = _USE_MANIFEST_ENTRY,
 ) -> dict:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
     folder_id = _positive_int(folder.get("Id"))
@@ -405,7 +408,10 @@ def _download_and_record(
     if folder_id is None or att_id is None:
         raise ValueError(_INVALID_IDENTIFIER)
     att_key = assignment_key(folder_id, att_id)
-    existing = existing_entry if isinstance(existing_entry, dict) else manifest.get(att_key)
+    if existing_entry is _USE_MANIFEST_ENTRY:
+        existing = manifest.get(att_key)
+    else:
+        existing = existing_entry if isinstance(existing_entry, dict) else None
     course_root = _course_boundary(dest)
     assignments_dir = _assignment_dir(course_root, folder)
     content, filename = client.download_attachment(org_id, folder_id, att_id)
