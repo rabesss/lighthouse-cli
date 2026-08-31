@@ -221,6 +221,15 @@ class TestManifestSchema:
         assert "MANIFEST_SECRET_SENTINEL" not in str(exc_info.value)
         assert "SAMLResponse" not in str(exc_info.value)
 
+    def test_manifest_load_wraps_invalid_utf8(self, manifest_path: Path) -> None:
+        manifest_path.write_bytes(b"\xff")
+
+        with pytest.raises(
+            ManifestCorruptError,
+            match="corrupt or unreadable",
+        ):
+            Manifest.load(manifest_path)
+
     def test_normalize_sha256_rejects_arbitrary_hash_text(self):
         assert normalize_sha256("not-a-digest") == ""
         assert normalize_sha256("a" * 64) == "a" * 64

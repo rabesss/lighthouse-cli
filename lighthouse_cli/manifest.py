@@ -140,7 +140,7 @@ class Manifest:
 
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeError):
             raise ManifestCorruptError("Manifest is corrupt or unreadable.") from None
 
         if not isinstance(data, dict):
