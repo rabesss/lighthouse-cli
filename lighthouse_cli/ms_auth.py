@@ -1988,6 +1988,7 @@ class MicrosoftSSOClient:
             original_config,
             totp_code,
             mfa_config=mfa_config,
+            mfa_method=mfa_method,
         )
 
     def _step_handle_mfa_converged(
@@ -2339,11 +2340,12 @@ class MicrosoftSSOClient:
         totp_code: str | None,
         *,
         mfa_config: dict[str, Any],
+        mfa_method: str,
     ) -> ResponseSnapshot:
         """Legacy MFA form POST (older Microsoft pages without arrUserProofs)."""
         import getpass as _getpass
 
-        if totp_code is not None:
+        if totp_code is not None and mfa_method != MFA_METHOD_APP:
             raise MicrosoftSSOError(
                 "A pre-provided --totp code cannot be validated for a legacy MFA form.",
                 step="MFA",

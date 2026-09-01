@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -616,9 +615,13 @@ class TestFullLoginFlow:
         ]
         mock_session.post = MagicMock(side_effect=post_responses)
 
-        with patch("requests.Session", return_value=mock_session), \
-                patch("sys.stdin", io.StringIO("123456\n")):
-            cookies = client.login("test@manipal.edu", "password123", None)
+        with patch("requests.Session", return_value=mock_session):
+            cookies = client.login(
+                "test@manipal.edu",
+                "password123",
+                "123456",
+                mfa_method=MFA_METHOD_APP,
+            )
 
         assert len(cookies) == 4
         for name in COOKIE_NAMES:
@@ -670,10 +673,14 @@ class TestFullLoginFlow:
         ])
 
         # _step_handle_mfa will detect MFA page and raise error
-        with patch("requests.Session", return_value=mock_session), \
-                patch("sys.stdin", io.StringIO("000000\n")):
+        with patch("requests.Session", return_value=mock_session):
             with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
-                client.login("test@manipal.edu", "password123", None)
+                client.login(
+                    "test@manipal.edu",
+                    "password123",
+                    "000000",
+                    mfa_method=MFA_METHOD_APP,
+                )
         client.close()
 
     def test_login_without_mfa(self) -> None:

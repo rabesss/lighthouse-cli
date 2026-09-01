@@ -9,7 +9,6 @@ repr'd, or asserted by value (key-presence assertions only).
 
 from __future__ import annotations
 
-import io
 import json
 import sys
 from pathlib import Path
@@ -695,8 +694,11 @@ class TestConvergedMfa:
         )
         set_d2l_cookies(scripted)
 
-        with patch("sys.stdin", io.StringIO(f"{TOTP_CODE}\n")):
-            cookies = run_login(scripted, totp_code=None)
+        cookies = run_login(
+            scripted,
+            totp_code=TOTP_CODE,
+            mfa_method="app",
+        )
 
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("POST", PROCESS_URL) in scripted.calls
