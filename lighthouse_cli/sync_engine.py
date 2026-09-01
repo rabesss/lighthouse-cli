@@ -102,6 +102,7 @@ _OUTPUT_PATH_CONTEXT_VALUE_RE = re.compile(
     r"(?x)(?<![a-z0-9])(?i:ctx|cookies?)\b\s+"
     r"(?:(?i:value|token|secret|sentinel)\b|"
     r"[a-z0-9._-]*[a-z_][a-z0-9._-]*\d[a-z0-9._-]*|"
+    r"[a-z][a-z0-9._-]{7,}|"
     r"(?=[A-Z0-9_-]*[A-Z_])[A-Z0-9_-]{2,}|"
     r"(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z_])"
     r"[A-Za-z0-9_-]{3,})"
@@ -114,6 +115,9 @@ _OUTPUT_PATH_SESSION_VALUE_RE = re.compile(
     r"(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z_])"
     r"[A-Za-z0-9_-]{3,})"
     r"(?![a-z0-9])"
+)
+_OUTPUT_PATH_LOWERCASE_SESSION_VALUE_RE = re.compile(
+    r"(?x)(?<![a-z0-9])session\b\s+[a-z][a-z0-9._-]{7,}(?![a-z0-9])"
 )
 
 
@@ -279,7 +283,7 @@ def safe_output_path_text(value: object) -> str | None:
         return None
     if not candidate or len(candidate) > 4096:
         return None
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in candidate):
+    if not candidate.isprintable():
         return None
     decoded = candidate
     for _ in range(4):
@@ -295,6 +299,7 @@ def safe_output_path_text(value: object) -> str | None:
             _OUTPUT_PATH_SENSITIVE_KEY_RE,
             _OUTPUT_PATH_CONTEXT_VALUE_RE,
             _OUTPUT_PATH_SESSION_VALUE_RE,
+            _OUTPUT_PATH_LOWERCASE_SESSION_VALUE_RE,
         )
     ):
         return None
