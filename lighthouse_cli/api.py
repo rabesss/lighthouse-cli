@@ -311,6 +311,53 @@ def _session_expired_msg(detail: str = "") -> str:
     return f"Session expired{' (' + detail + ')' if detail else ''}. Run: lighthouse auth login"
 
 
+def _submission_response_result(
+    resp: requests.Response,
+    *,
+    org_unit_id: int,
+    folder_id: int,
+) -> dict[str, Any]:
+    """Validate one submission response without leaking its body or URL."""
+    if resp.status_code in (301, 302, 303, 307, 308):
+        location = str(resp.headers.get("Location", "")).casefold()
+        if "login" in location or "auth" in location:
+            raise SessionExpiredError(
+                _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
+                recovery=_SESSION_EXPIRED_RECOVERY,
+            )
+        raise NetworkError("The server returned an unexpected redirect.")
+    if resp.status_code == 403:
+        raise PermissionError(
+            f"Permission denied to submit to folder {folder_id}. "
+            "Check your enrollment and submission rights."
+        )
+    if resp.status_code == 404:
+        raise FileNotFoundError(
+            f"Dropbox folder {folder_id} or course {org_unit_id} not found. "
+            "Run: lighthouse assignments"
+        )
+    if resp.status_code == 429:
+        raise NetworkError("Submission request was rate limited; no retry was attempted.")
+    if resp.status_code == 500:
+        raise ValueError(
+            "D2L API error (500): the remote server rejected the submission. "
+            "This may indicate malformed request body or submission window restrictions."
+        )
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        raise _safe_http_error(resp) from None
+    except Exception:
+        raise NetworkError("Network response validation failed.") from None
+    try:
+        result = resp.json()
+    except (TypeError, ValueError):
+        raise SubmissionOutcomeUnknownError() from None
+    if not isinstance(result, dict):
+        raise SubmissionOutcomeUnknownError()
+    return result
+
+
 # ---------------------------------------------------------------------------
 # HTTP client
 # ---------------------------------------------------------------------------
@@ -1014,46 +1061,14 @@ class LighthouseClient:
             _skip_raise=True,
             _timeout=60,
         )
-        # D2L redirects to login page when session is dead
-        if resp.status_code in (301, 302, 303, 307, 308):
-            raise SessionExpiredError(_session_expired_msg(f"HTTP {resp.status_code} redirect to login"), recovery=_SESSION_EXPIRED_RECOVERY)
-
-        if resp.status_code == 403:
-            raise PermissionError(
-                f"Permission denied to submit to folder {folder_id}. "
-                "Check your enrollment and submission rights."
-            )
-        if resp.status_code == 404:
-            raise FileNotFoundError(
-                f"Dropbox folder {folder_id} or course {org_unit_id} not found. "
-                "Run: lighthouse assignments"
-            )
-        if resp.status_code == 429:
-            raise NetworkError(
-                "Submission request was rate limited; no retry was attempted."
-            )
-        if resp.status_code == 500:
-            raise ValueError(
-                "D2L API error (500): the remote server rejected the submission. "
-                "This may indicate malformed request body or submission window restrictions."
-            )
         try:
-            resp.raise_for_status()
-        except requests.HTTPError:
-            raise _safe_http_error(resp) from None
-        except Exception:
-            raise NetworkError("Network response validation failed.") from None
-
-        try:
-            result = resp.json()
-        except (TypeError, ValueError):
-            # A successful HTTP status does not guarantee that the server
-            # returned a usable submission document.  Do not include the raw
-            # body in the diagnostic: it may contain echoed form fields.
-            raise SubmissionOutcomeUnknownError() from None
-        if not isinstance(result, dict):
-            raise SubmissionOutcomeUnknownError()
-        return result
+            return _submission_response_result(
+                resp,
+                org_unit_id=course_id,
+                folder_id=dropbox_id,
+            )
+        finally:
+            _close_response(resp)
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ from lighthouse_cli.api import (
     SessionExpiredError,
     SubmissionOutcomeUnknownError,
 )
+from lighthouse_cli.config import COOKIE_NAMES
 
 
 class _TtyStringIO(io.StringIO):
@@ -331,12 +332,35 @@ class TestSubmitFile:
 
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {"d2lSecureSessionVal": "abc", "d2lSessionVal": "def"}
+        client._cookies = {name: "value" for name in COOKIE_NAMES}
         client._session = mock_session
 
         with pytest.raises(SessionExpiredError) as exc_info:
             client.submit_file(org_unit_id=44347, folder_id=789, file_bytes=b"x", filename="x.pdf")
         assert "auth login" in str(exc_info.value)
+        mock_resp.close.assert_called_once()
+
+    def test_submit_file_non_login_redirect_raises_network_error_and_closes(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 302
+        mock_resp.headers = {"Location": "/d2l/other"}
+
+        mock_session = MagicMock()
+        mock_session.request.return_value = mock_resp
+        client = LighthouseClient()
+        client._loaded = True
+        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._session = mock_session
+
+        with pytest.raises(NetworkError, match="unexpected redirect"):
+            client.submit_file(
+                org_unit_id=44347,
+                folder_id=789,
+                file_bytes=b"x",
+                filename="x.pdf",
+            )
+
+        mock_resp.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

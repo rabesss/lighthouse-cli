@@ -95,6 +95,29 @@ def test_benign_keyword_output_root_is_allowed(tmp_path: Path) -> None:
     assert validate_output_root(root) == root.absolute()
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "d2lSessionVal",
+        "d2lSecureSessionVal",
+        "d2lSameSiteCanaryA",
+        "d2lSameSiteCanaryB",
+        "apiCanary",
+        "sFT",
+        "sCtx",
+        "flowToken",
+    ],
+)
+def test_output_root_rejects_exact_session_secret_keys(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    root = tmp_path / f"{key}=OUTPUT_PATH_SECRET"
+
+    with pytest.raises(ValueError, match="unsafe text"):
+        validate_output_root(root)
+
+
 def test_topic_directory_normalizes_before_reserved_subtree_check(
     tmp_path: Path,
 ) -> None:

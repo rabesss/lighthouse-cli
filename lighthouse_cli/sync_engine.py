@@ -75,7 +75,10 @@ _OUTPUT_PATH_SECRET_RE = re.compile(
     r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
     r"token(?:[\s_-]?value)?|cookie(?:s|value)?|samlresponse|otp|totp|"
     r"canary|authorization|bearer|api[\s_-]?key|access[\s_-]?token|"
-    r"client[\s_-]?secret|session(?:val|value|token|id)"
+    r"client[\s_-]?secret|session(?:val|value|token|id)|"
+    r"d2l(?:secure)?session(?:val|value|token)?|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|flow[\s_-]?token|o?postparams"
     r")\s*(?:[:=]|\bis\b|\bwas\b)\s*[^/\\\s,;]+"
 )
 _OUTPUT_PATH_BARE_SECRET_RE = re.compile(
