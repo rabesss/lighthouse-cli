@@ -99,7 +99,13 @@ _OUTPUT_PATH_SENSITIVE_KEY_RE = re.compile(
     r")(?![a-z0-9])"
 )
 _OUTPUT_PATH_CONTEXT_VALUE_RE = re.compile(
-    r"(?ix)(?<![a-z0-9])(?:ctx|cookies?)\b\s+[^/\\\s,;]+"
+    r"(?x)(?<![a-z0-9])(?i:ctx|cookies?)\b\s+"
+    r"(?:(?i:value|token|secret|sentinel)\b|"
+    r"[a-z0-9._-]*[a-z_][a-z0-9._-]*\d[a-z0-9._-]*|"
+    r"[a-z][a-z0-9._-]{7,}|(?=[A-Z0-9_-]*[A-Z_])[A-Z0-9_-]{2,}|"
+    r"(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z_])"
+    r"[A-Za-z0-9_-]{3,})"
+    r"(?![a-z0-9])"
 )
 _OUTPUT_PATH_SESSION_VALUE_RE = re.compile(
     r"(?x)(?<![a-z0-9])(?i:session)\b\s+"
