@@ -30,7 +30,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .api import LighthouseClient
-from .assignments import assignment_key, download_for_course, sync_for_course
+from .assignments import _safe_course_name, assignment_key, download_for_course, sync_for_course
 from .display import format_user_error, safe_display_text
 from .manifest import (
     MANIFEST_FILENAME,
@@ -65,7 +65,6 @@ _MAX_LAST_MODIFIED_LENGTH = 256
 _MAX_TOC_DEPTH = 2048
 _MAX_TOC_NODES = 10000
 _TOC_TRAVERSAL_ERROR = "Content TOC exceeded safe traversal limits."
-_MAX_COURSE_NAME_LENGTH = 256
 _MAX_UNKNOWN_TYPE_LENGTH = 64
 _MAX_TOPIC_LABEL_LENGTH = 256
 _INVALID_ASSIGNMENT_FOLDERS = "Assignment folders have an invalid response shape."
@@ -135,12 +134,6 @@ def _safe_last_modified(value: object) -> str | None:
     if not isinstance(value, str) or len(value) > _MAX_LAST_MODIFIED_LENGTH:
         return None
     return value if all(character.isprintable() for character in value) else None
-
-
-def _safe_course_name(value: object, org_id: int) -> str:
-    """Return a bounded, printable, non-secret course name for all outputs."""
-    fallback = f"Course-{org_id}"
-    return safe_display_text(value, fallback, max_len=_MAX_COURSE_NAME_LENGTH)
 
 
 def _safe_label(value: object, fallback: str = "") -> str:

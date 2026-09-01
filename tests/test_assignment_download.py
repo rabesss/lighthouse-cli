@@ -23,6 +23,7 @@ from lighthouse_cli.assignments import (
 from lighthouse_cli.cli import cli
 from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest
 from lighthouse_cli.manifest import compute_sha256
+from lighthouse_cli.sync_engine import _safe_course_name as sync_safe_course_name
 
 
 @pytest.fixture
@@ -72,8 +73,18 @@ def test_session_words_are_not_treated_as_session_cookie_values() -> None:
     assert safe_attachment_filename("Week  1.pdf", 7) == "Week  1.pdf"
 
 
-def test_assignment_course_name_matches_compacted_sync_path() -> None:
-    assert _safe_course_name("Signals  &  Systems", 44347) == "Signals & Systems"
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Signals  &  Systems", "Signals & Systems"),
+        (".", "Course-44347"),
+        ("..", "Course-44347"),
+        ("...", "Course-44347"),
+    ],
+)
+def test_assignment_course_name_matches_sync_path(raw: str, expected: str) -> None:
+    assert _safe_course_name(raw, 44347) == expected
+    assert sync_safe_course_name(raw, 44347) == expected
 
 
 def test_legacy_attachment_without_path_is_matched_and_migrated(
