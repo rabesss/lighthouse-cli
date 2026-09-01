@@ -67,6 +67,8 @@ def test_session_words_are_not_treated_as_session_cookie_values() -> None:
     assert safe_attachment_filename("session-notes.pdf", 7) == "session-notes.pdf"
     assert safe_assignment_folder_name("Pass Fail Grading", 7) == "Pass Fail Grading"
     assert safe_attachment_filename("Pass Criteria.pdf", 7) == "Pass Criteria.pdf"
+    assert safe_assignment_folder_name("HW  1", 7) == "HW  1"
+    assert safe_attachment_filename("Week  1.pdf", 7) == "Week  1.pdf"
 
 
 def test_legacy_attachment_without_path_is_matched_and_migrated(
@@ -107,6 +109,46 @@ def test_legacy_attachment_without_path_is_matched_and_migrated(
     assert skipped[0]["path"] == "Assignments/HW1/hw.pdf"
     assert manifest.get("assignment_7_8")["path"] == "Assignments/HW1/hw.pdf"
     client.download_attachment.assert_not_called()
+
+
+def test_legacy_attachment_mismatch_preserves_unowned_local_file(
+    tmp_path: Path,
+) -> None:
+    folder = {
+        "Id": 7,
+        "Name": "HW1",
+        "Attachments": [
+            {"Id": 8, "FileName": "hw.pdf", "Size": 3, "Type": "File"},
+        ],
+    }
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = [folder]
+    client.get_dropbox_folder_detail.return_value = folder
+    client.download_attachment.return_value = (b"NEW", "hw.pdf")
+    manifest = Manifest({
+        "assignment_7_8": {
+            "sha256": compute_sha256(b"OLD"),
+            "filename": "hw.pdf",
+            "size": 3,
+            "downloaded_at": "2026-01-01T00:00:00Z",
+            "last_modified": "",
+        },
+    })
+    original = tmp_path / "Assignments" / "HW1" / "hw.pdf"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"USER")
+
+    downloaded, skipped, updated, errors = sync_for_course(
+        client,
+        44347,
+        tmp_path,
+        manifest,
+    )
+
+    assert skipped == [] and downloaded == [] and errors == []
+    assert updated[0]["path"] == "Assignments/HW1/hw_1.pdf"
+    assert original.read_bytes() == b"USER"
+    assert (original.parent / "hw_1.pdf").read_bytes() == b"NEW"
 
 
 def test_single_attachment_disambiguates_contested_legacy_path(

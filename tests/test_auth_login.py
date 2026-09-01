@@ -51,6 +51,10 @@ def _make_d2l_cookies() -> dict[str, str]:
         ("Microsoft session-pull requested an unsafe re-POST target.", "Microsoft session-pull requested an unsafe re-POST target."),
         ("2FA code required after verification was sent.", "2FA code required after verification was sent."),
         ("A pre-provided --totp code is valid only for PhoneAppOTP.", "A pre-provided --totp code is valid only for PhoneAppOTP."),
+        (
+            "A pre-provided --totp code cannot be validated for a legacy MFA form.",
+            "A pre-provided --totp code cannot be used with a legacy MFA form.",
+        ),
         ("Pending MFA session is incomplete (missing state).", "Pending MFA session is incomplete."),
     ],
 )

@@ -84,8 +84,12 @@ def _positive_int(value: object) -> int | None:
 def _safe_course_name(value: object, org_id: int) -> str:
     """Return a bounded, printable, non-secret course name for a local path."""
     fallback = f"Course-{org_id}"
-    candidate = safe_display_text(value, "", max_len=_MAX_COURSE_NAME_LENGTH)
-    if not candidate or _SECRET_SHAPED_COURSE_NAME_RE.search(candidate):
+    if not isinstance(value, str):
+        return fallback
+    if not safe_display_text(value, "", max_len=_MAX_COURSE_NAME_LENGTH):
+        return fallback
+    candidate = value
+    if _SECRET_SHAPED_COURSE_NAME_RE.search(candidate):
         return fallback
     sanitized = _sanitize_filename(candidate)
     if not safe_display_text(sanitized, "", max_len=_MAX_COURSE_NAME_LENGTH):
@@ -101,8 +105,12 @@ def safe_assignment_folder_name(
 ) -> str:
     """Project a server folder label without secrets or control characters."""
     safe_fallback = f"Folder-{folder_id}"
-    candidate = safe_display_text(value, "", max_len=_MAX_FOLDER_NAME_LENGTH)
-    if not candidate or _SECRET_SHAPED_FOLDER_NAME_RE.search(candidate):
+    if not isinstance(value, str):
+        return safe_fallback if fallback else ""
+    if not safe_display_text(value, "", max_len=_MAX_FOLDER_NAME_LENGTH):
+        return safe_fallback if fallback else ""
+    candidate = value
+    if _SECRET_SHAPED_FOLDER_NAME_RE.search(candidate):
         return safe_fallback if fallback else ""
 
     sanitized = _sanitize_filename(candidate)
@@ -138,14 +146,15 @@ def safe_attachment_filename(
     """
     safe_fallback = f"attachment_{attachment_id}"
     sanitized_input = _sanitize_filename(value) if isinstance(value, str) else ""
-    candidate = safe_display_text(value, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
-    if not candidate:
+    safe_candidate = safe_display_text(value, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
+    if not isinstance(value, str) or not safe_candidate:
         return (
             safe_fallback + _safe_filename_suffix(sanitized_input)
             if fallback
             else ""
         )
 
+    candidate = value
     sanitized = _sanitize_filename(candidate)
     if (
         not sanitized
@@ -162,16 +171,29 @@ def safe_attachment_filename(
     )
 
 
-def disambiguate_filename(dest_dir: Path, filename: str) -> Path:
+def disambiguate_filename(
+    dest_dir: Path,
+    filename: str,
+    *,
+    reserved_paths: set[Path] | None = None,
+) -> Path:
     """Return a Path with disambiguation suffix if filename already exists."""
     filepath = dest_dir / filename
-    if not filepath.exists() and not filepath.is_symlink():
+    if (
+        not filepath.exists()
+        and not filepath.is_symlink()
+        and (reserved_paths is None or filepath.absolute() not in reserved_paths)
+    ):
         return filepath
     name, ext = filepath.stem, filepath.suffix
     counter = 1
     while True:
         new_path = dest_dir / f"{name}_{counter}{ext}"
-        if not new_path.exists() and not new_path.is_symlink():
+        if (
+            not new_path.exists()
+            and not new_path.is_symlink()
+            and (reserved_paths is None or new_path.absolute() not in reserved_paths)
+        ):
             return new_path
         counter += 1
 
@@ -466,6 +488,27 @@ def _claim_assignment_entry(
     return entry
 
 
+def _write_entry_for_claim(
+    dest: Path,
+    entry: dict | None,
+    folder: dict,
+) -> dict | None:
+    """Reuse a legacy inferred path only when no local file would be replaced."""
+    if not isinstance(entry, dict) or entry.get("path"):
+        return entry
+    try:
+        candidate = _manifest_attachment_path(
+            dest,
+            entry,
+            expected_parent=_assignment_dir(dest, folder),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if candidate is None or candidate.exists() or candidate.is_symlink():
+        return None
+    return entry
+
+
 def _download_and_record(
     client: LighthouseClient,
     org_id: int,
@@ -475,6 +518,7 @@ def _download_and_record(
     manifest: Manifest,
     *,
     existing_entry: dict | None | object = _USE_MANIFEST_ENTRY,
+    claimed_paths: set[Path] | None = None,
 ) -> dict:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
     folder_id = _positive_int(folder.get("Id"))
@@ -499,7 +543,13 @@ def _download_and_record(
         expected_parent=assignments_dir,
     )
     if filepath is None:
-        filepath = disambiguate_filename(assignments_dir, sanitized_name)
+        filepath = disambiguate_filename(
+            assignments_dir,
+            sanitized_name,
+            reserved_paths=claimed_paths,
+        )
+        if claimed_paths is not None:
+            claimed_paths.add(filepath.absolute())
     if (
         not filepath.absolute().is_relative_to(course_root)
         or _has_symlink_component(filepath.parent, course_root)
@@ -507,6 +557,16 @@ def _download_and_record(
     ):
         raise ValueError("Assignment attachment path is symlinked or escapes the course root")
     filepath.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        resolved_filepath = filepath.resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise ValueError("Unable to validate assignment attachment path") from None
+    if (
+        filepath.is_symlink()
+        or _has_symlink_component(filepath.parent, course_root)
+        or not resolved_filepath.is_relative_to(course_root)
+    ):
+        raise ValueError("Assignment attachment path is symlinked or escapes the course root")
     atomic_write(filepath, content, mode=0o600)
     relative_path = str(filepath.relative_to(course_root))
     manifest_entry = manifest.add_entry(
@@ -561,13 +621,14 @@ def download_single_attachment(
         manifest_path = dest / MANIFEST_FILENAME
         manifest = Manifest.load(manifest_path)
         att_key = assignment_key(folder_id, attachment_id)
+        claimed_paths: set[Path] = set()
         existing = _claim_assignment_entry(
             dest,
             manifest,
             att_key,
             folder_detail,
             _assignment_path_owners(dest, manifest),
-            set(),
+            claimed_paths,
             allow_contested_claim=False,
         )
         entry = _download_and_record(
@@ -578,6 +639,7 @@ def download_single_attachment(
             dest,
             manifest,
             existing_entry=existing,
+            claimed_paths=claimed_paths,
         )
         manifest.save(manifest_path)
     except _AssignmentDataError as e:
@@ -733,6 +795,7 @@ def download_for_course(
                         matched_path.relative_to(_course_boundary(dest))
                     )
                 continue
+            write_entry = _write_entry_for_claim(dest, existing, folder)
 
             try:
                 downloaded_entries.append(
@@ -743,7 +806,8 @@ def download_for_course(
                         att_id,
                         dest,
                         manifest,
-                        existing_entry=existing,
+                        existing_entry=write_entry,
+                        claimed_paths=claimed_prior_paths,
                     )
                 )
             except _AssignmentDataError as e:
@@ -877,6 +941,7 @@ def sync_for_course(
                     )
                     skipped_entries.append(skipped_entry)
                     continue
+            write_entry = _write_entry_for_claim(dest, existing, folder)
             target_list = (
                 updated_entries
                 if isinstance(manifest_entry, dict)
@@ -892,7 +957,8 @@ def sync_for_course(
                         att_id,
                         dest,
                         manifest,
-                        existing_entry=existing,
+                        existing_entry=write_entry,
+                        claimed_paths=claimed_prior_paths,
                     )
                 )
             except _AssignmentDataError as e:

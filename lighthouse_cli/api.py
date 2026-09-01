@@ -473,8 +473,9 @@ class LighthouseClient:
                         _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
                         recovery=_SESSION_EXPIRED_RECOVERY,
                     )
-                _close_response(resp)
-                raise NetworkError("The server returned an unexpected redirect.")
+                if not skip_raise:
+                    _close_response(resp)
+                    raise NetworkError("The server returned an unexpected redirect.")
 
             if resp.status_code == 401:
                 _close_response(resp)

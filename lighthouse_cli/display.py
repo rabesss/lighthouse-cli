@@ -350,6 +350,8 @@ def _safe_local_message(raw: str) -> str | None:
         return "Binary download exceeds the configured size limit."
     if lowered == "binary download size limit is invalid.":
         return "Binary download size limit is invalid."
+    if lowered == "the server returned an unexpected redirect.":
+        return "The server returned an unexpected redirect."
     if lowered.startswith("--attachment requires --assignment"):
         return "--attachment requires --assignment"
     if lowered in {

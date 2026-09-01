@@ -175,6 +175,19 @@ def test_non_login_redirect_raises_fixed_network_error_and_closes() -> None:
     assert response.closed is True
 
 
+def test_skip_raise_preserves_non_login_redirect_for_submission_handler() -> None:
+    response = FakeResponse(302, headers={"Location": "/d2l/other"})
+    client, _session = _client_with_session([response])
+
+    assert client._do_request(
+        "POST",
+        "https://example.test",
+        True,
+        30,
+    ) is response
+    assert response.closed is False
+
+
 def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
     client = LighthouseClient()
     client.get_json = MagicMock(

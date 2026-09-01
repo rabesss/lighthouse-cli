@@ -14,7 +14,7 @@ from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
 from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
 from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short, utc_now_iso as _utc_now_iso
 from .course_config import load as _load_course_config, semester_state as _semester_state
-from .sync_engine import Mode, run_course, validate_output_root
+from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .assignments import download_single_attachment as _download_single_attachment
 from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
 from .submit import cmd_submit  # noqa: F401 — re-export
@@ -105,14 +105,9 @@ def _safe_course_name(value: Any, course_id: Any) -> str:
     return _safe_server_text(value, fallback=fallback)
 
 
-def _safe_output_path(value: object) -> str:
+def _safe_output_path(value: object) -> str | None:
     """Return a path only when its complete text passes the secret guard."""
-    candidate = str(value)
-    return (
-        candidate
-        if safe_display_text(candidate, "", max_len=4096)
-        else "<redacted>"
-    )
+    return safe_output_path_text(value)
 
 
 def _safe_content_id(value: Any) -> int | None:

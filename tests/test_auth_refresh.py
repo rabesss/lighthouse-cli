@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -67,11 +67,31 @@ def test_auth_refresh_preflights_extracts_and_persists(monkeypatch) -> None:
     monkeypatch.setattr(auth, "CredentialStore", FakeStore)
     monkeypatch.setattr(auth, "refresh_auth_from_browser", fake_extract)
     monkeypatch.setattr(auth, "_persist_check_report", fake_persist)
+    monkeypatch.setattr(auth, "clear_mfa_pending", lambda: calls.append("clear"))
 
     assert auth.cmd_auth_refresh(9222, json_output=True) == 0
     assert calls[0:2] == ["preflight", ("extract", 9222)]
     assert calls[2][0:2] == ("persist", cookies)
     assert calls[2][2]["success_message"] == "Auth refreshed and verified."
+    assert calls[3] == "clear"
+
+
+def test_failed_auth_refresh_preserves_pending_checkpoint(monkeypatch) -> None:
+    cookies = {name: "value" for name in COOKIE_NAMES}
+
+    class FakeStore:
+        def preflight(self) -> None:
+            return None
+
+    clear = MagicMock()
+    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
+    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
+    monkeypatch.setattr(auth, "refresh_auth_from_browser", lambda _port: cookies)
+    monkeypatch.setattr(auth, "_persist_check_report", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(auth, "clear_mfa_pending", clear)
+
+    assert auth.cmd_auth_refresh(9222, json_output=True) == 1
+    clear.assert_not_called()
 
 
 def test_auth_refresh_missing_cookies_returns_json_without_persisting(

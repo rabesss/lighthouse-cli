@@ -27,6 +27,7 @@ from lighthouse_cli.sync_engine import (
     build_entry,
     flatten_all_topics,
     run_course,
+    validate_output_root,
 )
 from lighthouse_cli.utils import atomic_write as shared_atomic_write
 
@@ -84,8 +85,14 @@ def test_multi_failure_json_redacts_secret_shaped_root(tmp_path, capsys) -> None
 
     payload = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert payload["courses"][0]["root"] == "<redacted>"
+    assert payload["courses"][0]["root"] is None
     assert "ROOT_PATH_SECRET" not in json.dumps(payload)
+
+
+def test_benign_keyword_output_root_is_allowed(tmp_path: Path) -> None:
+    root = tmp_path / "ctx" / "cookies" / "courses"
+
+    assert validate_output_root(root) == root.absolute()
 
 
 def test_topic_directory_normalizes_before_reserved_subtree_check(
@@ -1803,7 +1810,7 @@ class TestExitMatrix:
         assert "Warning" in result.output and "Corrupt manifest" in result.output
 
     def test_corrupt_manifest_warning_does_not_echo_path_or_controls(self, runner, tmp_path):
-        """Direct stderr warnings must not expose an untrusted output path."""
+        """Direct corrupt-manifest warnings remain fixed and control-free."""
         output_dir = tmp_path / "sync-output"
         output_dir.mkdir()
         course_dir = output_dir / "Course A-111"
@@ -1817,6 +1824,20 @@ class TestExitMatrix:
         assert result.exit_code == 1, result.output
         assert "Corrupt manifest; performing full sync." in result.stderr
         assert "\x1b" not in diagnostics
+
+    def test_unsafe_output_root_never_reaches_cli_output(self, runner, tmp_path):
+        sentinel = "password=OUTPUT_ROOT_SECRET"
+        output_dir = tmp_path / sentinel
+
+        with _scoped_client():
+            result = runner.invoke(
+                cli,
+                ["sync", "111", "-o", str(output_dir), "--json"],
+        )
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["error"]
+        assert sentinel not in result.stdout + result.stderr
 
     def test_corrupt_manifest_exits_1_multi_json(self, runner, tmp_path):
         output_dir = tmp_path / "dl"

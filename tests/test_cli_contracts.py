@@ -552,6 +552,9 @@ def test_fixed_cookie_and_download_limit_errors_remain_actionable() -> None:
     assert format_user_error(
         NetworkError("Binary download exceeds the configured size limit.")
     ) == "Binary download exceeds the configured size limit."
+    assert format_user_error(
+        NetworkError("The server returned an unexpected redirect.")
+    ) == "The server returned an unexpected redirect."
 
 
 def test_format_user_error_strips_relative_query_and_body() -> None:

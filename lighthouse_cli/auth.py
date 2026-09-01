@@ -391,7 +391,7 @@ def validate_totp_usage(
 
     ``auto`` is decided only after Microsoft returns the account's proof list,
     so the SSO driver performs the equivalent selected-proof check before
-    BeginAuth. A literal ``auto`` value can also resume an existing checkpoint.
+    BeginAuth. It never resumes an existing checkpoint from a literal value.
     """
     literal = totp_code is not None and not totp_stdin
     if literal and mfa_method == MFA_METHOD_SMS:
@@ -617,12 +617,15 @@ def cmd_auth_refresh(
             json_output,
         )
 
-    return _persist_check_report(
+    exit_code = _persist_check_report(
         cookies,
         json_output=json_output,
         failure_hint="Open lighthouse.manipal.edu in the browser and sign in, then retry.",
         success_message="Auth refreshed and verified.",
     )
+    if exit_code == 0:
+        clear_mfa_pending()
+    return exit_code
 
 @_clean_auth_command
 def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
@@ -809,7 +812,7 @@ def cmd_auth_login(
         mfa_method: MFA delivery preference (auto, sms, app, call, push, choose)
 
     Returns:
-        Exit code (0=success, 1=auth failure, 2=CLI usage error, 130=interrupted)
+        Exit code (0=success, 1=error, 130=interrupted)
     """
     ensure_config_dir()
 
@@ -849,8 +852,8 @@ def cmd_auth_login(
     elif interactive and not json_output and totp_code is None and not totp_stdin:
         # A person running the plain command should see only the verification
         # methods Microsoft reports for their account. Scripts retain the
-        # tenant-default ``auto`` policy, and a literal app code remains
-        # unambiguous without requiring a new flag.
+        # tenant-default ``auto`` policy; legacy-form tenants must explicitly
+        # select ``app`` when supplying an offline literal code.
         resolved_mfa_method = MFA_METHOD_CHOOSE
     else:
         resolved_mfa_method = MFA_METHOD_AUTO

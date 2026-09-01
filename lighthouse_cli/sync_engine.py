@@ -27,6 +27,7 @@ from pathlib import Path
 import re
 from stat import S_ISREG
 from typing import Any
+from urllib.parse import unquote
 
 from .api import LighthouseClient
 from .assignments import assignment_key, download_for_course, sync_for_course
@@ -69,6 +70,19 @@ _MAX_UNKNOWN_TYPE_LENGTH = 64
 _MAX_TOPIC_LABEL_LENGTH = 256
 _INVALID_ASSIGNMENT_FOLDERS = "Assignment folders have an invalid response shape."
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
+_OUTPUT_PATH_SECRET_RE = re.compile(
+    r"(?ix)(?<![a-z0-9])(?:"
+    r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
+    r"token(?:[\s_-]?value)?|cookie(?:s|value)?|samlresponse|otp|totp|"
+    r"canary|authorization|bearer|api[\s_-]?key|access[\s_-]?token|"
+    r"client[\s_-]?secret|session(?:val|value|token|id)"
+    r")\s*(?:[:=]|\bis\b|\bwas\b)\s*[^/\\\s,;]+"
+)
+_OUTPUT_PATH_BARE_SECRET_RE = re.compile(
+    r"(?x)(?<![a-z0-9])(?i:password|passwd|passphrase|secret|token|cookie|"
+    r"otp|totp|canary|authorization|bearer)\s+"
+    r"(?:[A-Z0-9_-]{4,}|(?=[A-Za-z0-9_.-]*\d)[A-Za-z0-9_.-]{4,})"
+)
 
 
 def _positive_int(value: object) -> int | None:
@@ -225,6 +239,27 @@ def _has_symlink_component(path: Path, root: Path) -> bool:
     return False
 
 
+def safe_output_path_text(value: object) -> str | None:
+    """Return an output path only when it contains no secret-shaped value."""
+    try:
+        candidate = str(value)
+    except Exception:
+        return None
+    if not candidate or len(candidate) > 4096:
+        return None
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in candidate):
+        return None
+    decoded = candidate
+    for _ in range(4):
+        expanded = unquote(decoded)
+        if expanded == decoded:
+            break
+        decoded = expanded
+    if _OUTPUT_PATH_SECRET_RE.search(decoded) or _OUTPUT_PATH_BARE_SECRET_RE.search(decoded):
+        return None
+    return candidate
+
+
 def validate_output_root(root: Path) -> Path:
     """Validate and canonicalize a user-selected output directory.
 
@@ -239,7 +274,7 @@ def validate_output_root(root: Path) -> Path:
         candidate = Path(root).expanduser().absolute()
     except (TypeError, ValueError, OSError):
         raise ValueError("Unable to validate output directory") from None
-    if not safe_display_text(str(candidate), "", max_len=4096):
+    if safe_output_path_text(candidate) is None:
         raise ValueError("Output directory contains unsafe text")
     current = Path(candidate.anchor)
     for component in candidate.parts[1:]:
