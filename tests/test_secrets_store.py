@@ -391,6 +391,15 @@ class TestMfaPendingCompatibility:
         assert "\\x1b" not in warning
         assert "\x1b" not in warning
 
+    def test_overflowing_float_pending_document_is_cleared(
+        self,
+        store_dir: Path,
+    ) -> None:
+        pending_path(store_dir).write_text('{"version": 2, "value": 1e999}')
+
+        assert load_mfa_pending() is None
+        assert not pending_path(store_dir).exists()
+
     def test_pending_metadata_control_values_are_not_reintroduced(
         self, store_dir: Path
     ) -> None:

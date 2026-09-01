@@ -22,7 +22,7 @@ from lighthouse_cli.credential_store import (
     _validate_credential_path,
     is_sealed_document,
 )
-from lighthouse_cli.utils import _reject_non_finite_json
+from lighthouse_cli.utils import _loads_strict_json
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -378,7 +378,7 @@ def load_mfa_pending() -> dict | None:
             f"{path.name} could not be read ({exc.__class__.__name__})."
         ) from None
     try:
-        doc = json.loads(raw, parse_constant=_reject_non_finite_json)
+        doc = _loads_strict_json(raw)
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         # A malformed checkpoint cannot be resumed safely.  Remove it so a
         # later auth invocation does not repeatedly inspect untrusted bytes.

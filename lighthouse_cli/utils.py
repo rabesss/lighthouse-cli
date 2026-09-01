@@ -15,14 +15,8 @@ from typing import Any, NoReturn
 
 
 # ---------------------------------------------------------------------------
-# Atomic file writing
+# External result identifiers
 # ---------------------------------------------------------------------------
-
-# ``atomic_write`` appends ``.<32 hex>.tmp`` to the destination name. Keeping
-# the base name at 218 UTF-8 bytes fits that suffix under the usual 255-byte
-# per-component filesystem limit.
-MAX_ATOMIC_TARGET_NAME_BYTES = 218
-
 
 def _course_identifier(value: Any) -> int | None:
     """Return only a numeric course ID for an external result payload.
@@ -41,6 +35,10 @@ def _course_identifier(value: Any) -> int | None:
             return None
     return None
 
+
+# ---------------------------------------------------------------------------
+# Strict JSON parsing
+# ---------------------------------------------------------------------------
 
 def _reject_non_finite_json(_value: str) -> NoReturn:
     """Reject Python's non-standard ``NaN`` and ``Infinity`` extensions."""
@@ -62,6 +60,17 @@ def _loads_strict_json(value: str | bytes) -> Any:
         parse_constant=_reject_non_finite_json,
         parse_float=_parse_finite_float,
     )
+
+
+# ---------------------------------------------------------------------------
+# Atomic file writing
+# ---------------------------------------------------------------------------
+
+# ``atomic_write`` appends ``.<32 hex>.tmp`` to the destination name. Keeping
+# the base name at 218 UTF-8 bytes fits that suffix under the usual 255-byte
+# per-component filesystem limit.
+MAX_ATOMIC_TARGET_NAME_BYTES = 218
+
 
 def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> None:
     """Write ``data`` to ``path`` atomically: unique temp file in the target

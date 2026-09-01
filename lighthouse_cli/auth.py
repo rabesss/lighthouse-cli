@@ -347,7 +347,9 @@ def _prompt_credential(field: str, *, interactive: bool, json_output: bool) -> s
         raise _PromptUnavailable(field)
     if field == "username":
         return _prompt_username(json_output)
-    return _prompt_password()
+    if field == "password":
+        return _prompt_password()
+    raise _PromptUnavailable(field)
 
 
 # ---------------------------------------------------------------------------
