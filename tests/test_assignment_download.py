@@ -13,6 +13,7 @@ from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.assignments import (
     _attachment_error,
     _manifest_attachment_path,
+    _safe_course_name,
     download_for_course,
     download_single_attachment,
     safe_attachment_filename,
@@ -69,6 +70,10 @@ def test_session_words_are_not_treated_as_session_cookie_values() -> None:
     assert safe_attachment_filename("Pass Criteria.pdf", 7) == "Pass Criteria.pdf"
     assert safe_assignment_folder_name("HW  1", 7) == "HW  1"
     assert safe_attachment_filename("Week  1.pdf", 7) == "Week  1.pdf"
+
+
+def test_assignment_course_name_matches_compacted_sync_path() -> None:
+    assert _safe_course_name("Signals  &  Systems", 44347) == "Signals & Systems"
 
 
 def test_legacy_attachment_without_path_is_matched_and_migrated(

@@ -84,11 +84,9 @@ def _positive_int(value: object) -> int | None:
 def _safe_course_name(value: object, org_id: int) -> str:
     """Return a bounded, printable, non-secret course name for a local path."""
     fallback = f"Course-{org_id}"
-    if not isinstance(value, str):
+    candidate = safe_display_text(value, "", max_len=_MAX_COURSE_NAME_LENGTH)
+    if not candidate:
         return fallback
-    if not safe_display_text(value, "", max_len=_MAX_COURSE_NAME_LENGTH):
-        return fallback
-    candidate = value
     if _SECRET_SHAPED_COURSE_NAME_RE.search(candidate):
         return fallback
     sanitized = _sanitize_filename(candidate)
