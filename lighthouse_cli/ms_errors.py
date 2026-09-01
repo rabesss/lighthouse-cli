@@ -2,6 +2,127 @@
 
 from __future__ import annotations
 
+import re
+
+
+_UPSTREAM_URL_RE = re.compile(r"(?i)(?:https?://|//)[^\s<>'\"]+")
+_UPSTREAM_EMAIL_RE = re.compile(
+    r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
+)
+_UPSTREAM_PHONE_RE = re.compile(r"(?<!\d)\+?\d[\d .()*-]{5,}\d(?!\d)")
+_UPSTREAM_SECRET_MARKERS = (
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "otp",
+    "totp",
+    "canary",
+    "ctx",
+    "bearer",
+    "responsebody",
+    "response_body",
+    "response body",
+    "flowtoken",
+    "flow_token",
+    "flow token",
+    "opostparams",
+    "cookievalue",
+    "cookie",
+    "sessionval",
+    "sessionvalue",
+    "sessionid",
+    "access_token",
+    "access token",
+    "client_secret",
+    "client secret",
+    "samlresponse",
+    "saml_response",
+    "saml response",
+    "samlrequest",
+    "saml_request",
+    "authorization",
+    "api-key",
+    "apikey",
+)
+_UPSTREAM_SECRET_KEY_VALUE_RE = re.compile(
+    r"(?ix)(?<![a-z0-9])[\"']?(?:[a-z0-9_-]*(?:password|passwd|"
+    r"passphrase|pass|secret|token|otp|totp|canary|ctx|flow[\s_-]*token|"
+    r"cookie(?:value)?|session(?:val(?:ue)?|id)?|access[\s_-]*token|"
+    r"client[\s_-]*secret|api[\s_-]*key|apikey|bearer|"
+    r"saml[\s_-]*(?:response|request)|authorization)[a-z0-9_-]*)"
+    r"[\"']?(?![a-z0-9])"
+    r"(?:\s*(?:[:=]\s*|\b(?:is|was)\b\s+|\s+)"
+    r"[\"']?[^\s,;}\]]+[\"']?)"
+)
+_UPSTREAM_FLAG_VALUE_RE = re.compile(
+    r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;)}\]]+"
+)
+_STRUCTURAL_PAGE_MARKER_RE = re.compile(
+    r"(?i)\b(?:arrUserProofs|otc-input|ProcessAuth-form|KmsiInterrupt|"
+    r"ConvergedTFA|SAMLResponse|sFT-present|urlPost|oPostParams|sso_reload)=[01]\b"
+)
+_SAFE_UPSTREAM_PHRASES = frozenset({
+    "password is incorrect",
+    "password is incorrect.",
+    "invalid username or password.",
+    "your account is locked.",
+    "account is locked.",
+    "code send failed",
+})
+
+
+def _contains_upstream_secret(text: str) -> bool:
+    """Detect secret-shaped fields after removing safe page-shape booleans."""
+    checked_text = _STRUCTURAL_PAGE_MARKER_RE.sub("page-marker", text)
+    lowered = checked_text.lower()
+    return bool(
+        any(char in text for char in "{}[]")
+        or _UPSTREAM_URL_RE.search(checked_text)
+        or _UPSTREAM_SECRET_KEY_VALUE_RE.search(checked_text)
+        or _UPSTREAM_FLAG_VALUE_RE.search(checked_text)
+        or any(marker in lowered for marker in _UPSTREAM_SECRET_MARKERS)
+    )
+
+
+def safe_upstream_text(value: object, *, fallback: str) -> str:
+    """Return a short upstream detail only when it is plainly non-secret.
+
+    Microsoft sometimes puts request bodies, cookies, flow tokens, or URLs in
+    ``Message``/``ResultValue`` fields.  Those values must never be interpolated
+    into an exception or a JSON error document.  This helper intentionally
+    prefers a fixed category message whenever a sensitive marker is present.
+    """
+    if not isinstance(value, str):
+        return fallback
+    text = " ".join(value.split())
+    if not text or len(text) > 512:
+        return fallback
+    if text.casefold() in _SAFE_UPSTREAM_PHRASES:
+        return text
+    if _contains_upstream_secret(text):
+        return fallback
+    # Upstream error strings are not an allowlist.  Keep unknown text opaque;
+    # callers can still use ``safe_diagnostic_text`` for structural metadata.
+    return fallback
+
+
+def safe_diagnostic_text(value: object, *, fallback: str) -> str:
+    """Keep bounded diagnostics while masking URLs, secrets, and PII."""
+    if not isinstance(value, str):
+        return fallback
+    text = " ".join(value.split())
+    if not text or len(text) > 512:
+        return fallback
+    if (
+        _UPSTREAM_EMAIL_RE.search(text)
+        or _UPSTREAM_PHONE_RE.search(text)
+        or _contains_upstream_secret(text)
+    ):
+        return fallback
+    return text
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

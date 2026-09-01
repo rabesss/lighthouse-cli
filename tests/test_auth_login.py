@@ -42,6 +42,29 @@ def _make_d2l_cookies() -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("2FA verification timed out waiting for approval.", "2FA verification timed out waiting for approval."),
+        ("D2L ACS redirect limit exceeded.", "D2L ACS redirect limit exceeded."),
+        ("D2L home redirect limit exceeded.", "D2L home redirect limit exceeded."),
+        ("Microsoft session-pull requested an unsafe re-POST target.", "Microsoft session-pull requested an unsafe re-POST target."),
+        ("2FA code required after verification was sent.", "2FA code required after verification was sent."),
+        ("A pre-provided --totp code is valid only for PhoneAppOTP.", "A pre-provided --totp code is valid only for PhoneAppOTP."),
+        (
+            "A pre-provided --totp code cannot be validated for a legacy MFA form.",
+            "A pre-provided --totp code cannot be used with a legacy MFA form.",
+        ),
+        ("Pending MFA session is incomplete (missing state).", "Pending MFA session is incomplete."),
+    ],
+)
+def test_first_party_auth_failures_keep_safe_actionable_categories(
+    message: str,
+    expected: str,
+) -> None:
+    assert auth_mod._safe_auth_error_message(message) == expected
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
@@ -99,7 +122,7 @@ def test_auth_login_registered_as_subcommand(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     output = result.output
     assert "--user" in output
-    assert "--pass" in output
+    assert "--pass" not in output
     assert "--totp" in output
     assert "--save-credentials" in output
     assert "--json" in output
@@ -229,26 +252,38 @@ def test_normalize_whitespace_code_rejected() -> None:
 
 def test_plan_resume_with_matching_pending_method() -> None:
     plan = plan_login(
-        totp_code="123456", read_totp_after_challenge=False, mfa_method="sms",
-        pending={"mfa_method": "sms"}, interactive=True,
+        totp_code="123456", read_totp_after_challenge=False, mfa_method="app",
+        pending={
+            "mfa_method": "app",
+            "selected_proof": {"auth_method_id": "PhoneAppOTP"},
+        },
+        interactive=True,
     )
     assert plan.mode == "resume"
     assert plan.totp_code == "123456"
 
 
-def test_plan_auto_resumes_any_pending_method() -> None:
+def test_plan_auto_never_guesses_pending_method_for_literal_code() -> None:
     plan = plan_login(
         totp_code="123456", read_totp_after_challenge=False, mfa_method="auto",
-        pending={"mfa_method": "app"}, interactive=True,
+        pending={
+            "mfa_method": "auto",
+            "selected_proof": {"auth_method_id": "OneWaySMS"},
+        },
+        interactive=True,
     )
-    assert plan.mode == "resume"
+    assert plan.mode == "fresh"
 
 
 def test_plan_method_mismatch_starts_fresh() -> None:
     """An explicit method differing from the pending session never resumes."""
     plan = plan_login(
         totp_code="123456", read_totp_after_challenge=False, mfa_method="app",
-        pending={"mfa_method": "sms"}, interactive=True,
+        pending={
+            "mfa_method": "sms",
+            "selected_proof": {"auth_method_id": "OneWaySMS"},
+        },
+        interactive=True,
     )
     assert plan.mode == "fresh"
     assert plan.defer_mfa_to_pending is False
@@ -260,7 +295,13 @@ def test_plan_never_resumes_without_literal_code() -> None:
         {"totp_code": "123456", "read_totp_after_challenge": True},
     ):
         plan = plan_login(
-            mfa_method="sms", pending={"mfa_method": "sms"}, interactive=True, **kwargs,
+            mfa_method="app",
+            pending={
+                "mfa_method": "app",
+                "selected_proof": {"auth_method_id": "PhoneAppOTP"},
+            },
+            interactive=True,
+            **kwargs,
         )
         assert plan.mode != "resume"
 
@@ -303,7 +344,8 @@ def test_tail_orders_cookies_before_check_before_credential_save(monkeypatch: py
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: order.append("cookies"))
     client = MagicMock()
     client.check_auth.side_effect = lambda: order.append("check") or True
-    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda: client)
+    client_factory = MagicMock(return_value=client)
+    monkeypatch.setattr(auth_mod, "LighthouseClient", client_factory)
     store = MagicMock()
     store.save.side_effect = lambda u, p: order.append("creds")
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
@@ -315,6 +357,7 @@ def test_tail_orders_cookies_before_check_before_credential_save(monkeypatch: py
 
     assert rc == 0
     assert order == ["cookies", "check", "creds"]
+    client_factory.assert_called_once_with(read_only_auth=True)
 
 
 def test_tail_failed_session_check_saves_nothing(
@@ -324,7 +367,7 @@ def test_tail_failed_session_check_saves_nothing(
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: None)
     client = MagicMock()
     client.check_auth.return_value = False
-    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda: client)
+    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda **_kwargs: client)
     store = MagicMock()
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
 
@@ -346,7 +389,7 @@ def test_tail_without_pair_never_saves_credentials(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: None)
     client = MagicMock()
     client.check_auth.return_value = True
-    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda: client)
+    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda **_kwargs: client)
     store = MagicMock()
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
 
@@ -356,23 +399,64 @@ def test_tail_without_pair_never_saves_credentials(monkeypatch: pytest.MonkeyPat
     store.save.assert_not_called()
 
 
+def test_tail_reports_only_allowlisted_cookie_names(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: None)
+    client = MagicMock()
+    client.check_auth.return_value = True
+    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda **_kwargs: client)
+    cookies = _make_d2l_cookies()
+    cookies["d2lPassword=COOKIE_NAME_SECRET"] = "value"
+
+    rc = auth_mod._persist_check_report(cookies, json_output=True)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["cookies"] == list(auth_mod.COOKIE_NAMES)
+    assert "COOKIE_NAME_SECRET" not in json.dumps(payload)
+
+
 # ---------------------------------------------------------------------------
 # Credentials via flags / env / store (CliRunner smokes)
 # ---------------------------------------------------------------------------
 
-def test_credentials_via_flags_skip_prompt(
-    cli_runner: CliRunner, isolated_config: Path,
+@pytest.mark.parametrize("json_args", [[], ["--json"]])
+def test_removed_password_flag_never_echoes_its_value(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+    json_args: list[str],
 ) -> None:
-    """--user and --pass flags supply credentials without prompting."""
-    with _mock_sso():
-        result = _invoke_login(
-            cli_runner,
-            ["--user", "user@manipal.edu", "--pass", "secret", "--totp", "123456"],
-        )
+    """The removed argv password interface fails without reflecting the secret."""
+    sentinel = "ARGV_PASSWORD_SENTINEL"
 
-    assert result.exit_code == 0
-    assert "Username:" not in result.output
-    assert "Password:" not in result.output
+    result = _invoke_login(
+        cli_runner,
+        ["--user", "user@manipal.edu", "--pass", sentinel, *json_args],
+    )
+
+    assert result.exit_code == (1 if json_args else 2)
+    assert sentinel not in result.stdout + result.stderr
+    assert "Invalid command arguments" in result.output
+
+
+def test_mfa_methods_has_no_password_flag_and_never_echoes_removed_value(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+) -> None:
+    help_result = cli_runner.invoke(cli, ["auth", "mfa-methods", "--help"])
+    sentinel = "ARGV_PASSWORD_SENTINEL"
+    rejected = cli_runner.invoke(
+        cli,
+        ["auth", "mfa-methods", "--user", "user@manipal.edu", "--pass", sentinel],
+    )
+
+    assert help_result.exit_code == 0
+    assert "--pass" not in help_result.output
+    assert rejected.exit_code == 2
+    assert sentinel not in rejected.stdout + rejected.stderr
+    assert "Invalid command arguments" in rejected.output
 
 
 def test_credentials_via_env_vars(
@@ -393,21 +477,21 @@ def test_credentials_via_env_vars(
 def test_flags_take_precedence_over_env_vars(
     cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--user/--pass flags take precedence over LIGHTHOUSE_USERNAME/PASSWORD."""
+    """The username flag combines with the environment-only password channel."""
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "env_user@manipal.edu")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "env_secret")
 
     with _mock_sso() as (sso, _client):
         result = _invoke_login(
             cli_runner,
-            ["--user", "flag_user@manipal.edu", "--pass", "flag_secret", "--totp", "123456"],
+            ["--user", "flag_user@manipal.edu", "--totp", "123456"],
         )
 
     assert result.exit_code == 0
     sso.login.assert_called_once()
     call_args = sso.login.call_args.args
     assert call_args[0] == "flag_user@manipal.edu"
-    assert call_args[1] == "flag_secret"
+    assert call_args[1] == "env_secret"
 
 
 def test_mixed_per_field_sources_preserve_precedence(
@@ -481,6 +565,58 @@ def test_explicit_app_method_ignores_stale_sms_pending(
     sso.login.assert_called_once()
     assert sso.login.call_args.args[2] == "123456"
     sso.complete_mfa_pending.assert_not_called()
+
+
+def test_successful_inline_login_clears_stale_pending_for_next_default_login(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed fresh flow cannot be resumed by the next default login."""
+    from lighthouse_cli.config import save_mfa_pending
+
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    save_mfa_pending({"mfa_method": "sms", "created_at": "2026-08-27T00:00:00Z"})
+
+    with _mock_sso() as (sso, _client):
+        first = _invoke_login(
+            cli_runner,
+            ["--mfa-method", "app", "--totp", "123456"],
+        )
+        second = _invoke_login(cli_runner, ["--totp", "654321"])
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert sso.login.call_count == 2
+    sso.complete_mfa_pending.assert_not_called()
+    assert not (isolated_config / "mfa_pending.json").exists()
+
+
+def test_deferred_mfa_does_not_clear_pending_checkpoint(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deferred MFA result remains eligible for ``auth verify``."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    pending_error = auth_mod.MfaPendingError(
+        "Verification code sent.",
+        step="MFA",
+        recovery="Run: lighthouse auth verify <code>",
+    )
+
+    with patch.object(auth_mod, "clear_mfa_pending") as clear_pending:
+        with _mock_sso(login_side_effect=pending_error):
+            result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["mfa_pending"] is True
+    assert payload["message"] == "Verification code sent."
+    assert payload["recovery"] == "lighthouse auth verify <code>"
+    clear_pending.assert_not_called()
 
 
 def test_totp_stdin_pipe(
@@ -667,13 +803,13 @@ def test_unexpected_failure_wrapped_cleanly(
         result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
 
     assert result.exit_code == 1
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["success"] is False
     # F18: only the exception TYPE is surfaced — raw str(exc) may embed
     # URLs/tokens, so the message text must not appear.
     assert "Unexpected error (RuntimeError)" in data["error"]
-    assert "kaboom" not in result.output
-    assert "Traceback" not in result.output
+    assert "kaboom" not in result.stdout
+    assert "Traceback" not in result.stdout
     assert "Traceback" not in result.stderr
 
 
@@ -711,7 +847,7 @@ def test_json_output_success(
         result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
 
     assert result.exit_code == 0
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data.get("success") is True
     assert "cookies" in data
 
@@ -728,15 +864,109 @@ def test_json_output_failure(
         result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
 
     assert result.exit_code == 1
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data.get("success") is False
     assert "error" in data
+
+
+def test_auth_json_error_has_one_stdout_document_and_stderr_diagnostic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = auth_mod._auth_error(
+        "Invalid username or password.", json_output=True
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert json.loads(captured.out) == {
+        "success": False,
+        "error": "Invalid username or password.",
+    }
+    assert captured.err == "Error: Invalid username or password.\n"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'headers={"Cookie":"COOKIE_SENTINEL"}',
+        "{'password':'PASSWORD_SENTINEL'}",
+        'error={"apiKey":"REAL_KEY"}',
+        "Run: lighthouse auth login --pass SECRET",
+        "foo token SECRET",
+    ],
+)
+def test_auth_json_error_uses_opaque_fallback_for_secret_shaped_text(
+    raw: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = auth_mod._auth_error(raw, json_output=True)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    payload = json.loads(captured.out)
+    assert payload["error"] == "Authentication failed. Check your credentials and try again."
+    assert "SENTINEL" not in captured.out + captured.err
+    assert "SECRET" not in captured.out + captured.err
+    assert "REAL_KEY" not in captured.out + captured.err
+    assert captured.err.startswith("Error: Authentication failed.")
+
+
+def test_interrupted_json_error_has_one_stdout_document_and_stderr_diagnostic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = auth_mod._interrupted(json_output=True)
+
+    captured = capsys.readouterr()
+    assert rc == 130
+    assert json.loads(captured.out) == {
+        "success": False,
+        "error": "Interrupted by user",
+    }
+    assert captured.err == "Error: Interrupted by user\n"
+
+
+def test_mfa_pending_outputs_opaque_message_and_allowlisted_recovery(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    pending = auth_mod.MfaPendingError(
+        "FULL-DISPLAY-SENTINEL user@example.com +919876541234",
+        step="MFA",
+        recovery="Run: lighthouse auth verify --totp SECRET",
+    )
+    with _mock_sso(login_side_effect=pending):
+        json_result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
+    with _mock_sso(login_side_effect=pending):
+        human_result = _invoke_login(cli_runner, ["--totp", "123456"])
+
+    assert json_result.exit_code == 0
+    payload = json.loads(json_result.stdout)
+    assert payload == {
+        "success": False,
+        "mfa_pending": True,
+        "message": "Authentication failed. Check your credentials and try again.",
+        "recovery": None,
+    }
+    assert "FULL-DISPLAY-SENTINEL" not in json_result.stdout + json_result.stderr
+    assert "user@example.com" not in json_result.stdout + json_result.stderr
+    assert "+919876541234" not in json_result.stdout + json_result.stderr
+    assert "SECRET" not in json_result.stdout + json_result.stderr
+
+    assert human_result.exit_code == 0
+    assert "Authentication failed. Check your credentials" in human_result.output
+    assert "FULL-DISPLAY-SENTINEL" not in human_result.output
+    assert "user@example.com" not in human_result.output
+    assert "+919876541234" not in human_result.output
+    assert "SECRET" not in human_result.output
 
 
 def test_keyring_failure_is_clean_under_json(
     cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No key source: stdout stays one JSON object; stderr carries no noise."""
+    """No key source: stdout stays one JSON object; stderr is a safe diagnostic."""
     monkeypatch.delenv("LIGHTHOUSE_SECRETS_PASSPHRASE", raising=False)
     monkeypatch.setattr(
         "lighthouse_cli.credential_store._load_keyring_module", lambda: None,
@@ -747,13 +977,12 @@ def test_keyring_failure_is_clean_under_json(
     result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
 
     assert result.exit_code == 1
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["success"] is False
     assert "LIGHTHOUSE_SECRETS_PASSPHRASE" in data["error"]
-    # No human chatter or traceback leaks to either stream.
-    assert "Error:" not in result.output
+    assert "Error: No encryption key source" in result.stderr
     assert "Traceback" not in result.stderr
-    assert "Traceback" not in result.output
+    assert "Traceback" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -806,6 +1035,49 @@ def test_verify_never_saves_credentials(
     store_cls.return_value.save.assert_not_called()
 
 
+def test_verify_without_pending_reports_usage_before_key_preflight(
+    cli_runner: CliRunner, isolated_config: Path,
+) -> None:
+    """A missing checkpoint must not create or probe an encryption key."""
+    store = MagicMock()
+    store.mfa_pending_file = isolated_config / "mfa_pending.json"
+
+    with patch.object(auth_mod, "CredentialStore", return_value=store), \
+         patch.object(auth_mod, "MicrosoftSSOClient") as sso_cls:
+        result = cli_runner.invoke(cli, ["auth", "verify", "123456", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"].startswith("No pending MFA session")
+    store.preflight.assert_not_called()
+    sso_cls.assert_not_called()
+
+
+def test_verify_with_encrypted_pending_without_key_reports_key_source(
+    cli_runner: CliRunner,
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing sealed checkpoint still requires its encryption key."""
+    from lighthouse_cli.config import save_mfa_pending
+
+    save_mfa_pending({"mfa_method": "sms", "created_at": "2026-08-27T00:00:00Z"})
+    monkeypatch.delenv("LIGHTHOUSE_SECRETS_PASSPHRASE", raising=False)
+    monkeypatch.setattr(
+        "lighthouse_cli.credential_store._load_keyring_module", lambda: None,
+    )
+
+    with patch.object(auth_mod, "MicrosoftSSOClient") as sso_cls:
+        result = cli_runner.invoke(
+            cli, ["auth", "verify", "123456", "--json"], catch_exceptions=False,
+        )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert "No encryption key source" in payload["error"]
+    sso_cls.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Empty credential rejection
 # ---------------------------------------------------------------------------
@@ -846,7 +1118,7 @@ def test_totp_without_value_error(
     result = _invoke_login(cli_runner, ["--totp"])
 
     assert result.exit_code == 2
-    assert "requires an argument" in result.output.lower() or "totp" in result.output.lower()
+    assert "invalid command arguments" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +1162,145 @@ def test_username_prompt_on_stdout_for_humans(
 
     assert result.exit_code == 0
     assert "Username (email):" in result.output
+
+
+def test_interactive_login_defaults_to_registered_method_picker(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain TTY login asks the user to choose from Microsoft's proof list."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, [], input="n\n")
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "choose"
+    assert sso.login.call_args.kwargs["defer_mfa_to_pending"] is False
+    assert "You will be asked to pick a verification method." in result.output
+
+
+def test_interactive_login_preserves_explicit_auto_method(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit automation-style selector is never replaced by the picker."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(
+                cli_runner, ["--mfa-method", "auto"], input="n\n",
+            )
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "auto"
+
+
+def test_environment_mfa_method_ignores_surrounding_whitespace(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.setenv("LIGHTHOUSE_MFA_METHOD", " app ")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=False):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, ["--totp", "123456"])
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "app"
+
+
+def test_interactive_literal_totp_without_method_keeps_auto(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-supplied app code keeps legacy auto selection, not ambiguous choose."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(
+                cli_runner, ["--totp", "123456"], input="n\n",
+            )
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "auto"
+
+
+def test_noninteractive_login_default_remains_auto_and_deferred(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scripts keep tenant-default selection and the resumable verify flow."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+
+    with patch.object(auth_mod, "_is_interactive", return_value=False):
+        with _mock_sso() as (sso, _client):
+            result = _invoke_login(cli_runner, [])
+
+    assert result.exit_code == 0
+    assert sso.login.call_args.kwargs["mfa_method"] == "auto"
+    assert sso.login.call_args.kwargs["defer_mfa_to_pending"] is True
+    assert "Show the full command guide?" not in result.output
+
+
+def test_interactive_login_shows_next_steps_and_full_guide(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed TTY login leads into useful commands without running them."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso():
+            result = _invoke_login(cli_runner, [], input="\n")
+
+    assert result.exit_code == 0
+    assert "Login complete. Session saved and verified." in result.output
+    assert "Try next:" in result.output
+    assert "lighthouse courses" in result.output
+    assert "lighthouse download <course> --dry-run" in result.output
+    assert "Show the full command guide? [Y/n]:" in result.stderr
+    assert "Command guide:" in result.output
+    assert "Read only:" in result.output
+    assert "Remote change:" in result.output
+    assert "Cookies:" not in result.output
+
+
+def test_interactive_login_can_skip_full_guide(
+    cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declining the optional guide still leaves the compact next steps visible."""
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+    monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+
+    with patch.object(auth_mod, "_is_interactive", return_value=True):
+        with _mock_sso():
+            result = _invoke_login(cli_runner, [], input="n\n")
+
+    assert result.exit_code == 0
+    assert "Try next:" in result.output
+    assert "Command guide:" not in result.output
+
+
+def test_login_guide_prompt_eof_is_clean(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed stdin after successful login never turns success into a traceback."""
+    monkeypatch.setattr("builtins.input", MagicMock(side_effect=EOFError))
+
+    auth_mod._print_login_next_steps()
+
+    captured = capsys.readouterr()
+    assert "Try next:" in captured.out
+    assert "Show the full command guide? [Y/n]:" in captured.err
+    assert "Command guide:" not in captured.out
 
 
 def test_non_tty_no_credentials_error(
@@ -1122,14 +1533,13 @@ class TestUnreadablePendingCheckpoint:
         assert "unreadable MFA pending session" in result.output
         assert "Unexpected error" not in result.output
 
-    def test_credential_store_error_text_is_not_masked(
+    def test_credential_store_error_text_is_opaque(
         self,
         cli_runner: CliRunner,
         isolated_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """First-party CredentialStoreError messages stay actionable; only
-        third-party exception text is masked to its type."""
+        """CredentialStoreError text is not copied into auth output."""
         from lighthouse_cli.credential_store import CredentialStoreError
 
         monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
@@ -1144,8 +1554,8 @@ class TestUnreadablePendingCheckpoint:
 
         assert result.exit_code == 1, result.output
         assert sso.login.called  # the flow itself completed
-        assert "sealed-hint-sentinel" in result.output
-        assert "Unexpected error" not in result.output
+        assert "sealed-hint-sentinel" not in result.output
+        assert "Authentication failed" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1214,6 +1624,92 @@ class TestAuthMfaMethodsCommand:
         assert "--mfa-method call" in result.output
         assert "Microsoft default" in result.output
         assert "+919876541234" not in result.output
+
+    def test_malicious_display_is_masked_in_json_output(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lighthouse_cli.ms_mfa import UserProof
+
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        proof = UserProof(
+            "OneWaySMS",
+            "FULL-DISPLAY-SENTINEL user@example.com +919876541234",
+            "+919876541234",
+            True,
+        )
+        with patch.object(
+            auth_mod.MicrosoftSSOClient, "probe_mfa_methods",
+            MagicMock(return_value=_probe_result(proofs=[proof])),
+        ):
+            result = self._invoke(cli_runner, ["--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["methods"][0]["method"] == "sms"
+        assert payload["methods"][0]["display"] == (
+            "Text code (SMS or WhatsApp): ***1234"
+        )
+        assert "FULL-DISPLAY-SENTINEL" not in result.stdout
+        assert "user@example.com" not in result.stdout
+        assert "+919876541234" not in result.stdout
+
+    def test_malicious_display_is_masked_in_human_output(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lighthouse_cli.ms_mfa import UserProof
+
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        proof = UserProof(
+            "TwoWayVoiceMobile",
+            "FULL-DISPLAY-SENTINEL user@example.com +919876541234",
+            "+919876541234",
+            True,
+        )
+        with patch.object(
+            auth_mod.MicrosoftSSOClient, "probe_mfa_methods",
+            MagicMock(return_value=_probe_result(proofs=[proof])),
+        ):
+            result = self._invoke(cli_runner, [])
+
+        assert result.exit_code == 0
+        assert "Voice call to mobile: ***1234" in result.output
+        assert "FULL-DISPLAY-SENTINEL" not in result.output
+        assert "user@example.com" not in result.output
+        assert "+919876541234" not in result.output
+
+    def test_unrecognized_method_id_is_rendered_as_other(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from lighthouse_cli.ms_mfa import UserProof
+
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        proof = UserProof(
+            "FutureMethod\x1b[31mPASSWORD_SENTINEL",
+            "FULL-DISPLAY-SENTINEL",
+            "",
+            True,
+        )
+        with patch.object(
+            auth_mod.MicrosoftSSOClient, "probe_mfa_methods",
+            MagicMock(return_value=_probe_result(proofs=[proof])),
+        ):
+            json_result = self._invoke(cli_runner, ["--json"])
+            human_result = self._invoke(cli_runner, [])
+
+        payload = json.loads(json_result.stdout)
+        assert payload["methods"][0]["id"] == "other"
+        assert payload["methods"][0]["method"] is None
+        combined = json_result.stdout + json_result.stderr + human_result.output
+        assert "FutureMethod" not in combined
+        assert "PASSWORD_SENTINEL" not in combined
+        assert "FULL-DISPLAY-SENTINEL" not in combined
+        assert "Other verification method" in human_result.output
 
     def test_unknown_method_has_no_fake_cli_selector(
         self, cli_runner: CliRunner, isolated_config: Path,
@@ -1317,7 +1813,7 @@ class TestMfaMethodVocabulary:
                 cli_runner,
                 ["--mfa-method", method, "--totp", "123456", "--json"],
             )
-        assert result.exit_code == 2
+        assert result.exit_code == 1
         assert "--totp" in json.loads(result.stdout)["error"]
         sso.login.assert_not_called()
 

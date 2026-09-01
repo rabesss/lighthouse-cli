@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
+from lighthouse_cli.manifest import compute_sha256
 
 
 @pytest.fixture
@@ -503,7 +504,8 @@ class TestMultiCourseJsonOutput:
 
             assert "also_errors" in data
             assert len(data["also_errors"]) == 1
-            assert "99999" in data["also_errors"][0]
+            assert data["also_errors"][0] == "Course not found. Run: lighthouse courses"
+            assert "99999" not in data["also_errors"][0]
 
     def test_download_all_courses_json_includes_semester_and_summary(
         self, cli_runner, tmp_path
@@ -648,22 +650,27 @@ class TestMultiCourseJsonOutput:
         course_dir.mkdir(parents=True)
         manifest_path = course_dir / ".lighthouse.json"
         # Write simpler, valid JSON
+        unchanged_content = b"x" * 100
+        old_updated_content = b"old updated content"
         manifest_path.write_text(json.dumps({
             "1110": {
-                "sha256": "abc123def456",
+                "sha256": compute_sha256(unchanged_content),
                 "filename": "f.pdf",
-                "size": 100,
+                "size": len(unchanged_content),
                 "downloaded_at": "2026-01-01T00:00:00Z",
                 "last_modified": "2026-01-01T00:00:00Z",
             },
             "1111": {
-                "sha256": "old_hash_val",
+                "sha256": compute_sha256(old_updated_content),
                 "filename": "g.pdf",
-                "size": 50,
+                "size": len(old_updated_content),
                 "downloaded_at": "2025-12-01T00:00:00Z",
                 "last_modified": "2025-12-01T00:00:00Z",
             },
         }))
+        module_dir = course_dir / "Mod"
+        module_dir.mkdir()
+        (module_dir / "f.pdf").write_bytes(unchanged_content)
 
         def get_content_toc(cid):
             return {
@@ -711,4 +718,5 @@ class TestMultiCourseJsonOutput:
             # One skipped, one updated
             assert len(course["skipped"]) == 1, f"Expected 1 skipped, got {course['skipped']}"
             assert course["skipped"][0]["topic_id"] == "1110"
+            assert course["skipped"][0]["sha256"] == compute_sha256(unchanged_content)
             assert len(course["updated"]) == 1, f"Expected 1 updated, got {course['updated']}"

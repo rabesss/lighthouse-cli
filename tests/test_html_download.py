@@ -49,16 +49,16 @@ class TestHtmlDownloadEndToEnd:
 
         # Mock HTTP layer — but NOT get_topic_html itself.
         # The real get_topic_html() will be called and must not raise NameError.
-        def mock_get_json(path):
+        def mock_get_raw(path, **_kwargs):
             if "/content/topics/500" in str(path):
-                return {
-                    "Title": "Lecture Notes",
-                    "Body": {"Text": "<html><body><h1>Hello World</h1></body></html>"},
-                    "Html": "",
-                }
-            raise AssertionError(f"Unexpected get_json call: {path}")
-
-        def mock_get_raw(path):
+                return (
+                    json.dumps({
+                        "Title": "Lecture Notes",
+                        "Body": {"Text": "<html><body><h1>Hello World</h1></body></html>"},
+                        "Html": "",
+                    }).encode("utf-8"),
+                    {},
+                )
             raise AssertionError(f"Unexpected get_raw call: {path}")
 
         def mock_cookies():
@@ -67,7 +67,6 @@ class TestHtmlDownloadEndToEnd:
         with patch.object(LighthouseClient, "get_courses", return_value=[
             {"OrgUnitId": 44347, "Name": "Test Course", "Code": "X"}
         ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "get_json", side_effect=mock_get_json), \
              patch.object(LighthouseClient, "get_raw", side_effect=mock_get_raw), \
              patch.object(LighthouseClient, "cookies", property(lambda self: mock_cookies())):
 
@@ -108,20 +107,18 @@ class TestHtmlDownloadEndToEnd:
             }]
         }
 
-        def mock_get_json(path):
-            if "/content/topics/600" in str(path):
-                return {
-                    "Title": "Unit 1: Intro <Test>",
-                    "Body": {"Text": "<p>Content</p>"},
-                    "Html": "",
-                }
-            raise AssertionError(f"Unexpected get_json call: {path}")
-
         with patch.object(LighthouseClient, "get_courses", return_value=[
             {"OrgUnitId": 44347, "Name": "Course", "Code": "X"}
         ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "get_json", side_effect=mock_get_json), \
-             patch.object(LighthouseClient, "get_raw", side_effect=lambda p: (b"", {})), \
+             patch.object(
+                 LighthouseClient,
+                 "get_raw",
+                 return_value=(json.dumps({
+                     "Title": "Unit 1: Intro <Test>",
+                     "Body": {"Text": "<p>Content</p>"},
+                     "Html": "",
+                 }).encode("utf-8"), {}),
+             ), \
              patch.object(LighthouseClient, "cookies", property(lambda self: {})):
 
             result = cli_runner.invoke(
@@ -150,20 +147,18 @@ class TestHtmlDownloadEndToEnd:
             }]
         }
 
-        def mock_get_json(path):
-            if "/content/topics/700" in str(path):
-                return {
-                    "Title": "Overview",
-                    "Body": {"Text": "<p>Overview content</p>"},
-                    "Html": "",
-                }
-            raise AssertionError(f"Unexpected get_json: {path}")
-
         with patch.object(LighthouseClient, "get_courses", return_value=[
             {"OrgUnitId": 44347, "Name": "Course", "Code": "X"}
         ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "get_json", side_effect=mock_get_json), \
-             patch.object(LighthouseClient, "get_raw", side_effect=lambda p: (b"", {})), \
+             patch.object(
+                 LighthouseClient,
+                 "get_raw",
+                 return_value=(json.dumps({
+                     "Title": "Overview",
+                     "Body": {"Text": "<p>Overview content</p>"},
+                     "Html": "",
+                 }).encode("utf-8"), {}),
+             ), \
              patch.object(LighthouseClient, "cookies", property(lambda self: {})):
 
             result = cli_runner.invoke(

@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
 
 from lighthouse_cli.manifest import (
+    MAX_MANIFEST_SIZE,
     Manifest,
     ManifestCorruptError,
+    ManifestError,
     REQUIRED_ENTRY_KEYS,
+    compute_file_sha256,
     compute_sha256,
+    normalize_sha256,
     MANIFEST_FILENAME,
 )
 
@@ -39,6 +44,14 @@ def manifest_path(temp_course_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 class TestComputeSHA256:
+    def test_compute_file_sha256_streams_file_contents(self, tmp_path: Path) -> None:
+        path = tmp_path / "payload.bin"
+        path.write_bytes(b"chunked payload")
+
+        assert compute_file_sha256(path, chunk_size=3) == compute_sha256(
+            b"chunked payload"
+        )
+
     def test_sha256_from_bytes(self):
         """SHA-256 is computed from raw file bytes, not filename."""
         content = b"Hello, World!"
@@ -133,14 +146,14 @@ class TestManifestSchema:
         """Manifest saves and loads identical data."""
         entries = {
             "12345": {
-                "sha256": "abc123def456",
+                "sha256": "a" * 64,
                 "filename": "Lecture 1.pdf",
                 "size": 1024,
                 "downloaded_at": "2026-05-10T10:00:00Z",
                 "last_modified": "2026-01-01T00:00:00Z",
             },
             "12346": {
-                "sha256": "789xyz",
+                "sha256": "b" * 64,
                 "filename": "Lecture 2.pdf",
                 "size": 2048,
                 "downloaded_at": "2026-05-10T10:05:00Z",
@@ -152,7 +165,7 @@ class TestManifestSchema:
 
         loaded = Manifest.load(manifest_path)
         assert len(loaded) == 2
-        assert loaded.get("12345")["sha256"] == "abc123def456"
+        assert loaded.get("12345")["sha256"] == "a" * 64
         assert loaded.get("12346")["filename"] == "Lecture 2.pdf"
 
     def test_manifest_load_missing_file_returns_empty(self, tmp_path: Path):
@@ -174,6 +187,120 @@ class TestManifestSchema:
         # File still exists and is still corrupt
         assert manifest_path.exists()
 
+    @pytest.mark.parametrize("size", ["seven", -1, True])
+    def test_manifest_load_rejects_malformed_sizes(self, manifest_path: Path, size):
+        """Untrusted sizes are rejected before sync arithmetic can see them."""
+        manifest_path.write_text(json.dumps({"100": {
+            "sha256": "",
+            "filename": "file.pdf",
+            "size": size,
+            "downloaded_at": "2026-05-10T10:00:00Z",
+            "last_modified": "2026-01-01T00:00:00Z",
+        }}), encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError, match="size"):
+            Manifest.load(manifest_path)
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999"])
+    def test_manifest_load_rejects_non_finite_json_anywhere(
+        self,
+        manifest_path: Path,
+        literal: str,
+    ) -> None:
+        payload = (
+            '{"100":{"sha256":"","filename":"file.pdf","size":1,'
+            '"downloaded_at":"2026-01-01T00:00:00Z","last_modified":"",'
+            '"note":'
+            + literal
+            + "}}"
+        )
+        manifest_path.write_text(payload, encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError, match="corrupt or unreadable"):
+            Manifest.load(manifest_path)
+
+    @pytest.mark.parametrize("entry", [None, [], "not-an-entry", 42])
+    def test_manifest_load_rejects_non_object_entries(self, manifest_path: Path, entry):
+        manifest_path.write_text(json.dumps({"100": entry}), encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError, match="Manifest entry"):
+            Manifest.load(manifest_path)
+
+    def test_manifest_validation_never_embeds_untrusted_identifier(
+        self,
+        manifest_path: Path,
+    ) -> None:
+        sentinel = "SAMLResponse=MANIFEST_SECRET_SENTINEL"
+        manifest_path.write_text(json.dumps({sentinel: None}), encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError) as exc_info:
+            Manifest.load(manifest_path)
+
+        assert "MANIFEST_SECRET_SENTINEL" not in str(exc_info.value)
+        assert "SAMLResponse" not in str(exc_info.value)
+
+    def test_manifest_load_wraps_invalid_utf8(self, manifest_path: Path) -> None:
+        manifest_path.write_bytes(b"\xff")
+
+        with pytest.raises(
+            ManifestCorruptError,
+            match="corrupt or unreadable",
+        ):
+            Manifest.load(manifest_path)
+
+    def test_normalize_sha256_rejects_arbitrary_hash_text(self):
+        assert normalize_sha256("not-a-digest") == ""
+        assert normalize_sha256("a" * 64) == "a" * 64
+
+    def test_manifest_save_rejects_non_digest_hash(self, manifest_path: Path):
+        entry = {
+            "sha256": "not-a-digest",
+            "filename": "file.pdf",
+            "size": 0,
+            "downloaded_at": "2026-05-10T10:00:00Z",
+            "last_modified": "2026-01-01T00:00:00Z",
+        }
+
+        with pytest.raises(ManifestError, match="sha256"):
+            Manifest({"100": entry}).save(manifest_path)
+
+    def test_manifest_load_normalizes_uppercase_sha256(self, manifest_path: Path):
+        manifest_path.write_text(json.dumps({"100": {
+            "sha256": "A" * 64,
+            "filename": "file.pdf",
+            "size": 1,
+            "downloaded_at": "2026-05-10T10:00:00Z",
+            "last_modified": "2026-01-01T00:00:00Z",
+        }}), encoding="utf-8")
+
+        loaded = Manifest.load(manifest_path)
+
+        assert loaded.get("100")["sha256"] == "a" * 64
+
+    def test_manifest_load_rejects_huge_integer_size(self, manifest_path: Path):
+        manifest_path.write_text(json.dumps({"100": {
+            "sha256": "a" * 64,
+            "filename": "file.pdf",
+            "size": MAX_MANIFEST_SIZE + 1,
+            "downloaded_at": "2026-05-10T10:00:00Z",
+            "last_modified": "2026-01-01T00:00:00Z",
+        }}), encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError, match="size"):
+            Manifest.load(manifest_path)
+
+    def test_manifest_save_is_owner_only(self, manifest_path: Path):
+        entry = {
+            "sha256": "",
+            "filename": "file.pdf",
+            "size": 0,
+            "downloaded_at": "2026-05-10T10:00:00Z",
+            "last_modified": "2026-01-01T00:00:00Z",
+        }
+        Manifest({"100": entry}).save(manifest_path)
+
+        assert stat.S_IMODE(manifest_path.stat().st_mode) & 0o077 == 0
+
 
 # ---------------------------------------------------------------------------
 # Atomic write
@@ -183,7 +310,7 @@ class TestManifestAtomicWrite:
     def test_atomic_write_leaves_no_temp_file(self, manifest_path: Path):
         """After save(), no .json.tmp file remains."""
         m = Manifest({"12345": {
-            "sha256": "abc",
+            "sha256": "a" * 64,
             "filename": "test.pdf",
             "size": 100,
             "downloaded_at": "2026-05-10T10:00:00Z",
@@ -198,7 +325,7 @@ class TestManifestAtomicWrite:
     def test_atomic_write_creates_manifest(self, manifest_path: Path):
         """save() creates the manifest file."""
         m = Manifest({"12345": {
-            "sha256": "abc",
+            "sha256": "a" * 64,
             "filename": "test.pdf",
             "size": 100,
             "downloaded_at": "2026-05-10T10:00:00Z",
@@ -212,7 +339,7 @@ class TestManifestAtomicWrite:
         """Simulated crash after writing temp file leaves old manifest intact."""
         # Pre-write an old manifest
         old_entries = {"99999": {
-            "sha256": "oldhash",
+            "sha256": "a" * 64,
             "filename": "old.pdf",
             "size": 99,
             "downloaded_at": "2026-01-01T10:00:00Z",
@@ -220,25 +347,15 @@ class TestManifestAtomicWrite:
         }}
         Manifest(old_entries).save(manifest_path)
 
-        # New manifest save that fails partway through
-        new_entries = {"12345": {
-            "sha256": "newhash",
-            "filename": "new.pdf",
-            "size": 200,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }}
-        m = Manifest(new_entries)
-
-        # Simulate crash: patch os.replace to fail AFTER tmp is written
+        # Simulate a stale temp artifact left by an interrupted write.
         tmp = manifest_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"incomplete": True}), encoding="utf-8")  # Write tmp but don't replace
 
-        # Load should return old manifest or empty (never incomplete)
-        # Since we manually wrote the tmp, the real file still has old content
+        # The committed manifest remains authoritative; a stale temp artifact
+        # is ignored and must never replace it.
         loaded = Manifest.load(manifest_path)
-        # The old manifest should still be readable
-        assert loaded.get("99999") is not None or not manifest_path.exists() or not tmp.exists()
+        assert loaded.entries == old_entries
+        assert json.loads(tmp.read_text(encoding="utf-8")) == {"incomplete": True}
 
     def test_atomic_write_is_valid_json_after_save(self, manifest_path: Path):
         """The written manifest is always valid JSON (no truncation)."""

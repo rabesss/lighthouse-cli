@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, CourseNotFoundError
 from lighthouse_cli.cli import cli
+from lighthouse_cli.commands import _resolve_also_course, _resolve_course_scope
 
 
 @pytest.fixture
@@ -36,6 +38,57 @@ def _config_for(semesters, enrollments):
                 break
         tracked[oid] = {"name": name, "semester": sem_label}
     return {"tracked_courses": tracked}
+
+
+def test_blank_also_selector_never_matches_every_course() -> None:
+    client = MagicMock()
+    client.get_enrolled_courses.return_value = [
+        {"OrgUnitId": 123, "Name": "Course"},
+    ]
+
+    with pytest.raises(CourseNotFoundError, match="cannot be empty"):
+        _resolve_also_course(client, "   ")
+
+
+def test_course_scope_order_is_deterministic_and_does_not_mutate_inputs() -> None:
+    """Semester IDs sort numerically while extras retain input order and dedupe."""
+    semesters = [{"OrgUnitId": 200, "Name": "Sem II"}]
+    enrollments = [
+        {"OrgUnit": {"Id": 302, "Name": "Course C"}},
+        {"OrgUnit": {"Id": 300, "Name": "Course A"}},
+        {"OrgUnit": {"Id": 301, "Name": "Course B"}},
+        {"OrgUnit": {"Id": 300, "Name": "Course A"}},
+    ]
+    courses = [
+        {"OrgUnitId": 304, "Name": "Course D"},
+        {"OrgUnitId": 305, "Name": "Course E"},
+        {"OrgUnitId": 300, "Name": "Course A"},
+        {"OrgUnitId": 301, "Name": "Course B"},
+        {"OrgUnitId": 302, "Name": "Course C"},
+    ]
+    config = {
+        "300": {"semester": "Sem II"},
+        "301": {"semester": "Sem II"},
+        "302": {"semester": "Sem II"},
+    }
+    also_courses = ["305", "304", "305", "Course A"]
+    original_semesters = deepcopy(semesters)
+    original_enrollments = deepcopy(enrollments)
+    original_also_courses = list(also_courses)
+
+    client = MagicMock(spec=LighthouseClient)
+    client.get_semesters.return_value = semesters
+    client.get_course_enrollments.return_value = enrollments
+    client.get_enrolled_courses.return_value = courses
+    client.get_courses.return_value = courses
+
+    with patch("lighthouse_cli.commands._load_course_config", return_value=config):
+        result = _resolve_course_scope(client, "200", also_courses)
+
+    assert result == ([300, 301, 302, 305, 304], "Sem II", 200, [])
+    assert semesters == original_semesters
+    assert enrollments == original_enrollments
+    assert also_courses == original_also_courses
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +357,15 @@ class TestSemesterNotFound:
             {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "A"}},
         ]
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+            }
+        }))
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "A"},
@@ -316,7 +377,8 @@ class TestSemesterNotFound:
             )
 
             assert result.exit_code == 1
-            assert "No semester matching" in result.output or "Sem X" in result.output
+            assert "No matching semester" in result.output
+            assert "Sem X" not in result.output
             assert "lighthouse semesters" in result.output
 
 
@@ -380,11 +442,12 @@ class TestAmbiguousCourseName:
             )
 
             assert result.exit_code == 1
-            assert "Ambiguous" in result.output or "Multiple courses found" in result.output
-            assert "111" in result.output
-            assert "222" in result.output
-            # Should suggest using numeric OrgUnitId
-            assert "OrgUnitId" in result.output or "numeric" in result.output.lower()
+            assert "Ambiguous course match" in result.output
+            # The candidate IDs came from an untrusted upstream response and
+            # must not be copied into human-facing error output.
+            assert "111" not in result.output
+            assert "222" not in result.output
+            assert "numeric OrgUnitId" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +591,8 @@ class TestAlsoFlag:
             # Invalid --also is scope leniency: warning on stderr, exit unaffected
             # (uniform exit matrix — also_errors never affect exit codes).
             assert result.exit_code == 0
-            assert "99999" in result.output  # resolution error still reported
+            assert "Course not found. Run: lighthouse courses" in result.output
+            assert "99999" not in result.output
             # Course B-222 should still be downloaded
             course_dirs = {d.name for d in output_dir.iterdir()}
             assert "Course B-222" in course_dirs
@@ -547,6 +611,15 @@ class TestAlsoFlag:
             {"OrgUnit": {"Id": 333, "Name": "Physics", "Code": "S1"}},
         ]
 
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Signals", "semester": "Sem I"},
+                "333": {"name": "Physics", "semester": "Sem I"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -556,7 +629,8 @@ class TestAlsoFlag:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
@@ -590,6 +664,14 @@ class TestAlsoFlag:
             {"OrgUnit": {"Id": 333, "Name": "Physics", "Code": "S2"}},
         ]
 
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Signals", "semester": "Sem II"},
+                "333": {"name": "Physics", "semester": "Sem II"},
+            }
+        }))
+
         download_calls = []
 
         def get_content_toc(cid):
@@ -602,7 +684,8 @@ class TestAlsoFlag:
             download_calls.append(cid)
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 222, "Name": "Signals", "Code": "S2"},
@@ -748,6 +831,14 @@ class TestSyncMultiCourseScope:
             {"OrgUnit": {"Id": 222, "Name": "Signals", "Code": "S1"}},
         ]
 
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Signals", "semester": "Sem I"},
+            }
+        }))
+
         def get_content_toc(cid):
             return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
                 {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
@@ -757,7 +848,8 @@ class TestSyncMultiCourseScope:
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
@@ -793,26 +885,39 @@ class TestAlsoAmbiguousMatch:
             {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
         ]
         enrollments = [
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
+            {"OrgUnit": {"Id": 111, "Name": "Mathematics I", "Code": "M1"}},
+            {"OrgUnit": {"Id": 222, "Name": "Mathematics II", "Code": "M2"}},
         ]
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
                  {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
-             ]):
+             ]), patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value={"Modules": []},
+             ):
 
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "math", "-o", str(output_dir)],
             )
 
-            assert result.exit_code == 1
-            assert "Ambiguous" in result.output or "Multiple courses found" in result.output
-            assert "111" in result.output
-            assert "222" in result.output
-            assert "OrgUnitId" in result.output or "numeric" in result.output.lower()
+            assert result.exit_code == 0
+            assert "Ambiguous course match" in result.output
+            assert "111" not in result.output
+            assert "222" not in result.output
+            assert "numeric OrgUnitId" in result.output
 
     def test_also_not_found_raises_error_with_remediation_hint(self, cli_runner, tmp_path):
         """BLOCKING FIX: Invalid --also course raises CourseNotFoundError with hint."""
@@ -826,19 +931,32 @@ class TestAlsoAmbiguousMatch:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
         ]
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-             ]):
+             ]), patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value={"Modules": []},
+             ):
 
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "nonexistent", "-o", str(output_dir)],
             )
 
-            assert result.exit_code == 1
-            assert "not found" in result.output or "nonexistent" in result.output
+            assert result.exit_code == 0
+            assert "Course not found. Run: lighthouse courses" in result.output
+            assert "nonexistent" not in result.output
             assert "lighthouse courses" in result.output
 
 
@@ -857,6 +975,13 @@ class TestAlsoDuplicateDedup:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
         ]
 
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
         download_calls = []
 
         def get_content_toc(cid):
@@ -869,7 +994,8 @@ class TestAlsoDuplicateDedup:
             download_calls.append(cid)
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
@@ -900,6 +1026,13 @@ class TestAlsoDuplicateDedup:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
         ]
 
+        cfg_path = tmp_path / "course-config.json"
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
+
         download_calls = []
 
         def get_content_toc(cid):
@@ -912,7 +1045,8 @@ class TestAlsoDuplicateDedup:
             download_calls.append(cid)
             return f"content{cid}".encode(), "f.pdf"
 
-        with patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
              patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
              patch.object(LighthouseClient, "get_courses", return_value=[
                  {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},

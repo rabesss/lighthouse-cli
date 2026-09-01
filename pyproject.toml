@@ -20,6 +20,7 @@ dependencies = [
 rich = ["rich>=13.0"]
 credentials = ["keyring>=24.0", "cryptography>=41.0,<100"]
 auth = ["playwright>=1.40"]
+cdp = ["websockets>=12,<16"]
 dev = [
     "pytest>=7.0",
     "pytest-mock>=3.12",

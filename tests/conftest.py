@@ -65,7 +65,10 @@ def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> _FakeKeyringModule:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _hermetic_secrets_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def _hermetic_secrets_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Give every test a deterministic passphrase key source.
 
     Sealing/unsealing in tests never touches the developer's (or CI's) real
@@ -74,6 +77,9 @@ def _hermetic_secrets_key(monkeypatch: pytest.MonkeyPatch) -> None:
     "no key source" preflight failure clear it too.
     """
     monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", "suite-passphrase-sentinel")
+    # No test should read, migrate, warn about, or overwrite the developer's
+    # real saved session.  CredentialStore resolves this path per instance.
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(tmp_path / "config"))
 
 
 @pytest.fixture
