@@ -19,7 +19,7 @@ from .assignments import download_single_attachment as _download_single_attachme
 from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
 from .submit import cmd_submit  # noqa: F401 — re-export
 from .show import cmd_grades, cmd_announcements, cmd_calendar, cmd_assignments, cmd_quizzes  # noqa: F401 — re-export
-from .utils import get_enrolled_course_catalog
+from .utils import _course_identifier, get_enrolled_course_catalog
 
 
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
@@ -54,27 +54,6 @@ _CONTENT_MAX_TEXT = 512
 _CONTENT_TRUNCATED_TITLE = "[content truncated]"
 _QUIZ_RICH_TEXT_MAX_DEPTH = 16
 _QUIZ_RICH_TEXT_MAX_TEXT = 4096
-
-
-def _course_identifier(value: Any) -> int | None:
-    """Return only a numeric course ID for an external result payload.
-
-    Course arguments may be name substrings, so callers must keep the original
-    value while resolving them. Once a resolution fails, however, copying that
-    value into JSON or an error envelope can expose arbitrary input such as a
-    pasted cookie. Unknown and malformed identifiers therefore become JSON
-    ``null`` rather than being echoed.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
 
 
 def _positive_id(value: Any) -> int | None:

@@ -30,7 +30,15 @@ from typing import Any
 from urllib.parse import unquote
 
 from .api import LighthouseClient
-from .assignments import _safe_course_name, assignment_key, download_for_course, sync_for_course
+from .assignments import (
+    _course_boundary,
+    _has_symlink_component,
+    _positive_int,
+    _safe_course_name,
+    assignment_key,
+    download_for_course,
+    sync_for_course,
+)
 from .display import format_user_error, safe_display_text
 from .manifest import (
     MANIFEST_FILENAME,
@@ -118,13 +126,6 @@ _OUTPUT_PATH_SESSION_VALUE_RE = re.compile(
 _OUTPUT_PATH_LOWERCASE_SESSION_VALUE_RE = re.compile(
     r"(?x)(?<![a-z0-9])session\b\s+[a-z][a-z0-9._-]{7,}(?![a-z0-9])"
 )
-
-
-def _positive_int(value: object) -> int | None:
-    """Return a strictly positive integer topic identifier, or ``None``."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
 
 
 def _safe_last_modified(value: object) -> str | None:
@@ -234,38 +235,6 @@ def _safe_size(value: Any) -> int:
     """Return a non-negative finite size suitable for result serialization."""
     size = _normalise_size(value)
     return size if size is not None else 0
-
-
-def _course_boundary(dest: Path) -> Path:
-    """Return a lexical course root, rejecting an existing course symlink."""
-    dest = Path(dest).expanduser()
-    absolute = dest.absolute()
-    current = Path(absolute.anchor)
-    for component in absolute.parts[1:]:
-        current /= component
-        if current.is_symlink():
-            raise ValueError("Course path contains a symlinked component")
-    return absolute
-
-
-def _has_symlink_component(path: Path, root: Path) -> bool:
-    """Return whether an existing descendant of *root* is a symlink."""
-    path = Path(path).expanduser().absolute()
-    root = Path(root).expanduser().absolute()
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return False
-
-    current = root
-    for component in relative.parts:
-        current /= component
-        try:
-            if current.is_symlink():
-                return True
-        except OSError:
-            return True
-    return False
 
 
 def safe_output_path_text(value: object) -> str | None:

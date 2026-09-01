@@ -87,7 +87,7 @@ class _BrowserHarnessFallback(NetworkError):
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Stop local CDP discovery before urllib follows an untrusted redirect."""
 
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
         raise NetworkError("Browser debugging endpoint returned a redirect.")
 
 
@@ -802,14 +802,6 @@ class LighthouseClient:
     def get_semesters(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mysemesters (cached)."""
         return self._cached("semesters", lambda: self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/mysemesters"))
-
-    def get_departments(self) -> list[dict[str, Any]]:
-        """GET /d2l/le/manageCourses/api/mydepartments (cached)."""
-        return self._cached("departments", lambda: self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/mydepartments"))
-
-    def get_roles(self) -> list[dict[str, Any]]:
-        """GET /d2l/le/manageCourses/api/myroles (cached)."""
-        return self._cached("roles", lambda: self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/myroles"))
 
     def get_courses(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mycourses – returns the Courses list (cached)."""

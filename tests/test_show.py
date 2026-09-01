@@ -35,7 +35,6 @@ def test_show_with_error_handling_generic_failure_returns_json_payload(capsys) -
         raise RuntimeError("fetch failed")
 
     payload = show._show_with_error_handling(
-        LighthouseClient(),
         42,
         fetch,
         "items",
@@ -52,7 +51,6 @@ def test_show_with_error_handling_session_expiry_returns_json_payload(capsys) ->
         raise SessionExpiredError("session expired")
 
     payload = show._show_with_error_handling(
-        LighthouseClient(),
         42,
         fetch,
         "items",
@@ -73,7 +71,6 @@ def test_show_with_error_handling_human_failure_returns_error(capsys) -> None:
         raise RuntimeError("fetch failed")
 
     rc = show._show_with_error_handling(
-        LighthouseClient(),
         42,
         fetch,
         "items",

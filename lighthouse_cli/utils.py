@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 import uuid
@@ -9,7 +11,55 @@ import urllib.parse
 from contextlib import suppress
 from inspect import isfunction, ismethod
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
+
+
+# ---------------------------------------------------------------------------
+# External result identifiers
+# ---------------------------------------------------------------------------
+
+def _course_identifier(value: Any) -> int | None:
+    """Return only a numeric course ID for an external result payload.
+
+    Failed name-based resolution must not echo arbitrary input, including a
+    pasted credential, into JSON or human diagnostics.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Strict JSON parsing
+# ---------------------------------------------------------------------------
+
+def _reject_non_finite_json(_value: str) -> NoReturn:
+    """Reject Python's non-standard ``NaN`` and ``Infinity`` extensions."""
+    raise ValueError("non-finite JSON number")
+
+
+def _parse_finite_float(value: str) -> float:
+    """Parse a JSON float while rejecting overflow to infinity."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _loads_strict_json(value: str | bytes) -> Any:
+    """Decode JSON without accepting non-finite numbers."""
+    return json.loads(
+        value,
+        parse_constant=_reject_non_finite_json,
+        parse_float=_parse_finite_float,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -20,6 +70,7 @@ from typing import Any
 # the base name at 218 UTF-8 bytes fits that suffix under the usual 255-byte
 # per-component filesystem limit.
 MAX_ATOMIC_TARGET_NAME_BYTES = 218
+
 
 def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> None:
     """Write ``data`` to ``path`` atomically: unique temp file in the target

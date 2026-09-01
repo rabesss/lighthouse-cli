@@ -37,17 +37,16 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import math
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from lighthouse_cli.utils import atomic_write
+from lighthouse_cli.utils import _loads_strict_json, atomic_write
 
 SERVICE_NAME = "lighthouse-cli"
 KEY_NAME = "credential-key"
@@ -107,28 +106,6 @@ def _validate_credential_path(path: Path) -> None:
     """Reject symlinked config/artifact paths with a fixed safe error."""
     if _path_has_symlink_component(path):
         raise CredentialStoreError(_UNTRUSTED_PATH_MSG)
-
-
-def _reject_non_finite_json(value: str) -> NoReturn:
-    """Reject Python's non-standard ``NaN``/``Infinity`` JSON extensions."""
-    raise ValueError("non-finite JSON number")
-
-
-def _parse_finite_float(value: str) -> float:
-    """Parse one standard JSON float while rejecting overflow to infinity."""
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("non-finite JSON number")
-    return parsed
-
-
-def _loads_strict(value: str | bytes) -> Any:
-    """Decode JSON without accepting non-finite numbers."""
-    return json.loads(
-        value,
-        parse_constant=_reject_non_finite_json,
-        parse_float=_parse_finite_float,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +363,7 @@ class CredentialStore:
         if not path.exists():
             return None
         try:
-            doc = _loads_strict(path.read_text(encoding="utf-8"))
+            doc = _loads_strict_json(path.read_text(encoding="utf-8"))
         except (ValueError, OSError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"{path.name} is corrupted ({exc.__class__.__name__})."
@@ -396,7 +373,7 @@ class CredentialStore:
         metadata = {k: v for k, v in doc.items() if k not in _ENVELOPE_KEYS}
         plaintext = self._open_envelope(doc)
         try:
-            secret = _loads_strict(plaintext.decode("utf-8"))
+            secret = _loads_strict_json(plaintext.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"{path.name} decrypted to invalid data ({exc.__class__.__name__})."
@@ -448,7 +425,7 @@ class CredentialStore:
         if not blob.lstrip().startswith(b"{"):
             return self._load_and_migrate_legacy(blob)
         try:
-            data = _loads_strict(self.open_bytes(blob).decode("utf-8"))
+            data = _loads_strict_json(self.open_bytes(blob).decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             raise CredentialStoreError(
                 f"Credentials file is corrupted ({exc.__class__.__name__})."
@@ -480,7 +457,7 @@ class CredentialStore:
         key = _keyring_key(create=False)
         try:
             plaintext = _fernet_from_key(key).decrypt(blob)
-            data = _loads_strict(plaintext.decode("utf-8"))
+            data = _loads_strict_json(plaintext.decode("utf-8"))
         except InvalidToken:
             raise CredentialStoreError(
                 "Stored credentials could not be decrypted — the keyring key "
@@ -630,7 +607,7 @@ class CredentialStore:
 def _parse_envelope(blob: bytes) -> dict[str, Any]:
     """Validate a sealed envelope's shape; raise cleanly when malformed."""
     try:
-        envelope = _loads_strict(blob.decode("utf-8"))
+        envelope = _loads_strict_json(blob.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise CredentialStoreError(
             f"Sealed data is corrupted ({exc.__class__.__name__})."
