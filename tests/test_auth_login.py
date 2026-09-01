@@ -340,7 +340,8 @@ def test_tail_orders_cookies_before_check_before_credential_save(monkeypatch: py
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: order.append("cookies"))
     client = MagicMock()
     client.check_auth.side_effect = lambda: order.append("check") or True
-    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda: client)
+    client_factory = MagicMock(return_value=client)
+    monkeypatch.setattr(auth_mod, "LighthouseClient", client_factory)
     store = MagicMock()
     store.save.side_effect = lambda u, p: order.append("creds")
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
@@ -352,6 +353,7 @@ def test_tail_orders_cookies_before_check_before_credential_save(monkeypatch: py
 
     assert rc == 0
     assert order == ["cookies", "check", "creds"]
+    client_factory.assert_called_once_with(read_only_auth=True)
 
 
 def test_tail_failed_session_check_saves_nothing(
@@ -361,7 +363,7 @@ def test_tail_failed_session_check_saves_nothing(
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: None)
     client = MagicMock()
     client.check_auth.return_value = False
-    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda: client)
+    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda **_kwargs: client)
     store = MagicMock()
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
 
@@ -383,7 +385,7 @@ def test_tail_without_pair_never_saves_credentials(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: None)
     client = MagicMock()
     client.check_auth.return_value = True
-    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda: client)
+    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda **_kwargs: client)
     store = MagicMock()
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
 
@@ -391,6 +393,25 @@ def test_tail_without_pair_never_saves_credentials(monkeypatch: pytest.MonkeyPat
 
     assert rc == 0
     store.save.assert_not_called()
+
+
+def test_tail_reports_only_allowlisted_cookie_names(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: None)
+    client = MagicMock()
+    client.check_auth.return_value = True
+    monkeypatch.setattr(auth_mod, "LighthouseClient", lambda **_kwargs: client)
+    cookies = _make_d2l_cookies()
+    cookies["d2lPassword=COOKIE_NAME_SECRET"] = "value"
+
+    rc = auth_mod._persist_check_report(cookies, json_output=True)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["cookies"] == list(auth_mod.COOKIE_NAMES)
+    assert "COOKIE_NAME_SECRET" not in json.dumps(payload)
 
 
 # ---------------------------------------------------------------------------

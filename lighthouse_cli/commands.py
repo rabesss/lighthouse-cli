@@ -105,6 +105,16 @@ def _safe_course_name(value: Any, course_id: Any) -> str:
     return _safe_server_text(value, fallback=fallback)
 
 
+def _safe_output_path(value: object) -> str:
+    """Return a path only when its complete text passes the secret guard."""
+    candidate = str(value)
+    return (
+        candidate
+        if safe_display_text(candidate, "", max_len=4096)
+        else "<redacted>"
+    )
+
+
 def _safe_content_id(value: Any) -> int | None:
     """Keep only positive integer content identifiers."""
     return _positive_id(value)
@@ -651,7 +661,7 @@ def _multi_course_failure_json(
         "course_id": course_id,
         "course_name": "",
         "semester": _safe_server_text(sem_name, fallback="Unknown Semester"),
-        "root": str(root),
+        "root": _safe_output_path(root),
         "manifest_total": 0,
         "downloaded": [],
         "skipped": [],

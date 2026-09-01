@@ -340,10 +340,16 @@ def _safe_local_message(raw: str) -> str | None:
         )
     if lowered.startswith("output directory contains a symlinked path"):
         return "Output directory contains a symlinked path. Choose a real directory."
+    if lowered.startswith("output directory contains unsafe text"):
+        return "Output directory contains unsafe text. Choose a neutral directory name."
     if lowered.startswith("output directory is not a directory"):
         return "Output directory is not a directory. Choose a directory path."
     if lowered.startswith("unable to validate output directory"):
         return "Unable to validate output directory. Choose a real directory."
+    if lowered == "binary download exceeds the configured size limit.":
+        return "Binary download exceeds the configured size limit."
+    if lowered == "binary download size limit is invalid.":
+        return "Binary download size limit is invalid."
     if lowered.startswith("--attachment requires --assignment"):
         return "--attachment requires --assignment"
     if lowered in {
@@ -403,6 +409,7 @@ def _safe_local_message(raw: str) -> str | None:
         )
     if lowered.startswith("submission request was rate limited"):
         return "Rate limited. No retry was attempted."
+
     if "multiple folders found" in lowered:
         return "Ambiguous folder match. Use a numeric FolderId for an exact match."
     if lowered.startswith("ambiguous match") or lowered.startswith("multiple courses found"):
@@ -508,6 +515,16 @@ def format_user_error(error_value: BaseException | str) -> str:
     if lowered.startswith("submission request was rate limited"):
         return "Rate limited. No retry was attempted."
 
+    # Local templates are fixed and never echo caller-provided identifiers.
+    # Recognize them before broad secret/transport patterns so phrases such as
+    # "No cookies found" and size-limit errors retain their useful diagnosis.
+    if (safe_message := _safe_local_message(raw)) is not None:
+        return (
+            f"{safe_message} {hint}".strip()
+            if hint and "run:" not in safe_message.casefold()
+            else safe_message
+        )
+
     status = _status_code(error, raw)
     if status is not None:
         category = _status_message(status)
@@ -530,11 +547,6 @@ def format_user_error(error_value: BaseException | str) -> str:
     # do not return any portion of the original string.
     if _UNSAFE_FIELD_RE.search(raw) or _SECRET_FIELD_RE.search(raw) or _SECRET_SHAPED_VALUE_RE.search(raw):
         return f"Command failed. {hint}".strip()
-
-    if (safe_message := _safe_local_message(raw)) is not None:
-        # The local template itself is fixed and contains no caller-provided
-        # identifiers. Never substitute raw text back into the message.
-        return f"{safe_message} {hint}".strip() if hint and "run:" not in safe_message.casefold() else safe_message
 
     if name == "permissionerror":
         result = "Permission denied."

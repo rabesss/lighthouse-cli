@@ -204,8 +204,8 @@ _MAX_ENDAUTH_POLLS = 30
 # indefinitely. The retry count above still bounds the total polling window.
 _MAX_ENDAUTH_POLL_SECONDS = 30.0
 # A finite wall-clock budget protects against an upstream that keeps returning
-# ``Retry``.  The poll count remains a second independent bound.
-_MAX_ENDAUTH_TOTAL_SECONDS = 120.0
+# ``Retry`` without silently shortening the advertised 30-poll window.
+_MAX_ENDAUTH_TOTAL_SECONDS = _MAX_ENDAUTH_POLLS * _MAX_ENDAUTH_POLL_SECONDS
 _SAFE_MFA_ENTROPY_RE = re.compile(r"[0-9]{1,3}\Z")
 _INVALID_ENTROPY_SENTINEL = "__invalid_entropy__"
 # Recovery text for errors that do not know which proof Microsoft selected.

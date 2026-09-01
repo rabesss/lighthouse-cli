@@ -18,7 +18,11 @@ from .manifest import (
     compute_file_sha256,
     normalize_sha256,
 )
-from .display import format_user_error, output_json as _output_json
+from .display import (
+    format_user_error,
+    output_json as _output_json,
+    safe_display_text,
+)
 from .utils import (
     MAX_ATOMIC_TARGET_NAME_BYTES,
     _fit_filename,
@@ -40,6 +44,7 @@ _INVALID_IDENTIFIER = "Assignment record has an invalid identifier."
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
 _MAX_COURSE_NAME_LENGTH = 256
 _MAX_FOLDER_NAME_LENGTH = 256
+_MAX_FILENAME_INPUT_LENGTH = 4096
 _SECRET_KEY_PATTERN = (
     r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
     r"token(?:[\s_-]?value)?|cookie(?:s|value)?|samlresponse|otp|totp|"
@@ -79,15 +84,13 @@ def _positive_int(value: object) -> int | None:
 def _safe_course_name(value: object, org_id: int) -> str:
     """Return a bounded, printable, non-secret course name for a local path."""
     fallback = f"Course-{org_id}"
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > _MAX_COURSE_NAME_LENGTH
-        or not all(character.isprintable() for character in value)
-        or _SECRET_SHAPED_COURSE_NAME_RE.search(value)
-    ):
+    candidate = safe_display_text(value, "", max_len=_MAX_COURSE_NAME_LENGTH)
+    if not candidate or _SECRET_SHAPED_COURSE_NAME_RE.search(candidate):
         return fallback
-    return value
+    sanitized = _sanitize_filename(candidate)
+    if not safe_display_text(sanitized, "", max_len=_MAX_COURSE_NAME_LENGTH):
+        return fallback
+    return candidate
 
 
 def safe_assignment_folder_name(
@@ -98,20 +101,16 @@ def safe_assignment_folder_name(
 ) -> str:
     """Project a server folder label without secrets or control characters."""
     safe_fallback = f"Folder-{folder_id}"
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > _MAX_FOLDER_NAME_LENGTH
-        or not all(character.isprintable() for character in value)
-        or _SECRET_SHAPED_FOLDER_NAME_RE.search(value)
-    ):
+    candidate = safe_display_text(value, "", max_len=_MAX_FOLDER_NAME_LENGTH)
+    if not candidate or _SECRET_SHAPED_FOLDER_NAME_RE.search(candidate):
         return safe_fallback if fallback else ""
 
-    sanitized = _sanitize_filename(value)
+    sanitized = _sanitize_filename(candidate)
     if (
         not sanitized
         or len(sanitized) > _MAX_FOLDER_NAME_LENGTH
         or _SECRET_SHAPED_FOLDER_NAME_RE.search(sanitized)
+        or not safe_display_text(sanitized, "", max_len=_MAX_FOLDER_NAME_LENGTH)
     ):
         return safe_fallback if fallback else ""
     return _fit_filename(sanitized, max_bytes=255)
@@ -138,18 +137,21 @@ def safe_attachment_filename(
     fallback via ``fallback=False``.
     """
     safe_fallback = f"attachment_{attachment_id}"
-    if not isinstance(value, str) or not value:
-        return safe_fallback if fallback else ""
-    if not all(character.isprintable() for character in value):
-        if not fallback:
-            return ""
-        return safe_fallback + _safe_filename_suffix(_sanitize_filename(value))
+    sanitized_input = _sanitize_filename(value) if isinstance(value, str) else ""
+    candidate = safe_display_text(value, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
+    if not candidate:
+        return (
+            safe_fallback + _safe_filename_suffix(sanitized_input)
+            if fallback
+            else ""
+        )
 
-    sanitized = _sanitize_filename(value)
+    sanitized = _sanitize_filename(candidate)
     if (
         not sanitized
-        or _SECRET_SHAPED_FILENAME_RE.search(value)
+        or _SECRET_SHAPED_FILENAME_RE.search(candidate)
         or _SECRET_SHAPED_FILENAME_RE.search(sanitized)
+        or not safe_display_text(sanitized, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
     ):
         if not fallback:
             return ""
@@ -277,7 +279,25 @@ def _manifest_attachment_path(
     expected_parent: Path | None = None,
 ) -> Path | None:
     """Resolve a recorded assignment path without allowing path traversal."""
-    raw_path = entry.get("path") if isinstance(entry, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    raw_path = entry.get("path")
+    if (not isinstance(raw_path, str) or not raw_path) and expected_parent is not None:
+        legacy_filename = entry.get("filename")
+        if not _safe_manifest_component(legacy_filename):
+            return None
+        try:
+            course_root = _course_boundary(dest)
+            candidate = expected_parent / legacy_filename
+            if not candidate.absolute().is_relative_to(course_root):
+                return None
+            if _has_symlink_component(candidate, course_root):
+                return None
+            if not candidate.resolve(strict=False).is_relative_to(course_root):
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return candidate
     if not isinstance(raw_path, str) or not raw_path:
         return None
 
@@ -434,8 +454,10 @@ def _claim_assignment_entry(
     owner = owners.get(path_key)
     can_claim = owner == att_key or (
         allow_contested_claim
-        and path_key in owners
-        and owner is None
+        and (
+            (path_key in owners and owner is None)
+            or path_key not in owners
+        )
         and path_key not in claimed_paths
     )
     if not can_claim:
@@ -699,12 +721,17 @@ def download_for_course(
                 allow_contested_claim=True,
             )
             skip_entry = existing if path_manifest is None else None
-            if _matching_local_attachment(
+            matched_path = _matching_local_attachment(
                 dest,
                 skip_entry,
                 att.get("Size", 0),
                 expected_folder=folder,
-            ) is not None:
+            )
+            if matched_path is not None:
+                if isinstance(skip_entry, dict):
+                    skip_entry["path"] = str(
+                        matched_path.relative_to(_course_boundary(dest))
+                    )
                 continue
 
             try:
@@ -838,6 +865,9 @@ def sync_for_course(
             )
             if matched_path is not None:
                 if isinstance(existing, dict):
+                    existing["path"] = str(
+                        matched_path.relative_to(_course_boundary(dest))
+                    )
                     skipped_entry = {
                         "file_id": att_id, "folder_id": folder_id,
                         "filename": matched_path.name,

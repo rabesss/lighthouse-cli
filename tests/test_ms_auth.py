@@ -849,7 +849,7 @@ def test_endauth_total_deadline_skips_sleep_when_budget_is_exhausted() -> None:
     proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
 
     try:
-        with patch("lighthouse_cli.ms_auth.time.monotonic", side_effect=[0.0, 0.0, 121.0]):
+        with patch("lighthouse_cli.ms_auth.time.monotonic", side_effect=[0.0, 0.0, 901.0]):
             with patch("lighthouse_cli.ms_auth.time.sleep") as sleep:
                 with pytest.raises(MicrosoftSSOError, match="timed out"):
                     client._poll_end_auth(

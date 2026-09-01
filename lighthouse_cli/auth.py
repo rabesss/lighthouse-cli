@@ -27,6 +27,7 @@ from typing import Any
 
 from .api import LighthouseClient, NetworkError, refresh_auth_from_browser
 from .config import (
+    COOKIE_NAMES,
     clear_mfa_pending,
     ensure_config_dir,
     load_mfa_pending,
@@ -548,7 +549,7 @@ def _persist_check_report(
     save_cookies(cookies)
 
     hint = f" {failure_hint}" if failure_hint else ""
-    if not LighthouseClient().check_auth():
+    if not LighthouseClient(read_only_auth=True).check_auth():
         return _auth_error(
             f"Login completed but session verification failed.{hint}",
             json_output,
@@ -565,10 +566,15 @@ def _persist_check_report(
                 file=sys.stderr,
             )
 
+    reported_cookie_names = [name for name in COOKIE_NAMES if name in cookies]
     if json_output:
-        print(json.dumps({"success": True, "cookies": list(cookies.keys())}))
+        print(json.dumps({"success": True, "cookies": reported_cookie_names}))
     else:
-        suffix = f" Cookies: {', '.join(cookies.keys())}" if include_cookie_names else ""
+        suffix = (
+            f" Cookies: {', '.join(reported_cookie_names)}"
+            if include_cookie_names
+            else ""
+        )
         print(f"{success_message}{suffix}")
         if show_next_steps:
             _print_login_next_steps()

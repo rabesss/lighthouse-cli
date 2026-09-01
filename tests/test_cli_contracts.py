@@ -545,6 +545,15 @@ def test_format_user_error_keeps_status_and_category_without_transport_details()
     assert "https://" not in message
 
 
+def test_fixed_cookie_and_download_limit_errors_remain_actionable() -> None:
+    assert format_user_error("No cookies found. Run: lighthouse auth login") == (
+        "No cookies found. Run: lighthouse auth login"
+    )
+    assert format_user_error(
+        NetworkError("Binary download exceeds the configured size limit.")
+    ) == "Binary download exceeds the configured size limit."
+
+
 def test_format_user_error_strips_relative_query_and_body() -> None:
     message = format_user_error(
         "Request failed: /d2l/api?session=SESSION_SENTINEL; "

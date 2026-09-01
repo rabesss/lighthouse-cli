@@ -187,7 +187,7 @@ class TestManifestSchema:
         # File still exists and is still corrupt
         assert manifest_path.exists()
 
-    @pytest.mark.parametrize("size", ["seven", -1, float("nan"), float("inf"), True])
+    @pytest.mark.parametrize("size", ["seven", -1, True])
     def test_manifest_load_rejects_malformed_sizes(self, manifest_path: Path, size):
         """Untrusted sizes are rejected before sync arithmetic can see them."""
         manifest_path.write_text(json.dumps({"100": {
@@ -199,6 +199,24 @@ class TestManifestSchema:
         }}), encoding="utf-8")
 
         with pytest.raises(ManifestCorruptError, match="size"):
+            Manifest.load(manifest_path)
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999"])
+    def test_manifest_load_rejects_non_finite_json_anywhere(
+        self,
+        manifest_path: Path,
+        literal: str,
+    ) -> None:
+        payload = (
+            '{"100":{"sha256":"","filename":"file.pdf","size":1,'
+            '"downloaded_at":"2026-01-01T00:00:00Z","last_modified":"",'
+            '"note":'
+            + literal
+            + "}}"
+        )
+        manifest_path.write_text(payload, encoding="utf-8")
+
+        with pytest.raises(ManifestCorruptError, match="corrupt or unreadable"):
             Manifest.load(manifest_path)
 
     @pytest.mark.parametrize("entry", [None, [], "not-an-entry", 42])

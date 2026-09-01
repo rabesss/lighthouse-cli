@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,19 @@ REQUIRED_ENTRY_KEYS = frozenset({"sha256", "filename", "size", "downloaded_at", 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 # Keep untrusted integer arithmetic bounded before deriving display metadata.
 MAX_MANIFEST_SIZE = (1 << 63) - 1
+
+
+def _reject_non_finite_json(_value: str) -> None:
+    """Reject JavaScript numeric extensions that cannot be saved as JSON."""
+    raise ValueError("non-finite JSON number")
+
+
+def _parse_finite_float(value: str) -> float:
+    """Parse one JSON float while rejecting overflow to infinity."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
 
 
 def is_valid_sha256(value: Any) -> bool:
@@ -139,8 +153,12 @@ class Manifest:
             return Manifest()
 
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeError):
+            data = json.loads(
+                path.read_text(encoding="utf-8"),
+                parse_constant=_reject_non_finite_json,
+                parse_float=_parse_finite_float,
+            )
+        except (json.JSONDecodeError, OSError, UnicodeError, ValueError):
             raise ManifestCorruptError("Manifest is corrupt or unreadable.") from None
 
         if not isinstance(data, dict):

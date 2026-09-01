@@ -23,6 +23,7 @@ from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest, compute_sha256 
 from lighthouse_cli.sync_engine import (
     Mode,
     _safe_topic_filename,
+    _topic_directory,
     build_entry,
     flatten_all_topics,
     run_course,
@@ -59,6 +60,50 @@ def test_multi_json_retains_top_level_course_failures(tmp_path, capsys) -> None:
     assert payload["summary"]["courses_checked"] == 2
     assert [course["course_id"] for course in payload["courses"]] == [111, 222]
     assert all(course["errors"] for course in payload["courses"])
+
+
+def test_multi_failure_json_redacts_secret_shaped_root(tmp_path, capsys) -> None:
+    root = tmp_path / "password=ROOT_PATH_SECRET"
+    with patch(
+        "lighthouse_cli.commands.run_course",
+        side_effect=RuntimeError("course failed"),
+    ):
+        rc = _run_and_render_multi(
+            LighthouseClient(),
+            [111],
+            root,
+            Mode.DOWNLOAD,
+            "download",
+            "file",
+            100,
+            "Sem I",
+            [],
+            True,
+            False,
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["courses"][0]["root"] == "<redacted>"
+    assert "ROOT_PATH_SECRET" not in json.dumps(payload)
+
+
+def test_topic_directory_normalizes_before_reserved_subtree_check(
+    tmp_path: Path,
+) -> None:
+    course_dir = tmp_path / "Course-1"
+    warnings: list[str] = []
+
+    _root, topic_dir = _topic_directory(
+        course_dir,
+        "other/../Assignments/HW1/topic.pdf",
+        warnings=warnings,
+    )
+
+    assert topic_dir == course_dir / "_Content" / "Assignments" / "HW1"
+    assert warnings == [
+        "Topic path overlapped the reserved Assignments directory; moved under _Content."
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1723,7 +1768,7 @@ class TestExitMatrix:
 
     def test_corrupt_manifest_warning_does_not_echo_path_or_controls(self, runner, tmp_path):
         """Direct stderr warnings must not expose an untrusted output path."""
-        output_dir = tmp_path / "sync-SYNC_MANIFEST_PATH_SENTINEL\x1b[31m"
+        output_dir = tmp_path / "sync-output"
         output_dir.mkdir()
         course_dir = output_dir / "Course A-111"
         course_dir.mkdir(parents=True)
@@ -1735,7 +1780,6 @@ class TestExitMatrix:
         diagnostics = result.stdout + result.stderr
         assert result.exit_code == 1, result.output
         assert "Corrupt manifest; performing full sync." in result.stderr
-        assert "SYNC_MANIFEST_PATH_SENTINEL" not in diagnostics
         assert "\x1b" not in diagnostics
 
     def test_corrupt_manifest_exits_1_multi_json(self, runner, tmp_path):

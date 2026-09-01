@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from enum import Enum
+from os.path import normpath
 from pathlib import Path
 import re
 from stat import S_ISREG
@@ -238,6 +239,8 @@ def validate_output_root(root: Path) -> Path:
         candidate = Path(root).expanduser().absolute()
     except (TypeError, ValueError, OSError):
         raise ValueError("Unable to validate output directory") from None
+    if not safe_display_text(str(candidate), "", max_len=4096):
+        raise ValueError("Output directory contains unsafe text")
     current = Path(candidate.anchor)
     for component in candidate.parts[1:]:
         current /= component
@@ -279,7 +282,8 @@ def _topic_directory(
         file_dest = course_root / file_dest
 
     try:
-        relative_dest = file_dest.absolute().relative_to(course_root)
+        normalized_dest = Path(normpath(str(file_dest.absolute())))
+        relative_dest = normalized_dest.relative_to(course_root)
     except ValueError:
         relative_dest = None
     if (
@@ -769,20 +773,7 @@ def run_course(
 
     dest = output_root / resolve_course_folder_name(course_name, org_id)
     manifest_path = dest / MANIFEST_FILENAME
-    safe_dest = safe_display_text(
-        str(dest),
-        "Output directory",
-        max_len=4096,
-    )
-    safe_manifest_path = safe_display_text(
-        str(manifest_path),
-        "Manifest",
-        max_len=4096,
-    )
-    result["dest"], result["manifest_path"] = (
-        Path(safe_dest),
-        Path(safe_manifest_path),
-    )
+    result["dest"], result["manifest_path"] = dest, manifest_path
 
     try:
         _validate_course_destination(output_root, dest)
