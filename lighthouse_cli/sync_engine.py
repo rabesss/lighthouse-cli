@@ -933,6 +933,11 @@ def run_course(
             })
 
     assignments = result["assignments"]
+    assignment_paths_before = {
+        str(key): entry.get("path")
+        for key, entry in manifest.entries.items()
+        if str(key).startswith("assignment_") and isinstance(entry, dict)
+    }
     if mode is Mode.SYNC:
         live_orphans = {
             tid: manifest.get(tid)
@@ -960,6 +965,12 @@ def run_course(
         )
         assignments["downloaded"], assignments["errors"] = downloaded_a, errors_a
 
+    assignment_paths_after = {
+        str(key): entry.get("path")
+        for key, entry in manifest.entries.items()
+        if str(key).startswith("assignment_") and isinstance(entry, dict)
+    }
+    assignment_paths_changed = assignment_paths_after != assignment_paths_before
     force_completed_without_errors = (
         mode is Mode.FORCE
         and force_manifest_exists
@@ -972,6 +983,7 @@ def run_course(
         or updated
         or assignments["downloaded"]
         or assignments["updated"]
+        or assignment_paths_changed
     ):
         manifest.save(manifest_path)
         result["saved"] = True

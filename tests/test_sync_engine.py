@@ -1332,6 +1332,42 @@ class TestAssignmentContract:
         assert "100" in on_disk and "assignment_7_8" in on_disk
         assert result["assignments"]["downloaded"][0]["file_id"] == 8
 
+    def test_skip_only_legacy_attachment_path_migration_is_persisted(self, root):
+        content = b"OLD"
+        folder = {
+            "Id": 7,
+            "Name": "HW1",
+            "Attachments": [
+                {"Id": 8, "FileName": "hw.pdf", "Size": len(content), "Type": "File"},
+            ],
+        }
+        client = FakeClient(
+            tocs={ORG_ID: {"Modules": []}},
+            names={ORG_ID: "Test"},
+            folders={ORG_ID: [folder]},
+            details={(ORG_ID, 7): folder},
+        )
+        course_dir = root / "Test-44347"
+        manifest_path = _seed_manifest(course_dir, {
+            "assignment_7_8": {
+                **_mentry(filename="hw.pdf", sha=manifest_compute_sha256(content), size=len(content)),
+            },
+        })
+        _materialize(course_dir, "Assignments/HW1/hw.pdf", content)
+
+        result = run_course(
+            client,
+            ORG_ID,
+            root,
+            mode=Mode.SYNC,
+            include_assignments=True,
+        )
+
+        assert result["assignments"]["skipped"][0]["path"] == "Assignments/HW1/hw.pdf"
+        assert result["saved"] is True
+        persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert persisted["assignment_7_8"]["path"] == "Assignments/HW1/hw.pdf"
+
     def test_topics_cannot_claim_reserved_assignments_subtree(self, root):
         toc = {
             "Modules": [{

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -615,8 +616,9 @@ class TestFullLoginFlow:
         ]
         mock_session.post = MagicMock(side_effect=post_responses)
 
-        with patch("requests.Session", return_value=mock_session):
-            cookies = client.login("test@manipal.edu", "password123", "123456")
+        with patch("requests.Session", return_value=mock_session), \
+                patch("sys.stdin", io.StringIO("123456\n")):
+            cookies = client.login("test@manipal.edu", "password123", None)
 
         assert len(cookies) == 4
         for name in COOKIE_NAMES:
@@ -668,9 +670,10 @@ class TestFullLoginFlow:
         ])
 
         # _step_handle_mfa will detect MFA page and raise error
-        with patch("requests.Session", return_value=mock_session):
+        with patch("requests.Session", return_value=mock_session), \
+                patch("sys.stdin", io.StringIO("000000\n")):
             with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
-                client.login("test@manipal.edu", "password123", "000000")
+                client.login("test@manipal.edu", "password123", None)
         client.close()
 
     def test_login_without_mfa(self) -> None:
@@ -867,6 +870,43 @@ def test_endauth_total_deadline_skips_sleep_when_budget_is_exhausted() -> None:
 
     assert client._post.call_count == 1
     sleep.assert_not_called()
+
+
+def test_endauth_approval_can_complete_after_old_120_second_budget() -> None:
+    client = MicrosoftSSOClient()
+    retry = MagicMock()
+    retry.json.return_value = {
+        "Retry": True,
+        "FlowToken": "flow",
+        "Ctx": "ctx",
+    }
+    success = MagicMock()
+    success.json.return_value = {
+        "Success": True,
+        "FlowToken": "done-flow",
+        "Ctx": "done-ctx",
+    }
+    client._post = MagicMock(side_effect=[retry, success])
+    client._checkpoint_mfa_pending = MagicMock()
+    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
+
+    try:
+        with patch(
+            "lighthouse_cli.ms_auth.time.monotonic",
+            side_effect=[0.0, 0.0, 0.0, 121.0],
+        ), patch("lighthouse_cli.ms_auth.time.sleep"):
+            flow, ctx, data = client._poll_end_auth(
+                MS_SSO_URL,
+                {"urlEndAuth": "/common/SAS/EndAuth"},
+                proof,
+                {"FlowToken": "flow", "Ctx": "ctx"},
+                "123456",
+            )
+    finally:
+        client.close()
+
+    assert (flow, ctx) == ("done-flow", "done-ctx")
+    assert data["Success"] is True
 
 
 def test_begin_auth_rejects_non_object_json_response() -> None:

@@ -9,6 +9,7 @@ repr'd, or asserted by value (key-presence assertions only).
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 from pathlib import Path
@@ -694,10 +695,27 @@ class TestConvergedMfa:
         )
         set_d2l_cookies(scripted)
 
-        cookies = run_login(scripted, totp_code=TOTP_CODE)
+        with patch("sys.stdin", io.StringIO(f"{TOTP_CODE}\n")):
+            cookies = run_login(scripted, totp_code=None)
 
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("POST", PROCESS_URL) in scripted.calls
+
+    def test_legacy_form_rejects_preprovided_literal_code(
+        self,
+        scripted: ScriptedSession,
+        isolated_config: Path,
+    ) -> None:
+        scripted.enqueue(
+            FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
+            FakeResponse(200, html=config_html(), url=MS_SSO_URL),
+            FakeResponse(200, html=LEGACY_MFA_HTML, url=MFA_PAGE_URL),
+        )
+
+        with pytest.raises(MicrosoftSSOError, match="cannot be validated"):
+            run_login(scripted, totp_code=TOTP_CODE, mfa_method="auto")
+
+        assert ("POST", PROCESS_URL) not in scripted.calls
 
 
 # ---------------------------------------------------------------------------

@@ -165,6 +165,16 @@ def test_terminal_error_responses_are_closed(response: FakeResponse) -> None:
     assert response.closed is True
 
 
+def test_non_login_redirect_raises_fixed_network_error_and_closes() -> None:
+    response = FakeResponse(302, headers={"Location": "/d2l/other"})
+    client, _session = _client_with_session([response])
+
+    with pytest.raises(NetworkError, match="unexpected redirect"):
+        client._do_request("GET", "https://example.test", False, 30)
+
+    assert response.closed is True
+
+
 def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
     client = LighthouseClient()
     client.get_json = MagicMock(

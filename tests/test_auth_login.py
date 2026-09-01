@@ -1809,7 +1809,7 @@ class TestMfaMethodVocabulary:
                 cli_runner,
                 ["--mfa-method", method, "--totp", "123456", "--json"],
             )
-        assert result.exit_code == 2
+        assert result.exit_code == 1
         assert "--totp" in json.loads(result.stdout)["error"]
         sso.login.assert_not_called()
 

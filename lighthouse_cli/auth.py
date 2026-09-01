@@ -121,6 +121,10 @@ _SAFE_FIRST_PARTY_AUTH_PREFIXES = (
         "a pre-provided --totp code is valid only for phoneappotp",
         "A pre-provided --totp code is valid only for PhoneAppOTP.",
     ),
+    (
+        "a pre-provided --totp code cannot be validated for a legacy mfa form",
+        "A pre-provided --totp code cannot be used with a legacy MFA form.",
+    ),
     ("pending mfa session is incomplete", "Pending MFA session is incomplete."),
 )
 
@@ -626,7 +630,7 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
     ensure_config_dir()
 
     if not totp_code or not totp_code.strip():
-        return _auth_error("2FA code cannot be empty", json_output, 2)
+        return _auth_error("2FA code cannot be empty", json_output)
 
     # A missing checkpoint is a local usage error, not an encryption failure.
     # Check the path before preflight so an installation without a configured
@@ -855,7 +859,6 @@ def cmd_auth_login(
             f"Invalid MFA method {resolved_mfa_method!r}. "
             f"Use: {', '.join(VALID_MFA_METHODS)}",
             json_output,
-            2,
         )
 
     try:
@@ -866,7 +869,7 @@ def cmd_auth_login(
             totp_code, totp_stdin=totp_stdin
         )
     except ValueError as exc:
-        return _auth_error(str(exc), json_output, 2)
+        return _auth_error(str(exc), json_output)
 
     # --- Preflight the encryption key source ---
     # Login reads the pending checkpoint below and sends BeginAuth (a side

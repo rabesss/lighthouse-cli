@@ -2343,6 +2343,16 @@ class MicrosoftSSOClient:
         """Legacy MFA form POST (older Microsoft pages without arrUserProofs)."""
         import getpass as _getpass
 
+        if totp_code is not None:
+            raise MicrosoftSSOError(
+                "A pre-provided --totp code cannot be validated for a legacy MFA form.",
+                step="MFA",
+                recovery=(
+                    "Re-run without a literal --totp value and enter or pipe "
+                    "the code only after Microsoft presents the challenge."
+                ),
+            )
+
         if totp_code is None:
             if sys.stdin.isatty():
                 print("\n--- Second factor required ---", flush=True, file=sys.stderr)
