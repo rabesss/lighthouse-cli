@@ -82,8 +82,15 @@ _OUTPUT_PATH_SECRET_RE = re.compile(
     r")\s*(?:[:=]|\bis\b|\bwas\b)\s*[^/\\\s,;]+"
 )
 _OUTPUT_PATH_BARE_SECRET_RE = re.compile(
-    r"(?x)(?<![a-z0-9])(?i:password|passwd|passphrase|secret|token|cookie|"
-    r"otp|totp|canary|authorization|bearer)\b\s+"
+    r"(?x)(?<![a-z0-9])(?i:"
+    r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
+    r"token(?:[\s_-]?value)?|cookie(?:s|value)?|samlresponse|otp|totp|"
+    r"canary|authorization|bearer|api[\s_-]?key|access[\s_-]?token|"
+    r"client[\s_-]?secret|session(?:[\s_-]?(?:val|value|token|id))?|"
+    r"d2l(?:secure)?session(?:val|value|token)?|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"s?ctx|sft|flow[\s_-]?token|o?postparams"
+    r")\b\s+"
     r"(?:[a-z0-9._-]*\d[a-z0-9._-]*|[a-z][a-z0-9._-]{7,}|"
     r"[A-Z0-9_-]{2,}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})"
     r"(?![a-z0-9])"

@@ -102,6 +102,16 @@ def test_benign_keyword_output_root_is_allowed(tmp_path: Path) -> None:
         "token longtoken",
         "secret abcdefgh",
         "session=SESSION_SECRET",
+        "session SESSION_SECRET",
+        "d2lSessionVal SESSION_SECRET",
+        "d2lSecureSessionVal SESSION_SECRET",
+        "d2lSameSiteCanaryA CANARY_SECRET",
+        "d2lSameSiteCanaryB CANARY_SECRET",
+        "apiCanary CANARY_SECRET",
+        "sFT FLOW_SECRET",
+        "sCtx CTX_SECRET",
+        "flowToken FLOW_SECRET",
+        "oPostParams FLOW_SECRET",
     ],
 )
 def test_output_root_rejects_bare_or_plain_session_secrets(
