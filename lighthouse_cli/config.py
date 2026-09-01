@@ -22,6 +22,7 @@ from lighthouse_cli.credential_store import (
     _validate_credential_path,
     is_sealed_document,
 )
+from lighthouse_cli.utils import _reject_non_finite_json
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,11 +54,6 @@ _PENDING_METADATA_KEYS = frozenset({"created_at", "mfa_method"})
 # corrupt/hostile local document from injecting terminal control characters or
 # an unbounded value into a later diagnostic.
 _METADATA_TEXT_MAX = 256
-
-
-def _reject_non_finite_json(value: str) -> None:
-    """Reject JSON extensions such as ``NaN`` and ``Infinity``."""
-    raise ValueError("non-finite JSON number")
 
 
 def _safe_metadata_text(value: object) -> str | None:

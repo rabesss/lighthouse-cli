@@ -19,7 +19,7 @@ from .assignments import (
     safe_attachment_filename,
 )
 from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short
-from .utils import get_enrolled_course_catalog
+from .utils import _course_identifier, get_enrolled_course_catalog
 
 
 # ---------------------------------------------------------------------------
@@ -230,25 +230,6 @@ def _exception_message(exc: Exception) -> str:
     return format_user_error(exc)
 
 
-def _course_identifier(value: Any) -> int | None:
-    """Return only a numeric course ID for an external result payload.
-
-    Name-substring arguments remain available to the resolver, but failed
-    identifiers must not be copied into JSON or stderr diagnostics. Treat
-    anything that is not an integer ID as unknown instead of echoing it.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
-
-
 def _safe_course_label(value: Any, course_id: Any) -> str:
     """Return a bounded printable course label or an opaque fixed fallback."""
     identifier = _course_identifier(course_id)
@@ -351,7 +332,6 @@ def _emit_command_error(
 
 
 def _show_with_error_handling(
-    client: LighthouseClient,
     org_id: int,
     fetch_fn: Callable[[int], Any],
     data_key: str,
@@ -722,7 +702,6 @@ def _show_announcements(
                         size = 0
                     print(f"    📎 {att.get('FileName', '')} ({size / 1024:.0f} KB)")
     return _show_with_error_handling(
-        client,
         org_id,
         _fetch,
         "announcements",
@@ -754,7 +733,6 @@ def _show_calendar(
             for e in events
         ], title=f"Calendar – {t}")
     return _show_with_error_handling(
-        client,
         org_id,
         _fetch,
         "events",
@@ -1037,7 +1015,6 @@ def _show_course_quizzes(
             for q in quizzes
         ], title=f"Quizzes – {t}")
     return _show_with_error_handling(
-        client,
         org_id,
         _fetch,
         "quizzes",

@@ -341,6 +341,15 @@ def _prompt_password() -> str:
     return getpass.getpass("Password: ").strip()
 
 
+def _prompt_credential(field: str, *, interactive: bool, json_output: bool) -> str:
+    """Prompt for one credential only when an interactive stream is available."""
+    if not interactive:
+        raise _PromptUnavailable(field)
+    if field == "username":
+        return _prompt_username(json_output)
+    return _prompt_password()
+
+
 # ---------------------------------------------------------------------------
 # Login policy — pure decisions: plain args in, plain values out
 # ---------------------------------------------------------------------------
@@ -712,12 +721,11 @@ def cmd_auth_mfa_methods(
         with suppress(CredentialStoreError, OSError):
             stored = CredentialStore().load()
 
-    def _prompt(field: str) -> str:
-        if not interactive:
-            raise _PromptUnavailable(field)
-        if field == "username":
-            return _prompt_username(json_output)
-        return _prompt_password()
+    prompt = functools.partial(
+        _prompt_credential,
+        interactive=interactive,
+        json_output=json_output,
+    )
 
     try:
         username, password = resolve_credentials(
@@ -726,7 +734,7 @@ def cmd_auth_mfa_methods(
             os.getenv("LIGHTHOUSE_USERNAME", "").strip(),
             os.getenv("LIGHTHOUSE_PASSWORD", "").strip(),
             stored,
-            _prompt,
+            prompt,
         )
     except _PromptUnavailable:
         return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
@@ -822,12 +830,11 @@ def cmd_auth_login(
         with suppress(CredentialStoreError, OSError):
             stored = CredentialStore().load()
 
-    def _prompt(field: str) -> str:
-        if not interactive:
-            raise _PromptUnavailable(field)
-        if field == "username":
-            return _prompt_username(json_output)
-        return _prompt_password()
+    prompt = functools.partial(
+        _prompt_credential,
+        interactive=interactive,
+        json_output=json_output,
+    )
 
     try:
         username, password = resolve_credentials(
@@ -836,7 +843,7 @@ def cmd_auth_login(
             os.getenv("LIGHTHOUSE_USERNAME", "").strip(),
             os.getenv("LIGHTHOUSE_PASSWORD", "").strip(),
             stored,
-            _prompt,
+            prompt,
         )
     except _PromptUnavailable:
         return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)

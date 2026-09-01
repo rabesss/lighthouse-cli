@@ -14,13 +14,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .utils import atomic_write
+from .utils import _parse_finite_float, _reject_non_finite_json, atomic_write
 
 
 # ---------------------------------------------------------------------------
@@ -44,19 +43,6 @@ REQUIRED_ENTRY_KEYS = frozenset({"sha256", "filename", "size", "downloaded_at", 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 # Keep untrusted integer arithmetic bounded before deriving display metadata.
 MAX_MANIFEST_SIZE = (1 << 63) - 1
-
-
-def _reject_non_finite_json(_value: str) -> None:
-    """Reject JavaScript numeric extensions that cannot be saved as JSON."""
-    raise ValueError("non-finite JSON number")
-
-
-def _parse_finite_float(value: str) -> float:
-    """Parse one JSON float while rejecting overflow to infinity."""
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("non-finite JSON number")
-    return parsed
 
 
 def is_valid_sha256(value: Any) -> bool:
@@ -187,7 +173,7 @@ class Manifest:
 
     # -- validation --------------------------------------------------------
 
-    def validate_entry(self, topic_id: str, entry: Any) -> list[str]:
+    def validate_entry(self, _topic_id: str, entry: Any) -> list[str]:
         """Validate a single manifest entry.
 
         Returns:

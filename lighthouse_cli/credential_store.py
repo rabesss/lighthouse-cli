@@ -37,17 +37,16 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import math
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from lighthouse_cli.utils import atomic_write
+from lighthouse_cli.utils import _loads_strict_json as _loads_strict, atomic_write
 
 SERVICE_NAME = "lighthouse-cli"
 KEY_NAME = "credential-key"
@@ -107,28 +106,6 @@ def _validate_credential_path(path: Path) -> None:
     """Reject symlinked config/artifact paths with a fixed safe error."""
     if _path_has_symlink_component(path):
         raise CredentialStoreError(_UNTRUSTED_PATH_MSG)
-
-
-def _reject_non_finite_json(value: str) -> NoReturn:
-    """Reject Python's non-standard ``NaN``/``Infinity`` JSON extensions."""
-    raise ValueError("non-finite JSON number")
-
-
-def _parse_finite_float(value: str) -> float:
-    """Parse one standard JSON float while rejecting overflow to infinity."""
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("non-finite JSON number")
-    return parsed
-
-
-def _loads_strict(value: str | bytes) -> Any:
-    """Decode JSON without accepting non-finite numbers."""
-    return json.loads(
-        value,
-        parse_constant=_reject_non_finite_json,
-        parse_float=_parse_finite_float,
-    )
 
 
 # ---------------------------------------------------------------------------
