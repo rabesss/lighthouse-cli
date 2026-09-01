@@ -16,7 +16,7 @@ import time
 import urllib.request
 from contextlib import suppress
 from typing import Any
-from urllib.parse import unquote_to_bytes, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import requests
 
@@ -311,6 +311,22 @@ def _session_expired_msg(detail: str = "") -> str:
     return f"Session expired{' (' + detail + ')' if detail else ''}. Run: lighthouse auth login"
 
 
+def _is_login_redirect(location: object) -> bool:
+    """Recognize supported login endpoints without substring false positives."""
+    try:
+        path = unquote(urlparse(str(location)).path).casefold()
+    except (TypeError, ValueError):
+        return False
+    parts = tuple(part for part in path.split("/") if part)
+    if parts in {("login",), ("d2l", "login")}:
+        return True
+    return (
+        len(parts) >= 4
+        and parts[:3] == ("d2l", "lp", "auth")
+        and parts[-1] in {"login", "login.d2l"}
+    )
+
+
 def _submission_response_result(
     resp: requests.Response,
     *,
@@ -319,8 +335,7 @@ def _submission_response_result(
 ) -> dict[str, Any]:
     """Validate one submission response without leaking its body or URL."""
     if resp.status_code in (301, 302, 303, 307, 308):
-        location = str(resp.headers.get("Location", "")).casefold()
-        if "login" in location or "auth" in location:
+        if _is_login_redirect(resp.headers.get("Location", "")):
             raise SessionExpiredError(
                 _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
                 recovery=_SESSION_EXPIRED_RECOVERY,
@@ -513,8 +528,7 @@ class LighthouseClient:
 
             # D2L redirects to login page when session is dead
             if resp.status_code in (301, 302, 303, 307, 308):
-                location = resp.headers.get("Location", "").lower()
-                if "login" in location or "auth" in location:
+                if _is_login_redirect(resp.headers.get("Location", "")):
                     _close_response(resp)
                     raise SessionExpiredError(
                         _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),

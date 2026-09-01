@@ -362,6 +362,72 @@ class TestSubmitFile:
 
         mock_resp.close.assert_called_once()
 
+    @pytest.mark.parametrize(
+        "location",
+        [
+            "/d2l/lp/authoring/123",
+            "/d2l/other?authorization=required",
+        ],
+    )
+    def test_submit_file_redirect_substrings_do_not_imply_login(
+        self,
+        location: str,
+    ) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 302
+        mock_resp.headers = {"Location": location}
+
+        mock_session = MagicMock()
+        mock_session.request.return_value = mock_resp
+        client = LighthouseClient()
+        client._loaded = True
+        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._session = mock_session
+
+        with pytest.raises(NetworkError, match="unexpected redirect"):
+            client.submit_file(
+                org_unit_id=44347,
+                folder_id=789,
+                file_bytes=b"x",
+                filename="x.pdf",
+            )
+
+        mock_resp.close.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            "/login",
+            "/d2l/login?target=/d2l/home",
+            "/d2l/lp/auth/saml/login",
+            "/d2l/lp/auth/login/login.d2l",
+        ],
+    )
+    def test_submit_file_supported_login_redirects_expire_session(
+        self,
+        location: str,
+    ) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 302
+        mock_resp.headers = {"Location": location}
+
+        mock_session = MagicMock()
+        mock_session.request.return_value = mock_resp
+        client = LighthouseClient()
+        client._loaded = True
+        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._session = mock_session
+
+        with pytest.raises(SessionExpiredError):
+            client.submit_file(
+                org_unit_id=44347,
+                folder_id=789,
+                file_bytes=b"x",
+                filename="x.pdf",
+            )
+
+        mock_resp.close.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # CLI-level tests: submit command

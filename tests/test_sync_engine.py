@@ -96,6 +96,23 @@ def test_benign_keyword_output_root_is_allowed(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "component",
+    [
+        "password hunterabcdef",
+        "token longtoken",
+        "secret abcdefgh",
+        "session=SESSION_SECRET",
+    ],
+)
+def test_output_root_rejects_bare_or_plain_session_secrets(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    with pytest.raises(ValueError, match="unsafe text"):
+        validate_output_root(tmp_path / component)
+
+
+@pytest.mark.parametrize(
     "key",
     [
         "d2lSessionVal",
