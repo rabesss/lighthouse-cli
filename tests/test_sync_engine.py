@@ -89,8 +89,22 @@ def test_multi_failure_json_redacts_secret_shaped_root(tmp_path, capsys) -> None
     assert "ROOT_PATH_SECRET" not in json.dumps(payload)
 
 
-def test_benign_keyword_output_root_is_allowed(tmp_path: Path) -> None:
-    root = tmp_path / "ctx" / "cookies" / "courses"
+@pytest.mark.parametrize(
+    "components",
+    [
+        ("ctx", "cookies", "courses"),
+        ("Session 1 Intro",),
+        ("Session 2024",),
+        ("pass criteria.pdf",),
+        ("Password Security",),
+        ("Token Ring",),
+    ],
+)
+def test_benign_keyword_output_root_is_allowed(
+    tmp_path: Path,
+    components: tuple[str, ...],
+) -> None:
+    root = tmp_path.joinpath(*components)
 
     assert validate_output_root(root) == root.absolute()
 
@@ -103,13 +117,17 @@ def test_benign_keyword_output_root_is_allowed(tmp_path: Path) -> None:
         "secret abcdefgh",
         "session=SESSION_SECRET",
         "session SESSION_SECRET",
+        "session value",
+        "session abc12345",
         "d2lSessionVal SESSION_SECRET",
+        "d2lSessionVal value",
         "d2lSecureSessionVal SESSION_SECRET",
         "d2lSameSiteCanaryA CANARY_SECRET",
         "d2lSameSiteCanaryB CANARY_SECRET",
         "apiCanary CANARY_SECRET",
         "sFT FLOW_SECRET",
         "sCtx CTX_SECRET",
+        "sCtx value",
         "flowToken FLOW_SECRET",
         "oPostParams FLOW_SECRET",
     ],

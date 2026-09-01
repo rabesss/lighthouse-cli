@@ -82,17 +82,31 @@ _OUTPUT_PATH_SECRET_RE = re.compile(
     r")\s*(?:[:=]|\bis\b|\bwas\b)\s*[^/\\\s,;]+"
 )
 _OUTPUT_PATH_BARE_SECRET_RE = re.compile(
-    r"(?x)(?<![a-z0-9])(?i:"
-    r"pass(?:word|wd|phrase)?(?:[\s_-]?value)?|secret|"
-    r"token(?:[\s_-]?value)?|cookie(?:s|value)?|samlresponse|otp|totp|"
-    r"canary|authorization|bearer|api[\s_-]?key|access[\s_-]?token|"
-    r"client[\s_-]?secret|session(?:[\s_-]?(?:val|value|token|id))?|"
-    r"d2l(?:secure)?session(?:val|value|token)?|"
-    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
-    r"s?ctx|sft|flow[\s_-]?token|o?postparams"
-    r")\b\s+"
+    r"(?x)(?<![a-z0-9])(?i:password|passwd|passphrase|secret|token|"
+    r"cookie(?:s|value)?|otp|totp|canary)\b\s+"
     r"(?:[a-z0-9._-]*\d[a-z0-9._-]*|[a-z][a-z0-9._-]{7,}|"
     r"[A-Z0-9_-]{2,}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})"
+    r"(?![a-z0-9])"
+)
+_OUTPUT_PATH_SENSITIVE_KEY_RE = re.compile(
+    r"(?ix)(?<![a-z0-9])(?:"
+    r"session[\s_-]?(?:val|value|token|id)|"
+    r"d2l(?:secure)?session(?:val|value|token)?|"
+    r"d2l[\s_-]?same[\s_-]?site[\s_-]?canary[ab]?|api[\s_-]?canary|"
+    r"sctx|sft|flow[\s_-]?token|o?postparams|"
+    r"access[\s_-]?token|client[\s_-]?secret|x?[\s_-]?api[\s_-]?key|"
+    r"samlresponse|authorization|bearer"
+    r")(?![a-z0-9])"
+)
+_OUTPUT_PATH_CONTEXT_VALUE_RE = re.compile(
+    r"(?ix)(?<![a-z0-9])(?:ctx|cookies?)\b\s+[^/\\\s,;]+"
+)
+_OUTPUT_PATH_SESSION_VALUE_RE = re.compile(
+    r"(?x)(?<![a-z0-9])(?i:session)\b\s+"
+    r"(?:[a-z0-9._-]*[a-z_][a-z0-9._-]*\d[a-z0-9._-]*|"
+    r"[a-z][a-z0-9._-]{7,}|(?=[A-Z0-9_-]*[A-Z_])[A-Z0-9_-]{2,}|"
+    r"(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z_])"
+    r"[A-Za-z0-9_-]{3,})"
     r"(?![a-z0-9])"
 )
 
@@ -267,7 +281,16 @@ def safe_output_path_text(value: object) -> str | None:
         if expanded == decoded:
             break
         decoded = expanded
-    if _OUTPUT_PATH_SECRET_RE.search(decoded) or _OUTPUT_PATH_BARE_SECRET_RE.search(decoded):
+    if any(
+        pattern.search(decoded)
+        for pattern in (
+            _OUTPUT_PATH_SECRET_RE,
+            _OUTPUT_PATH_BARE_SECRET_RE,
+            _OUTPUT_PATH_SENSITIVE_KEY_RE,
+            _OUTPUT_PATH_CONTEXT_VALUE_RE,
+            _OUTPUT_PATH_SESSION_VALUE_RE,
+        )
+    ):
         return None
     return candidate
 
