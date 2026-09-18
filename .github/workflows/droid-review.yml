@@ -31,4 +31,10 @@ jobs:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
           automatic_review: true
           automatic_security_review: true
+          review_model: custom:zai-coding-anthropic/glm-5.3
+          security_model: custom:zai-coding-anthropic/glm-5.3
+          reasoning_effort: max
+          settings: .github/droid-zai-settings.json
+        env:
+          CLIPROXY_CLAUDE_CODE_API_KEY: ${{ secrets.CLIPROXY_CLAUDE_CODE_API_KEY }}
           allowed_bots: dependabot,factory-droid

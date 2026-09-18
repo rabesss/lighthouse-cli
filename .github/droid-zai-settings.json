@@ -1,0 +1,16 @@
+{
+  "customModels": [
+    {
+      "model": "zai-coding-anthropic/glm-5.3",
+      "id": "custom:zai-coding-anthropic/glm-5.3",
+      "displayName": "GLM 5.3 / Z.AI Coding Plan (CPA)",
+      "baseUrl": "https://cpa.ravishdixit.xyz/v1",
+      "apiKey": "${CLIPROXY_CLAUDE_CODE_API_KEY}",
+      "provider": "generic-chat-completion-api",
+      "maxContextLimit": 200000,
+      "maxOutputTokens": 64000,
+      "noImageSupport": true,
+      "reasoningEffort": "max"
+    }
+  ]
+}
