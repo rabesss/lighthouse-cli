@@ -26,6 +26,8 @@ _LAZY_DEPENDENCIES: dict[str, tuple[str, str]] = {
     "quiz_payload": (".assessment_api", "quiz_payload"),
 }
 _MISSING_DEPENDENCY = object()
+_LAZY_PUBLIC_EXPORTS = tuple(name for name in _LAZY_DEPENDENCIES if not name.startswith("_"))
+__all__ = _LAZY_PUBLIC_EXPORTS
 
 
 def _load_dependency(name: str) -> Any:
@@ -47,6 +49,11 @@ def __getattr__(name: str) -> Any:
     if name in _LAZY_DEPENDENCIES:
         return _load_dependency(name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Expose lazy compatibility names to introspection without importing them."""
+    return sorted(set(globals()) | set(_LAZY_DEPENDENCIES))
 
 
 _ID = click.IntRange(min=1)

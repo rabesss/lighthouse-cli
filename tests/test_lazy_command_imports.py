@@ -74,3 +74,39 @@ assert commands.cmd_submit.__module__ == 'lighthouse_cli.submit'
 """,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_legacy_lazy_exports_support_wildcard_imports_and_introspection() -> None:
+    result = _run_clean_python(
+        """
+import sys
+from lighthouse_cli import commands
+
+assert 'lighthouse_cli.api' not in sys.modules
+assert 'LighthouseClient' in dir(commands)
+assert 'cmd_submit' in dir(commands)
+namespace = {}
+exec('from lighthouse_cli.commands import *', namespace)
+assert namespace['LighthouseClient'].__module__ == 'lighthouse_cli.api'
+assert namespace['cmd_submit'].__module__ == 'lighthouse_cli.submit'
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_assessment_lazy_exports_support_wildcard_imports_and_introspection() -> None:
+    result = _run_clean_python(
+        """
+import sys
+from lighthouse_cli import assessment_commands
+
+assert 'lighthouse_cli.assessment_api' not in sys.modules
+assert 'AssessmentAPI' in dir(assessment_commands)
+assert 'project' in dir(assessment_commands)
+namespace = {}
+exec('from lighthouse_cli.assessment_commands import *', namespace)
+assert namespace['AssessmentAPI'].__module__ == 'lighthouse_cli.assessment_api'
+assert namespace['project'].__module__ == 'lighthouse_cli.assessment_api'
+""",
+    )
+    assert result.returncode == 0, result.stderr
