@@ -13,7 +13,7 @@ from .api import LighthouseClient
 from .assessment_api import (
     AssessmentAPI, AssessmentWriteUnknownError, assignment_payload, project, quiz_payload,
 )
-from .display import JsonOutputCommand, format_user_error, output_json
+from .display import JsonOutputCommand, JsonOutputGroup, format_user_error, output_json
 from .course_read_commands import register_course_reads
 
 
@@ -74,7 +74,7 @@ def student(site: str) -> None:
     """Read learner assessment details and your own submission history."""
 
 
-class _LazyPreview(click.Group):
+class _LazyPreview(JsonOutputGroup):
     def _implementation(self) -> click.Group:
         from .quiz_preview_commands import preview
         return preview
@@ -87,9 +87,6 @@ class _LazyPreview(click.Group):
 
     def invoke(self, ctx: click.Context) -> Any:
         return self._implementation().invoke(ctx)
-
-
-instructor.add_command(_LazyPreview(name="preview", help="Experimental trial-only, checkpointed quiz previews."))
 
 
 def _register_read(group: click.Group, name: str, resource: str, detail: bool) -> None:
