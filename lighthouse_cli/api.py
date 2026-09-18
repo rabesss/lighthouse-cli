@@ -632,6 +632,25 @@ class LighthouseClient:
                 raise NetworkError("Could not initialize request protection.") from None
         return self._csrf_token
 
+    def get_optional_csrf_token(self) -> str | None:
+        """Return an available CSRF token without requiring the optional bootstrap.
+
+        Brightspace's file-submission endpoint accepts the session cookies on
+        its own.  Some tenant homepages still expose a CSRF initializer, so
+        include it when present while keeping submission compatible with
+        tenants that omit that artifact.
+        """
+        if self._csrf_token is not None:
+            return self._csrf_token
+        from .request_protection import csrf_from_homepage
+
+        body, _headers = self.get_raw("/d2l/home", max_bytes=2 * 1024 * 1024)
+        try:
+            self._csrf_token = csrf_from_homepage(body)
+        except ValueError:
+            return None
+        return self._csrf_token
+
     def _paginate_list(self, path: str, items_key: str = "Objects") -> list[dict[str, Any]]:
         """GET a potentially paginated list endpoint.
 
@@ -1095,16 +1114,18 @@ class LighthouseClient:
         ).encode()
         footer = f"\r\n--{boundary}--\r\n".encode()
         payload = body_bytes + file_bytes + footer
-        csrf_token = self.get_csrf_token()
+        csrf_token = self.get_optional_csrf_token()
+        headers = {
+            "Content-Type": f"multipart/mixed; boundary={boundary}",
+            "Content-Length": str(len(payload)),
+        }
+        if csrf_token is not None:
+            headers["X-Csrf-Token"] = csrf_token
         resp = self._request(
             "POST",
             f"{self.api_le}/{course_id}/dropbox/folders/{dropbox_id}/submissions/mysubmissions/",
             data=payload,
-            headers={
-                "Content-Type": f"multipart/mixed; boundary={boundary}",
-                "Content-Length": str(len(payload)),
-                "X-Csrf-Token": csrf_token,
-            },
+            headers=headers,
             _skip_raise=True,
             _timeout=60,
         )
