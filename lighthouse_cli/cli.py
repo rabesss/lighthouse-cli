@@ -16,7 +16,7 @@ from collections.abc import Callable
 from importlib import import_module
 from typing import Any
 
-from .display import JsonOutputCommand
+from .display import JsonOutputCommand, JsonOutputGroup
 
 
 def _lazy_command(module: str, name: str) -> Callable[..., int]:
@@ -63,7 +63,7 @@ def cli() -> None:
     """
 
 
-class _AssessmentGroup(click.Group):
+class _AssessmentGroup(JsonOutputGroup):
     """Load assessment implementations only when one of these groups is used."""
 
     def _implementation(self) -> click.Group:

@@ -84,7 +84,7 @@ IsPublished FeedbackLastModified IsRetakeIncorrectOnly AttemptDueDate
 AttemptEnforceTimeLimit AttemptSubmissionTimeLimit AttemptIsSynchronous
 Entity Status Feedback Submissions SubmittedBy DisplayName SubmissionDate Comment
 Files FileId FileName Size isRead isFlagged CompletionDate IsGraded GradedSymbol
-Identifier RoleId ClasslistRoleDisplayName LastAccessed IsOnline
+Identifier RoleId ClasslistRoleDisplayName LastAccessed IsOnline EntityId EntityType
 CategoryId CustomInstructions Attachments TotalFiles UnreadFiles TotalUsers
 TotalUsersWithSubmissions TotalUsersWithFeedback Availability StartDate EndDate
 DueDate IsHidden Assessment ScoreDenominator DropboxType SubmissionType
@@ -179,6 +179,8 @@ class AssessmentAPI:
             ) from None
         try:
             if response.status_code == 204:
+                if method == "POST":
+                    raise ValueError()
                 return None
             result = response.json()
             if method == "POST":

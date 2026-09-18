@@ -93,7 +93,7 @@ def test_write_network_failure_is_not_replayed_and_is_not_reported_success():
 
 
 def test_learner_history_uses_my_submissions_and_retains_feedback():
-    response = [{"Entity": {"Id": 7}, "Status": 3, "Feedback": {"Score": 4, "IsGraded": True}, "Submissions": [{"Id": 9, "Files": [{"FileId": 8, "FileName": "answer.txt"}]}], "Password": "NEVER_PRINT"}]
+    response = [{"Entity": {"EntityId": 7, "EntityType": "User"}, "Status": 3, "Feedback": {"Score": 4, "IsGraded": True}, "Submissions": [{"Id": 9, "Files": [{"FileId": 8, "FileName": "answer.txt"}]}], "Password": "NEVER_PRINT"}]
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
         client.return_value.get_json.return_value = response
         result = CliRunner().invoke(cli, ["student", "assignment-history", "12", "34", "--json"])
@@ -101,6 +101,7 @@ def test_learner_history_uses_my_submissions_and_retains_feedback():
     client.return_value.get_json.assert_called_once_with("/12/dropbox/folders/34/submissions/mysubmissions/")
     data = json.loads(result.stdout)["data"][0]
     assert data["Status"] == 3
+    assert data["Entity"] == {"EntityId": 7, "EntityType": "User"}
     assert data["Feedback"]["Score"] == 4
     assert "NEVER_PRINT" not in result.output
     client.return_value._session.close.assert_called_once()
@@ -172,6 +173,12 @@ def test_bad_create_input_has_json_error_and_no_side_effects():
     client.assert_not_called()
 
 
+def test_role_group_usage_errors_preserve_json_contract():
+    result = CliRunner().invoke(cli, ["instructor", "--site", "bogus", "quizzes", "12", "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]
+
+
 @pytest.mark.parametrize("role", ["student", "instructor"])
 def test_discussion_post_routes_preserve_hierarchy_and_message(role):
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
@@ -191,6 +198,16 @@ def test_quiz_create_requires_verifiable_success_identifier():
     with pytest.raises(NetworkError, match="could not be verified"):
         AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
     client._request.assert_called_once()
+    response.close.assert_called_once()
+
+
+def test_quiz_create_204_is_an_unknown_write_outcome():
+    client = LighthouseClient()
+    client._csrf_token = "synthetic-csrf"
+    response = Mock(status_code=204)
+    client._request = Mock(return_value=response)
+    with pytest.raises(AssessmentWriteUnknownError, match="could not be verified"):
+        AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
     response.close.assert_called_once()
 
 
