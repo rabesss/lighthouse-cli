@@ -632,25 +632,6 @@ class LighthouseClient:
                 raise NetworkError("Could not initialize request protection.") from None
         return self._csrf_token
 
-    def get_optional_csrf_token(self) -> str | None:
-        """Return an available CSRF token without requiring the optional bootstrap.
-
-        Brightspace's file-submission endpoint accepts the session cookies on
-        its own.  Some tenant homepages still expose a CSRF initializer, so
-        include it when present while keeping submission compatible with
-        tenants that omit that artifact.
-        """
-        if self._csrf_token is not None:
-            return self._csrf_token
-        from .request_protection import csrf_from_homepage
-
-        body, _headers = self.get_raw("/d2l/home", max_bytes=2 * 1024 * 1024)
-        try:
-            self._csrf_token = csrf_from_homepage(body)
-        except ValueError:
-            return None
-        return self._csrf_token
-
     def _paginate_list(self, path: str, items_key: str = "Objects") -> list[dict[str, Any]]:
         """GET a potentially paginated list endpoint.
 
@@ -1114,7 +1095,11 @@ class LighthouseClient:
         ).encode()
         footer = f"\r\n--{boundary}--\r\n".encode()
         payload = body_bytes + file_bytes + footer
-        csrf_token = self.get_optional_csrf_token()
+        # The documented cookie-authenticated endpoint does not require a
+        # homepage CSRF bootstrap. Reuse a token already held in memory when a
+        # preceding assessment operation obtained one, without adding a GET to
+        # the file-submission fast path.
+        csrf_token = self._csrf_token
         headers = {
             "Content-Type": f"multipart/mixed; boundary={boundary}",
             "Content-Length": str(len(payload)),

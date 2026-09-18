@@ -33,7 +33,6 @@ def test_bootstrap_cached_for_same_client():
 
 def test_missing_bootstrap_does_not_block_submission_body():
     client = LighthouseClient()
-    client.get_raw = Mock(return_value=(b"<html>no bootstrap</html>", {}))
     response = Mock(status_code=200)
     response.json.return_value = {}
     client._request = Mock(return_value=response)
@@ -43,7 +42,7 @@ def test_missing_bootstrap_does_not_block_submission_body():
 
 def test_submission_carries_csrf_and_does_not_print_it():
     client = LighthouseClient()
-    client.get_raw = Mock(return_value=(b"<script>localStorage.setItem('XSRF.Token','synthetic-csrf')</script>", {}))
+    client._csrf_token = "synthetic-csrf"
     response = Mock(status_code=200)
     response.json.return_value = {}
     client._request = Mock(return_value=response)
