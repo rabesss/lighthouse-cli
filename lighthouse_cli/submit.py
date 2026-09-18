@@ -9,6 +9,7 @@ from pathlib import Path
 from .api import (
     CourseNotFoundError,
     LighthouseClient,
+    SessionExpiredError,
     SubmissionOutcomeUnknownError,
     resolve_course_id,
 )
@@ -24,6 +25,10 @@ _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
 _INVALID_SITE_ERROR = "Invalid site. Choose lighthouse or trial."
+_TRIAL_SESSION_EXPIRED_ERROR = (
+    "Trial session expired for https://hetrynow.brightspace.com. "
+    "Run: lighthouse auth import-session --site trial."
+)
 
 
 def cmd_submit(
@@ -106,7 +111,7 @@ def cmd_submit(
         course_name = _safe_display_name(_get_course_name(client, org_id), _DEFAULT_COURSE_NAME)
         folder_id_int = _resolve_folder_id(client, org_id, folder_id)
     except Exception as e:
-        return _submit_error(e, json_output)
+        return _submit_error(e, json_output, site=site)
 
     folder_name = _get_folder_name(client, org_id, folder_id_int)
     destination = {
@@ -180,7 +185,7 @@ def cmd_submit(
             description=f"Submitted via lighthouse-cli: {filename}",
         )
     except Exception as e:
-        return _submit_error(e, json_output)
+        return _submit_error(e, json_output, site=site)
 
     # A successful POST can still leave the remote outcome ambiguous if the
     # response body is malformed or unexpectedly shaped.  Do not turn that
@@ -216,7 +221,12 @@ def cmd_submit(
     return 0
 
 
-def _submit_error(message: BaseException | str, json_output: bool) -> int:
+def _submit_error(
+    message: BaseException | str,
+    json_output: bool,
+    *,
+    site: str = "lighthouse",
+) -> int:
     """Emit a safe submit failure without double-formatting its diagnostic.
 
     ``display.error`` intentionally treats a preformatted string as untrusted
@@ -225,20 +235,22 @@ def _submit_error(message: BaseException | str, json_output: bool) -> int:
     exception here and emit the already-sanitized template directly. Unknown
     exception text still goes through the centralized formatter exactly once.
     """
-    safe_message = _safe_submit_error(message)
+    safe_message = _safe_submit_error(message, site=site)
     print(f"Error: {safe_message}", file=sys.stderr)
     if json_output:
         _output_json({"error": safe_message})
     return 1
 
 
-def _safe_submit_error(message: BaseException | str) -> str:
+def _safe_submit_error(message: BaseException | str, *, site: str = "lighthouse") -> str:
     """Return an allowlisted, actionable submit diagnostic.
 
     Never interpolate identifiers, paths, folder listings, response bodies, or
     other exception text into the fixed templates below. Those values can be
     useful to a debugger but are not safe for normal CLI output.
     """
+    if site == "trial" and isinstance(message, SessionExpiredError):
+        return _TRIAL_SESSION_EXPIRED_ERROR
     if isinstance(message, FileNotFoundError):
         return "Dropbox folder not found. Run: lighthouse assignments"
     if isinstance(message, PermissionError):

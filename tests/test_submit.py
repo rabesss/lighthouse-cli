@@ -1112,12 +1112,71 @@ class TestSubmitCommand:
 
             result = cli_runner.invoke(
                 cli,
-                ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes"],
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--yes",
+                    "--json",
+                ],
             )
 
             assert result.exit_code == 1
-            assert "Session expired" in result.output
-            assert "auth login" in result.output
+            assert json_module.loads(result.stdout) == {
+                "error": "Session expired. Run: lighthouse auth login"
+            }
+            assert "Session expired" in result.stderr
+            assert "auth login" in result.stderr
+            assert "import-session" not in result.output
+
+    def test_submit_trial_session_expired_error_uses_trial_recovery(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Trial expiry points to trial session import, never production SSO."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            mock_client.get_courses.return_value = mock_courses
+            mock_client.get_dropbox_folders.return_value = mock_dropbox_folders
+            mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            mock_client.submit_file.side_effect = SessionExpiredError(
+                "Session expired. Run: lighthouse auth login"
+            )
+
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--site",
+                    "trial",
+                    "--yes",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 1
+        payload = json_module.loads(result.stdout)
+        assert payload == {
+            "error": (
+                "Trial session expired for https://hetrynow.brightspace.com. "
+                "Run: lighthouse auth import-session --site trial."
+            )
+        }
+        assert payload["error"] in result.stderr
+        assert "auth login" not in result.output
 
     def test_submit_server_error_500(
         self,
