@@ -177,9 +177,11 @@ Assignment creation makes a hidden individual file or text assignment. Replace
 `--dry-run` with `--yes` to create the assessment. A `403` remains an error,
 not an empty course or successful operation.
 
-Cookie-authenticated writes first obtain the same-session CSRF bootstrap from
-the LMS homepage and send `X-Csrf-Token`. That token is held only in memory.
-Writes are not automatically replayed after network errors.
+Assessment creation writes obtain the same-session CSRF bootstrap from the LMS
+homepage and send `X-Csrf-Token`; file submissions include that header when the
+tenant exposes the optional initializer, while the documented cookie-only
+submission path remains supported. Tokens are held only in memory. Writes are
+not automatically replayed after network errors.
 
 For the inspected Brightspace trial, put `--site trial` immediately after
 `student` or `instructor`. Its cookies live in a separate encrypted directory

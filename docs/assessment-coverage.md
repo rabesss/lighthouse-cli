@@ -92,13 +92,15 @@ API roots used: LE `1.93`, LP `1.47`.
 | Quiz attempt summaries | Not treated as learner access | 200, includes preview summaries | `instructor quiz-attempts` |
 | Create assignment via cookie auth | No university write attempted | 403 without CSRF, 200 with CSRF | Hidden file/text creation |
 | Create quiz via cookie auth | No university write attempted | 200 for final payload | Hidden shell creation, both layouts |
-| Submit synthetic file | No university write attempted | 403 even with CSRF | Existing upload command now sends CSRF; learner-role live validation remains blocked |
+| Submit synthetic file | No university write attempted | 403 even with CSRF | Existing upload command includes CSRF when available; learner-role live validation remains blocked |
 | Content userprogress route | 404 for inspected URL | 404 for inspected URL | Not added based on this failed probe |
 
 The homepage embeds a `localStorage.setItem('XSRF.Token', ...)` bootstrap in a
 script. Its parsed value matched the active browser token without exposing
-either value. CLI writes now bootstrap that value through a bounded homepage
-GET, cache it per client, and clear it when cookies refresh. No token is logged
+either value. Assessment creation bootstraps that value through a bounded
+homepage GET, caches it per client, and clears it when cookies refresh. File
+submission includes it when the initializer is present but remains compatible
+with the documented cookie-only endpoint when it is absent. No token is logged
 or written in plaintext.
 
 The first quiz creation payload returned 400. Replacing its unenforced timing
@@ -191,14 +193,16 @@ implementations. File splitting alone is not counted as a latency improvement.
 ## Local verification
 
 Full suite: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q
--p no:cacheprovider --basetemp=/var/tmp/lighthouse-quiz-parser-20260917`
-— **1,442 passed in 35.12 seconds**. The temporary test directory is disposable.
+-p no:cacheprovider --basetemp=/var/tmp/lighthouse-pr-delivery-8sn7bl/full-tests-after-review-fixes`
+— **1,443 passed in 37.91 seconds**. The temporary test directory is disposable.
 `ruff check --no-cache` passed for changed production modules and new tests;
-`git diff --check` passed. No hosted CI, PR, merge or deployment was performed.
+`git diff --check` passed. The stacked PRs are open with hosted checks and
+review bots still running; no merge or deployment has been performed.
 
 Tests cover lazy imports, both paging modes, unknown navigation rules,
 same-origin pagination/cookies, sealed origin-bound imports, JSON errors,
-CSRF bootstrap/caching, failure before a write, and non-replayed submissions.
+CSRF bootstrap/caching, optional submission protection, session-expiry write
+handling, and non-replayed submissions.
 Existing multipart tests begin with a synthetic cached CSRF token; separate
 request-protection tests exercise the new bootstrap path.
 
