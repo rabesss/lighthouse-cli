@@ -57,10 +57,32 @@ def cli() -> None:
     Read course data and manage local downloads through the D2L REST API.
     Run 'lighthouse auth login' first to set up your session. Commands with
     ``--json`` emit one command-specific JSON value on stdout;
-    the option is per-command and diagnostics go to stderr. ``submit`` is the
-    only command that writes remotely. ``download`` and ``sync`` write local
+    the option is per-command and diagnostics go to stderr. ``submit`` and
+    instructor creation commands write remotely. ``download`` and ``sync`` write local
     files and manifests across a course or semester scope.
     """
+
+
+class _AssessmentGroup(click.Group):
+    """Load assessment implementations only when one of these groups is used."""
+
+    def _implementation(self) -> click.Group:
+        from .assessment_commands import instructor, student
+        return instructor if self.name == "instructor" else student
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return self._implementation().list_commands(ctx)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        return self._implementation().get_command(ctx, cmd_name)
+
+
+for _role in ("instructor", "student"):
+    cli.add_command(_AssessmentGroup(
+        name=_role,
+        help=f"{_role.capitalize()} assessment workflows and submission records.",
+        params=[click.Option(["--site"], type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)],
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +92,15 @@ def cli() -> None:
 @cli.group()
 def auth() -> None:
     """Manage authentication (session cookies)."""
+
+
+@auth.command("import-session", cls=JsonOutputCommand)
+@click.option("--site", type=click.Choice(["lighthouse", "trial"]), required=True)
+@click.option("--json", "json_output", is_flag=True)
+def auth_import_session(site: str, json_output: bool) -> None:
+    """Import origin-bound cookies from JSON stdin into encrypted storage."""
+    from .session_import import import_session
+    click.get_current_context().invoke(import_session, site=site, json_output=json_output)
 
 
 @auth.command("status", cls=JsonOutputCommand)
@@ -488,7 +519,7 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_outpu
       lighthouse submit "signals" "Assignment 1" --file solution.pdf
       lighthouse submit signals "Assignment 1" --file solution.pdf --yes
 
-    This is the only command that changes remote LMS state. The command prompts
+    This command changes remote LMS state. The command prompts
     for confirmation before submitting (course name, folder name, file path).
     Use --yes to skip the prompt (required for agent/automation use).
 

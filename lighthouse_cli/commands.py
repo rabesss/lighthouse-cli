@@ -1643,6 +1643,7 @@ def _safe_quiz_json_scalar(value: Any) -> int | float | str | None:
 
 def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     """Project quiz JSON onto bounded scalar fields and safe RichText."""
+    from .quiz_rules import navigation_rules
     payload: dict[str, Any] = {
         "QuizId": _safe_content_id(quiz.get("QuizId")),
         "Name": _safe_server_text(quiz.get("Name"), fallback="Quiz") or "Quiz",
@@ -1682,6 +1683,8 @@ def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     for key in ("Description", "Instructions"):
         if key in quiz:
             payload[key] = _safe_quiz_rich_text(quiz.get(key))
+    payload["PagingTypeId"] = navigation_rules(quiz)["paging_type_id"]
+    payload["Navigation"] = navigation_rules(quiz)
     return payload
 
 
@@ -1739,6 +1742,11 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
         else _safe_quiz_scalar(attempts.get("NumberOfAttemptsAllowed"))
     )
     print(f"   Attempts: {attempts_text}")
+    from .quiz_rules import navigation_rules
+    rules = navigation_rules(quiz)
+    print(f"   Question Layout: {rules['layout']}")
+    if rules["prevent_moving_backwards"] is True:
+        print("   Save answers before advancing; previous pages cannot be revisited.")
     time_text = _safe_quiz_scalar(time_limit.get("TimeLimitValue"))
     print(
         f"   Time Limit: {time_text} min"
