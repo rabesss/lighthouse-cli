@@ -81,17 +81,16 @@ def test_uncertain_save_blocks_writes_and_recovers_by_readback(remote):
     assert workflow.status()["status"] == "active"
 
 
-def test_uncertain_advance_recovers_without_replaying_navigation(remote):
+def test_uncertain_advance_stays_blocked_without_authoritative_cursor(remote):
     workflow = PreviewWorkflow("trial", 10, 20)
     start_local(workflow)
     with patch("lighthouse_cli.quiz_preview_session.advance_current_preview", side_effect=PreviewAdvanceUnknownError()) as advance:
         with pytest.raises(PreviewAdvanceUnknownError):
             workflow.run("next")
     advance.assert_called_once()
-    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", side_effect=[ValueError("next page unavailable"), page()]) as read:
-        assert workflow.run("page")["page"] == 1
-    assert [call.kwargs["page"] for call in read.call_args_list] == [2, 1]
-    assert workflow.status()["status"] == "active"
+    with pytest.raises(PreviewWorkflowError, match="Navigation outcome is uncertain"):
+        workflow.run("page")
+    assert workflow.status()["status"] == "uncertain"
     assert workflow.status()["page"] == 1
 
 
@@ -112,11 +111,9 @@ def test_commit_failure_after_advance_never_restores_old_active_cursor(remote):
             workflow.run("next")
     advance.assert_called_once()
     assert workflow.status()["status"] == "uncertain"
-    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", return_value=page(2)) as read:
-        assert workflow.run("page")["page"] == 2
-    read.assert_called_once()
-    assert read.call_args.kwargs["page"] == 2
-    assert workflow.status()["page"] == 2
+    with pytest.raises(PreviewWorkflowError, match="Navigation outcome is uncertain"):
+        workflow.run("page")
+    assert workflow.status()["page"] == 1
 
 
 def test_completed_remote_attempt_is_not_submitted_again(remote):
@@ -126,7 +123,7 @@ def test_completed_remote_attempt_is_not_submitted_again(remote):
     receipt = {"submitted": True, "receipt_verified": True, "attempt_id": 30}
     with patch("lighthouse_cli.quiz_preview_session.verify_receipt", return_value=receipt), \
             patch("lighthouse_cli.quiz_preview_session.submit_preview") as submit:
-        assert workflow.run("submit") == receipt
+        assert workflow.run("submit") == {**receipt, "retained_for_grading": False}
     submit.assert_not_called()
     assert workflow.status()["status"] == "submitted"
 

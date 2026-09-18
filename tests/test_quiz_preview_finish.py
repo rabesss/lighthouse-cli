@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lighthouse_cli.api import LighthouseClient
+from lighthouse_cli.api import LighthouseClient, SessionExpiredError
 from lighthouse_cli.quiz_preview_finish import PreviewSubmitUnknownError, submit_preview, verify_receipt
 from tests.test_quiz_attempt_page import bootstrap, html, question
 
@@ -61,4 +61,20 @@ def test_success_heading_without_completed_attempt_record_is_not_a_receipt():
     client.get_raw = Mock(return_value=(b'<h2>Your work has been saved and submitted</h2>', {}))
     client.get_json = Mock(return_value={"AttemptId": 30, "QuizId": 20, "UserId": 7, "Completed": None})
     with pytest.raises(PreviewSubmitUnknownError):
+        verify_receipt(client, course_id=10, quiz_id=20, attempt_id=30, actor_id=7)
+
+
+def test_completed_attempt_record_verifies_localized_receipt_heading():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(return_value=(b"<h2>Arbeit gespeichert</h2>", {}))
+    client.get_json = Mock(return_value={"AttemptId": 30, "QuizId": 20, "UserId": 7, "Completed": "2026-09-17T15:00:00Z", "Score": 1})
+    result = verify_receipt(client, course_id=10, quiz_id=20, attempt_id=30, actor_id=7)
+    assert result["receipt_verified"] is True
+    assert result["receipt_heading_verified"] is False
+
+
+def test_receipt_session_expiry_is_not_masked_as_unknown_submission():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(side_effect=SessionExpiredError("session expired"))
+    with pytest.raises(SessionExpiredError):
         verify_receipt(client, course_id=10, quiz_id=20, attempt_id=30, actor_id=7)

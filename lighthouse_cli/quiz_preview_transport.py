@@ -11,7 +11,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 from bs4 import BeautifulSoup
 
-from .api import LighthouseClient, NetworkError, _close_response
+from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
 from .quiz_attempt_page import MAX_PAGE_BYTES, PreviewPage, parse_preview_page, hidden_form
 from .request_protection import form_protection_from_homepage
 
@@ -104,6 +104,8 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
             raise PreviewStartUnknownError()
         attempt_id, page = matches.pop()
         return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+    except SessionExpiredError:
+        raise
     except Exception:
         raise PreviewStartUnknownError() from None
     finally:
@@ -161,6 +163,8 @@ def save_current_preview_answer(
         if not verified.confirms_answer(question_id, choice_id):
             raise PreviewSaveUnknownError()
         return verified
+    except SessionExpiredError:
+        raise
     except Exception:
         raise PreviewSaveUnknownError() from None
     finally:
@@ -185,6 +189,8 @@ def advance_current_preview(
         if response.status_code != 200:
             raise PreviewAdvanceUnknownError()
         return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
+    except SessionExpiredError:
+        raise
     except Exception:
         raise PreviewAdvanceUnknownError() from None
     finally:

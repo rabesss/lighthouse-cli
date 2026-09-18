@@ -76,6 +76,12 @@ class PreviewWorkflow:
     def _save(self, state: dict[str, Any]) -> None:
         self.store.write_artifact(self.path, metadata={}, secret=state)
 
+    @staticmethod
+    def _receipt_with_retention(receipt: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        result = dict(receipt)
+        result["retained_for_grading"] = bool(state.get("retain", False))
+        return result
+
     def _actor(self, client: LighthouseClient) -> int:
         who = client.get_json(client.base_url + "/d2l/api/lp/1.47/users/whoami", _replay_safe=False)
         if not isinstance(who, dict):
@@ -124,7 +130,10 @@ class PreviewWorkflow:
                             or type(record.get("UserId")) is not int or record["UserId"] != actor):
                         raise PreviewWorkflowError("The remote attempt identity could not be verified.")
                     if record.get("Completed") is not None:
-                        receipt = verify_receipt(client, course_id=self.course_id, quiz_id=self.quiz_id, attempt_id=attempt_id, actor_id=actor)
+                        receipt = self._receipt_with_retention(
+                            verify_receipt(client, course_id=self.course_id, quiz_id=self.quiz_id, attempt_id=attempt_id, actor_id=actor),
+                            previous,
+                        )
                         completed_state = {**previous, "status": "submitted", "operation": None, "receipt": receipt}
                         self._save(completed_state)
                         if operation in {"page", "submit"}:
@@ -194,24 +203,21 @@ class PreviewWorkflow:
         identity = self._identity(state)
         operation = state.get("operation")
         if operation == "submit":
-            receipt = verify_receipt(client, course_id=self.course_id, quiz_id=self.quiz_id, attempt_id=state["attempt_id"], actor_id=state["actor_id"])
+            receipt = self._receipt_with_retention(
+                verify_receipt(client, course_id=self.course_id, quiz_id=self.quiz_id, attempt_id=state["attempt_id"], actor_id=state["actor_id"]),
+                state,
+            )
             state.update(status="submitted", operation=None, receipt=receipt)
             self._save(state)
             return receipt
         if operation == "next":
-            # A failed advance may have happened before or after the server
-            # moved the cursor. Probe the expected next page first, then fall
-            # back to the recorded page; both are read-only and avoid replaying
-            # the navigation POST.
-            try:
-                identity["page"] += 1
-                result = read_current_preview(client, **identity)
-            except Exception:
-                identity["page"] -= 1
-                result = read_current_preview(client, **identity)
-            state.update(status="active", operation=None, page=result.page)
-            self._save(state)
-            return result.public_data()
+            # Page readability is not an authoritative cursor signal: a
+            # direct GET can succeed before or after a one-way transition.
+            # Keep the durable intent uncertain and require browser
+            # inspection rather than risking a skip or a replay.
+            raise PreviewWorkflowError(
+                "Navigation outcome is uncertain. Inspect the browser before abandoning or continuing."
+            )
         elif operation != "answer":
             raise PreviewWorkflowError("The start outcome must be checked in the browser.")
         result = read_current_preview(client, **identity)

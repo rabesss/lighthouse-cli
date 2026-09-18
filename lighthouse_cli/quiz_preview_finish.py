@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
-from .api import LighthouseClient, NetworkError, _close_response
+from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
 from .quiz_attempt_page import MAX_PAGE_BYTES, PreviewPageError, hidden_form
 from .quiz_preview_transport import page_path, read_current_preview
 from .request_protection import form_protection_from_homepage
@@ -38,8 +38,7 @@ def verify_receipt(client: LighthouseClient, *, course_id: int, quiz_id: int, at
         body, _ = client.get_raw(receipt_path(course_id, quiz_id, attempt_id), max_bytes=MAX_PAGE_BYTES,
                                  _replay_safe=False, headers={"Cache-Control": "no-cache"})
         soup = BeautifulSoup(body, "html.parser")
-        if not any(h.get_text(" ", strip=True) == "Your work has been saved and submitted" for h in soup.find_all("h2")):
-            raise PreviewSubmitUnknownError()
+        heading_verified = any(h.get_text(" ", strip=True) == "Your work has been saved and submitted" for h in soup.find_all("h2"))
         # Do not mistake a quiz title or reflected text for a receipt. Require
         # the independent attempt record to confirm identity and completion.
         detail = client.get_json(f"/{course_id}/quizzes/{quiz_id}/attempts/{attempt_id}", _replay_safe=False)
@@ -58,7 +57,10 @@ def verify_receipt(client: LighthouseClient, *, course_id: int, quiz_id: int, at
             score = None
         return {"mode": "preview", "course_id": course_id, "quiz_id": quiz_id,
                 "attempt_id": attempt_id, "submitted": True, "receipt_verified": True,
+                "receipt_heading_verified": heading_verified,
                 "completed_at": timestamp.isoformat(), "score": score}
+    except SessionExpiredError:
+        raise
     except Exception:
         raise PreviewSubmitUnknownError() from None
 
@@ -139,6 +141,8 @@ def submit_preview(
         result = verify_receipt(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, actor_id=actor_id)
         result["retained_for_grading"] = retain
         return result
+    except SessionExpiredError:
+        raise
     except Exception:
         raise PreviewSubmitUnknownError() from None
     finally:
