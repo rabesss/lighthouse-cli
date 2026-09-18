@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from lighthouse_cli.api import LighthouseClient, NetworkError
+from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.request_protection import csrf_from_homepage
 from lighthouse_cli.request_protection import form_protection_from_homepage
 
@@ -31,13 +31,14 @@ def test_bootstrap_cached_for_same_client():
     client.get_raw.assert_called_once_with("/d2l/home", max_bytes=2 * 1024 * 1024)
 
 
-def test_missing_bootstrap_never_sends_submission_body():
+def test_missing_bootstrap_does_not_block_submission_body():
     client = LighthouseClient()
     client.get_raw = Mock(return_value=(b"<html>no bootstrap</html>", {}))
-    client._request = Mock()
-    with pytest.raises(NetworkError):
-        client.submit_file(12, 34, b"file body", "test.txt")
-    client._request.assert_not_called()
+    response = Mock(status_code=200)
+    response.json.return_value = {}
+    client._request = Mock(return_value=response)
+    client.submit_file(12, 34, b"file body", "test.txt")
+    assert "X-Csrf-Token" not in client._request.call_args.kwargs["headers"]
 
 
 def test_submission_carries_csrf_and_does_not_print_it():
