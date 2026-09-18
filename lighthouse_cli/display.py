@@ -50,6 +50,8 @@ class JsonOutputCommand(click.Command):
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         requested_json = _has_json_option(list(args))
+        self._json_requested = requested_json
+        ctx.meta["json_requested"] = requested_json
         try:
             return super().parse_args(ctx, args)
         except click.UsageError:
@@ -69,9 +71,28 @@ class JsonOutputGroup(click.Group):
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         requested_json = _has_json_option(list(args))
+        self._json_requested = requested_json
+        ctx.meta["json_requested"] = requested_json
         try:
             return super().parse_args(ctx, args)
         except click.UsageError:
+            if requested_json and not ctx.resilient_parsing:
+                output_json({"error": JSON_USAGE_ERROR})
+            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
+            if requested_json:
+                safe_error.exit_code = 1
+            raise safe_error from None
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as exc:
+            # Child JsonOutputCommand instances own their parse errors. Only
+            # normalize usage errors raised by this group itself, such as an
+            # unknown subcommand, to avoid emitting two JSON documents.
+            if exc.message == JSON_USAGE_ERROR:
+                raise
+            requested_json = bool(getattr(self, "_json_requested", False))
             if requested_json and not ctx.resilient_parsing:
                 output_json({"error": JSON_USAGE_ERROR})
             safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)

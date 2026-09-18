@@ -179,6 +179,12 @@ def test_role_group_usage_errors_preserve_json_contract():
     assert json.loads(result.stdout)["error"]
 
 
+def test_role_group_unknown_command_preserves_json_contract():
+    result = CliRunner().invoke(cli, ["instructor", "unknown", "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]
+
+
 @pytest.mark.parametrize("role", ["student", "instructor"])
 def test_discussion_post_routes_preserve_hierarchy_and_message(role):
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
