@@ -1,8 +1,14 @@
 name: Droid Auto Review
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, ready_for_review, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      review_ref:
+        description: PR head SHA or branch to validate with the trusted owner workflow
+        required: true
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -11,40 +17,92 @@ concurrency:
 jobs:
   droid-review:
     if: >-
+      (github.event_name == 'pull_request' &&
       github.event.pull_request.draft == false &&
-      github.event.pull_request.head_repository.full_name == github.repository &&
-      github.event.pull_request.user.login == 'rabesss'
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner) ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
-      id-token: write
-      actions: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.review_ref }}
           fetch-depth: 2
           persist-credentials: false
       - name: Install Droid custom model settings
         shell: bash
         run: |
-          git fetch --no-tags origin "${{ github.event.pull_request.base.sha }}" --depth=1
           install -d -m 700 "$HOME/.factory"
-          git show "${{ github.event.pull_request.base.sha }}:.github/droid-zai-settings.json" > "$HOME/.factory/settings.json"
-          chmod 600 "$HOME/.factory/settings.json"
+          install -m 600 .github/droid-zai-settings.json "$HOME/.factory/settings.json"
+      - name: Verify Z.AI route configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            (.customModels | length == 1) and
+            (.customModels[0].model == "zai-coding-anthropic/glm-5.3") and
+            (.customModels[0].id == "custom:zai-coding-anthropic/glm-5.3") and
+            (.customModels[0].displayName == "GLM 5.3 / Z.AI Coding Plan (CPA)") and
+            (.customModels[0].baseUrl == "https://cpa.ravishdixit.xyz/v1") and
+            (.customModels[0].provider == "generic-chat-completion-api") and
+            (.customModels[0].apiKey == "${CLIPROXY_CLAUDE_CODE_API_KEY}") and
+            (.customModels[0].reasoningEffort == "max")
+          ' .github/droid-zai-settings.json >/dev/null
+      - name: Bootstrap custom Droid route
+        if: github.event_name == 'workflow_dispatch'
+        uses: Factory-AI/droid-action/base-action@e5ae50268211d2e9ac85edb57c28bf253b6627f7 # v6
+        with:
+          factory_api_key: ${{ secrets.FACTORY_API_KEY }}
+          settings: .github/droid-zai-settings.json
+          prompt: Verify the configured custom model route without reading or changing repository files.
+          droid_args: >-
+            --model "custom:zai-coding-anthropic/glm-5.3"
+            --list-tools
+          reasoning_effort: max
+        env:
+          CLIPROXY_CLAUDE_CODE_API_KEY: ${{ secrets.CLIPROXY_CLAUDE_CODE_API_KEY }}
+      - name: Mark review start
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: echo "DROID_GUARD_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Run Droid Auto Review
+        id: droid
+        if: github.event_name == 'pull_request'
         uses: Factory-AI/droid-action@e5ae50268211d2e9ac85edb57c28bf253b6627f7 # v6
         with:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
+          github_token: ${{ github.token }}
           automatic_review: true
           automatic_security_review: true
           review_model: custom:zai-coding-anthropic/glm-5.3
           security_model: custom:zai-coding-anthropic/glm-5.3
           reasoning_effort: max
+          droid_args: >-
+            --remove-tools "Execute,Edit,Create,ApplyPatch,Task,FetchUrl,Skill"
           allowed_bots: dependabot,factory-droid
         env:
           CLIPROXY_CLAUDE_CODE_API_KEY: ${{ secrets.CLIPROXY_CLAUDE_CODE_API_KEY }}
+      - name: Reject custom-model fallback
+        if: github.event_name == 'pull_request' && steps.droid.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" |
+            jq -r --arg since "$DROID_GUARD_SINCE" \
+              'add[] | select(.created_at >= $since) | .body' |
+            grep -Eiq 'retrying with the organization.s default model|not a recognized model id|not allowed by your organization.s model policy'; then
+            echo "::error::Droid reported a custom-model fallback; refusing a Factory-default review"
+            exit 1
+          fi
