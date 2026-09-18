@@ -17,6 +17,7 @@ from importlib import import_module
 from typing import Any
 
 from .display import JsonOutputCommand, JsonOutputGroup
+from .connection import SUPPORTED_SITES
 
 
 def _lazy_command(module: str, name: str) -> Callable[..., int]:
@@ -505,26 +506,56 @@ def assignments(course_id: str | None, json_output: bool) -> None:
 @click.argument("course_id")
 @click.argument("folder_id")
 @click.option("-f", "--file", "file_path", required=True, help="Path to the file to submit.")
+@click.option(
+    "--site",
+    type=click.Choice(SUPPORTED_SITES),
+    default="lighthouse",
+    show_default=True,
+    help="Brightspace site/session to use; trial keeps its own encrypted cookies.",
+)
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation prompt and submit immediately.")
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Resolve and print the destination plan without reading or uploading the file.",
+)
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_output: bool) -> None:
+def submit(
+    course_id: str,
+    folder_id: str,
+    file_path: str,
+    site: str,
+    yes: bool,
+    dry_run: bool,
+    json_output: bool,
+) -> None:
     """REMOTE WRITE: submit a file to a D2L dropbox folder.
 
     COURSE_ID is the course identifier (numeric OrgUnitId or name substring).
     FOLDER_ID is the dropbox folder identifier (numeric folder ID or name substring).
 
+    SITE selects the origin and encrypted session. It defaults to the
+    production Lighthouse tenant for backwards compatibility; use
+    ``--site trial`` for the inspected synthetic trial course.
+
     Use `lighthouse assignments COURSE_ID` to discover available folders with their IDs.
 
     Example:
-      lighthouse submit "signals" "Assignment 1" --file solution.pdf
-      lighthouse submit signals "Assignment 1" --file solution.pdf --yes
+      lighthouse submit "signals" "Assignment 1" --file solution.pdf --site lighthouse
+      lighthouse submit 22985 23879 --file solution.pdf --site trial --yes
+      lighthouse submit 22985 23879 --file solution.pdf --site trial --dry-run --json
 
     This command changes remote LMS state. The command prompts
-    for confirmation before submitting (course name, folder name, file path).
+    for confirmation before submitting (site, origin, course, folder, and file).
     Use --yes to skip the prompt (required for agent/automation use).
+    `--dry-run` performs only the read-only preflight and emits the resolved
+    destination without reading or uploading the file.
 
     On success, prints a JSON object with submission_id, folder_id, folder_name,
-    course_id, course_name, file info, and submitted_at timestamp.
+    course_id, course_name, site, destination, file info, and submitted_at
+    timestamp.
     """
     raise SystemExit(cmd_submit(
         course_id=course_id,
@@ -532,4 +563,6 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_outpu
         file_path=file_path,
         yes=yes,
         json_output=json_output,
+        site=site,
+        dry_run=dry_run,
     ))

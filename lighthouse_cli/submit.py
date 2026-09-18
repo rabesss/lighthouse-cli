@@ -9,9 +9,11 @@ from pathlib import Path
 from .api import (
     CourseNotFoundError,
     LighthouseClient,
+    SessionExpiredError,
     SubmissionOutcomeUnknownError,
     resolve_course_id,
 )
+from .connection import connection_for
 from .display import format_user_error, output_json as _output_json, safe_display_text, utc_now_iso as _utc_now_iso
 from .utils import get_course_name as _get_course_name
 
@@ -22,6 +24,14 @@ _DEFAULT_COURSE_NAME = "Unknown course"
 _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
+_INVALID_SITE_ERROR = "Invalid site. Choose lighthouse or trial."
+_DRY_RUN_UNVERIFIED_WARNING = (
+    "Dry-run destination metadata could not be fully verified; no submission was sent."
+)
+_TRIAL_SESSION_EXPIRED_ERROR = (
+    "Trial session expired for https://hetrynow.brightspace.com. "
+    "Run: lighthouse auth import-session --site trial."
+)
 
 
 def cmd_submit(
@@ -30,21 +40,38 @@ def cmd_submit(
     file_path: str,
     yes: bool = False,
     json_output: bool = False,
+    site: str = "lighthouse",
+    dry_run: bool = False,
 ) -> int:
     """Submit a file to a dropbox folder.
 
     COURSE_ID is the course identifier (name substring or numeric OrgUnitId).
     FOLDER_ID is the dropbox folder identifier (numeric ID or name substring).
 
-    Prompts for confirmation before submitting (unless --yes is set).
-    Shows course name, folder name, and file path before submitting. In JSON
-    mode, the prompt is written to stderr so stdout remains JSON-only.
+    ``site`` selects the origin and sealed cookie store. It defaults to the
+    historical Lighthouse connection for backwards compatibility; callers
+    targeting the inspected trial must pass ``site="trial"`` explicitly.
 
-    On success, prints JSON with submission details (submission_id, folder_id,
-    folder_name, course_id, course_name, file, submitted_at).
+    Prompts for confirmation before submitting (unless --yes is set).
+    Shows the destination site, course name, folder name, and file path before
+    submitting. In JSON mode, the prompt is written to stderr so stdout
+    remains JSON-only. ``dry_run`` resolves the same destination with a
+    read-only client and emits a plan without reading or uploading the file.
+
+    On success, prints JSON with submission details (site, destination,
+    submission_id, folder_id, folder_name, course_id, course_name, file,
+    submitted_at).
 
     Non-interactive / agent-friendly: --yes + --json = only JSON on stdout.
     """
+    # Validate the selected connection before touching local input or
+    # constructing a client. This keeps direct callers fail-closed even when
+    # they bypass Click's Choice validation.
+    try:
+        connection = connection_for(site)
+    except (TypeError, ValueError, OSError, RuntimeError):
+        return _submit_error(_INVALID_SITE_ERROR, json_output)
+
     # Validate the local input before constructing a client or resolving any
     # remote identifiers. A declined submission should not read the file body,
     # so defer ``read_bytes`` until after confirmation below.
@@ -63,14 +90,22 @@ def cmd_submit(
 
     # Keep the explicit confirmation requirement for non-interactive callers.
     # This check happens after local validation, but before any API work.
-    if not yes and not sys.stdin.isatty():
+    if not dry_run and not yes and not sys.stdin.isatty():
         return _submit_error(
             "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
             json_output,
         )
 
     try:
-        client = LighthouseClient()
+        if site == "lighthouse" and not dry_run:
+            # Preserve the historical default construction path for existing
+            # callers while making alternate sites explicit at the client
+            # boundary.
+            client = LighthouseClient()
+        elif dry_run:
+            client = LighthouseClient(read_only_auth=True, site=site)
+        else:
+            client = LighthouseClient(site=site)
     except Exception:
         return _submit_error(_CLIENT_INIT_ERROR, json_output)
 
@@ -79,9 +114,45 @@ def cmd_submit(
         course_name = _safe_display_name(_get_course_name(client, org_id), _DEFAULT_COURSE_NAME)
         folder_id_int = _resolve_folder_id(client, org_id, folder_id)
     except Exception as e:
-        return _submit_error(e, json_output)
+        return _submit_error(e, json_output, site=site)
 
-    folder_name = _get_folder_name(client, org_id, folder_id_int)
+    folder_name, folder_name_verified = _get_folder_name(client, org_id, folder_id_int)
+    destination = {
+        "site": site,
+        "origin": connection.origin,
+        "api_root": connection.api_le,
+        "course_id": org_id,
+        "folder_id": folder_id_int,
+    }
+
+    if dry_run:
+        try:
+            file_size = file_path_obj.stat().st_size
+        except OSError:
+            return _submit_error("Could not read file.", json_output)
+        if json_output:
+            payload = {
+                "dry_run": True,
+                "site": site,
+                "destination": destination,
+                "destination_verified": folder_name_verified,
+                "folder_id": folder_id_int,
+                "folder_name": folder_name,
+                "course_id": org_id,
+                "course_name": course_name,
+                "file": {"name": display_filename, "size_bytes": file_size},
+            }
+            if not folder_name_verified:
+                payload["warning"] = _DRY_RUN_UNVERIFIED_WARNING
+            _output_json(payload)
+        else:
+            print(
+                f"Would submit to '{folder_name}' in '{course_name}' on {site} "
+                f"({connection.origin}).\n  File: {display_filename}"
+            )
+            if not folder_name_verified:
+                print(f"Warning: {_DRY_RUN_UNVERIFIED_WARNING}")
+        return 0
 
     # Confirmation prompt (skip with --yes). JSON-mode prompts must not pollute
     # stdout; ``input`` is called without a prompt because input() writes its
@@ -89,7 +160,8 @@ def cmd_submit(
     if not yes:
         prompt_stream = sys.stderr if json_output else sys.stdout
         print(
-            f"Submit to '{folder_name}' in '{course_name}'?\n  File: {display_filename}",
+            f"Submit to '{folder_name}' in '{course_name}' on {site} "
+            f"({connection.origin})?\n  File: {display_filename}",
             file=prompt_stream,
         )
         print("Confirm [y/N]: ", end="", flush=True, file=prompt_stream)
@@ -122,7 +194,7 @@ def cmd_submit(
             description=f"Submitted via lighthouse-cli: {filename}",
         )
     except Exception as e:
-        return _submit_error(e, json_output)
+        return _submit_error(e, json_output, site=site)
 
     # A successful POST can still leave the remote outcome ambiguous if the
     # response body is malformed or unexpectedly shaped.  Do not turn that
@@ -141,6 +213,7 @@ def cmd_submit(
     output_filename = display_filename
     if json_output:
         _output_json({
+            "site": site, "destination": destination,
             "submission_id": submission_id, "folder_id": folder_id_int,
             "folder_name": folder_name, "course_id": org_id,
             "course_name": course_name,
@@ -149,6 +222,7 @@ def cmd_submit(
         })
     else:
         print(f"Submitted successfully!\n"
+              f"  Site: {site} ({connection.origin})\n"
               f"  Submission ID: {submission_id}\n  Folder: {folder_name}\n"
               f"  Course: {course_name}\n  File: {output_filename}\n"
               f"  Submitted at: {submitted_at}")
@@ -156,7 +230,12 @@ def cmd_submit(
     return 0
 
 
-def _submit_error(message: BaseException | str, json_output: bool) -> int:
+def _submit_error(
+    message: BaseException | str,
+    json_output: bool,
+    *,
+    site: str = "lighthouse",
+) -> int:
     """Emit a safe submit failure without double-formatting its diagnostic.
 
     ``display.error`` intentionally treats a preformatted string as untrusted
@@ -165,20 +244,22 @@ def _submit_error(message: BaseException | str, json_output: bool) -> int:
     exception here and emit the already-sanitized template directly. Unknown
     exception text still goes through the centralized formatter exactly once.
     """
-    safe_message = _safe_submit_error(message)
+    safe_message = _safe_submit_error(message, site=site)
     print(f"Error: {safe_message}", file=sys.stderr)
     if json_output:
         _output_json({"error": safe_message})
     return 1
 
 
-def _safe_submit_error(message: BaseException | str) -> str:
+def _safe_submit_error(message: BaseException | str, *, site: str = "lighthouse") -> str:
     """Return an allowlisted, actionable submit diagnostic.
 
     Never interpolate identifiers, paths, folder listings, response bodies, or
     other exception text into the fixed templates below. Those values can be
     useful to a debugger but are not safe for normal CLI output.
     """
+    if site == "trial" and isinstance(message, SessionExpiredError):
+        return _TRIAL_SESSION_EXPIRED_ERROR
     if isinstance(message, FileNotFoundError):
         return "Dropbox folder not found. Run: lighthouse assignments"
     if isinstance(message, PermissionError):
@@ -205,6 +286,8 @@ def _safe_submit_error(message: BaseException | str) -> str:
             return "Could not read file."
         if lowered.startswith("could not initialize lighthouse client"):
             return _CLIENT_INIT_ERROR
+        if lowered.startswith("invalid site"):
+            return _INVALID_SITE_ERROR
         if lowered.startswith("refusing to submit without --yes"):
             return (
                 "Refusing to submit without --yes in non-interactive mode. "
@@ -308,15 +391,19 @@ def _positive_folder_id(value: object) -> int | None:
     return None
 
 
-def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> str:
-    """Get the name of a dropbox folder by ID."""
+def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> tuple[str, bool]:
+    """Get a dropbox folder name and whether its metadata was verified."""
     try:
         detail = client.get_dropbox_folder_detail(org_id, folder_id)
     except Exception:
-        return _DEFAULT_FOLDER_NAME
+        return _DEFAULT_FOLDER_NAME, False
     if not isinstance(detail, dict):
-        return _DEFAULT_FOLDER_NAME
-    return _safe_display_name(detail.get("Name"), _DEFAULT_FOLDER_NAME)
+        return _DEFAULT_FOLDER_NAME, False
+    raw_name = detail.get("Name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return _DEFAULT_FOLDER_NAME, False
+    name = _safe_display_name(raw_name, _DEFAULT_FOLDER_NAME)
+    return name, name != _DEFAULT_FOLDER_NAME
 
 
 def _safe_display_name(value: object, fallback: str) -> str:

@@ -92,7 +92,7 @@ API roots used: LE `1.93`, LP `1.47`.
 | Quiz attempt summaries | Not treated as learner access | 200, includes preview summaries | `instructor quiz-attempts` |
 | Create assignment via cookie auth | No university write attempted | 403 without CSRF, 200 with CSRF | Hidden file/text creation |
 | Create quiz via cookie auth | No university write attempted | 200 for final payload | Hidden shell creation, both layouts |
-| Submit synthetic file | No university write attempted | 403 even with CSRF | Existing upload command uses the documented cookie-only endpoint; learner-role live validation remains blocked |
+| Submit synthetic file | No university write attempted | 403 even with CSRF | Top-level upload now accepts an explicit `--site trial` binding and a read-only `--dry-run` plan; the documented endpoint is still not live-validated for a learner write |
 | Content userprogress route | 404 for inspected URL | 404 for inspected URL | Not added based on this failed probe |
 
 The homepage embeds a `localStorage.setItem('XSRF.Token', ...)` bootstrap in a
