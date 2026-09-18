@@ -12,6 +12,7 @@ from .api import (
     SubmissionOutcomeUnknownError,
     resolve_course_id,
 )
+from .connection import connection_for
 from .display import format_user_error, output_json as _output_json, safe_display_text, utc_now_iso as _utc_now_iso
 from .utils import get_course_name as _get_course_name
 
@@ -22,6 +23,7 @@ _DEFAULT_COURSE_NAME = "Unknown course"
 _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
+_INVALID_SITE_ERROR = "Invalid site. Choose lighthouse or trial."
 
 
 def cmd_submit(
@@ -30,21 +32,38 @@ def cmd_submit(
     file_path: str,
     yes: bool = False,
     json_output: bool = False,
+    site: str = "lighthouse",
+    dry_run: bool = False,
 ) -> int:
     """Submit a file to a dropbox folder.
 
     COURSE_ID is the course identifier (name substring or numeric OrgUnitId).
     FOLDER_ID is the dropbox folder identifier (numeric ID or name substring).
 
-    Prompts for confirmation before submitting (unless --yes is set).
-    Shows course name, folder name, and file path before submitting. In JSON
-    mode, the prompt is written to stderr so stdout remains JSON-only.
+    ``site`` selects the origin and sealed cookie store. It defaults to the
+    historical Lighthouse connection for backwards compatibility; callers
+    targeting the inspected trial must pass ``site="trial"`` explicitly.
 
-    On success, prints JSON with submission details (submission_id, folder_id,
-    folder_name, course_id, course_name, file, submitted_at).
+    Prompts for confirmation before submitting (unless --yes is set).
+    Shows the destination site, course name, folder name, and file path before
+    submitting. In JSON mode, the prompt is written to stderr so stdout
+    remains JSON-only. ``dry_run`` resolves the same destination with a
+    read-only client and emits a plan without reading or uploading the file.
+
+    On success, prints JSON with submission details (site, destination,
+    submission_id, folder_id, folder_name, course_id, course_name, file,
+    submitted_at).
 
     Non-interactive / agent-friendly: --yes + --json = only JSON on stdout.
     """
+    # Validate the selected connection before touching local input or
+    # constructing a client. This keeps direct callers fail-closed even when
+    # they bypass Click's Choice validation.
+    try:
+        connection = connection_for(site)
+    except (TypeError, ValueError, OSError):
+        return _submit_error(_INVALID_SITE_ERROR, json_output)
+
     # Validate the local input before constructing a client or resolving any
     # remote identifiers. A declined submission should not read the file body,
     # so defer ``read_bytes`` until after confirmation below.
@@ -63,14 +82,22 @@ def cmd_submit(
 
     # Keep the explicit confirmation requirement for non-interactive callers.
     # This check happens after local validation, but before any API work.
-    if not yes and not sys.stdin.isatty():
+    if not dry_run and not yes and not sys.stdin.isatty():
         return _submit_error(
             "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
             json_output,
         )
 
     try:
-        client = LighthouseClient()
+        if site == "lighthouse" and not dry_run:
+            # Preserve the historical default construction path for existing
+            # callers while making alternate sites explicit at the client
+            # boundary.
+            client = LighthouseClient()
+        elif dry_run:
+            client = LighthouseClient(read_only_auth=True, site=site)
+        else:
+            client = LighthouseClient(site=site)
     except Exception:
         return _submit_error(_CLIENT_INIT_ERROR, json_output)
 
@@ -82,6 +109,36 @@ def cmd_submit(
         return _submit_error(e, json_output)
 
     folder_name = _get_folder_name(client, org_id, folder_id_int)
+    destination = {
+        "site": site,
+        "origin": connection.origin,
+        "api_root": connection.api_le,
+        "course_id": org_id,
+        "folder_id": folder_id_int,
+    }
+
+    if dry_run:
+        try:
+            file_size = file_path_obj.stat().st_size
+        except OSError:
+            return _submit_error("Could not read file.", json_output)
+        if json_output:
+            _output_json({
+                "dry_run": True,
+                "site": site,
+                "destination": destination,
+                "folder_id": folder_id_int,
+                "folder_name": folder_name,
+                "course_id": org_id,
+                "course_name": course_name,
+                "file": {"name": display_filename, "size_bytes": file_size},
+            })
+        else:
+            print(
+                f"Would submit to '{folder_name}' in '{course_name}' on {site} "
+                f"({connection.origin}).\n  File: {display_filename}"
+            )
+        return 0
 
     # Confirmation prompt (skip with --yes). JSON-mode prompts must not pollute
     # stdout; ``input`` is called without a prompt because input() writes its
@@ -89,7 +146,8 @@ def cmd_submit(
     if not yes:
         prompt_stream = sys.stderr if json_output else sys.stdout
         print(
-            f"Submit to '{folder_name}' in '{course_name}'?\n  File: {display_filename}",
+            f"Submit to '{folder_name}' in '{course_name}' on {site} "
+            f"({connection.origin})?\n  File: {display_filename}",
             file=prompt_stream,
         )
         print("Confirm [y/N]: ", end="", flush=True, file=prompt_stream)
@@ -141,6 +199,7 @@ def cmd_submit(
     output_filename = display_filename
     if json_output:
         _output_json({
+            "site": site, "destination": destination,
             "submission_id": submission_id, "folder_id": folder_id_int,
             "folder_name": folder_name, "course_id": org_id,
             "course_name": course_name,
@@ -149,6 +208,7 @@ def cmd_submit(
         })
     else:
         print(f"Submitted successfully!\n"
+              f"  Site: {site} ({connection.origin})\n"
               f"  Submission ID: {submission_id}\n  Folder: {folder_name}\n"
               f"  Course: {course_name}\n  File: {output_filename}\n"
               f"  Submitted at: {submitted_at}")
@@ -205,6 +265,8 @@ def _safe_submit_error(message: BaseException | str) -> str:
             return "Could not read file."
         if lowered.startswith("could not initialize lighthouse client"):
             return _CLIENT_INIT_ERROR
+        if lowered.startswith("invalid site"):
+            return _INVALID_SITE_ERROR
         if lowered.startswith("refusing to submit without --yes"):
             return (
                 "Refusing to submit without --yes in non-interactive mode. "

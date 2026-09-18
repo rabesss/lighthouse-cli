@@ -37,7 +37,7 @@ lighthouse sync "signals"
 lighthouse assignments "signals"
 
 # Submit a file to a dropbox folder
-lighthouse submit -f my_homework.pdf "signals" "Homework 1" --yes
+lighthouse submit -f my_homework.pdf "signals" "Homework 1" --site lighthouse --yes
 ```
 
 > **Auth details:** See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md)
@@ -135,6 +135,10 @@ stderr. `--help` remains human-readable.
 create or replace a manifest, create directories, or download file bodies.
 Instructor creation commands also support `--dry-run`; those plans do not
 load credentials, make requests, or write local files.
+`submit --dry-run` performs read-only course/folder resolution and prints the
+selected site and origin without reading or uploading the file. The top-level
+submission command defaults to the production Lighthouse site for backwards
+compatibility; pass `--site trial` before any synthetic trial upload.
 
 ### Student and instructor course tools
 
@@ -879,13 +883,21 @@ For a single course with no grade items, human output says
 
 ---
 
-### `lighthouse submit -f FILE COURSE_ID FOLDER_ID [--yes] [--json]`
+### `lighthouse submit -f FILE COURSE_ID FOLDER_ID [--site SITE] [--yes] [--dry-run] [--json]`
 
 Submit a file to a D2L dropbox folder.
 
 This remote-write command sends the selected local file
 to Brightspace and creates a submission. `download`, `sync`, and `config
 courses` affect local state only.
+
+`--site` binds every request, course/folder lookup, and cookie read to one
+Brightspace origin. It accepts `lighthouse` (the default production tenant)
+or `trial` (the inspected synthetic tenant). Trial uses its separate sealed
+cookie directory under `LIGHTHOUSE_CONFIG_DIR/sites/hetrynow.brightspace.com`;
+there is no cross-origin cookie fallback. Use `--dry-run` to resolve the
+destination and emit a machine-readable plan without reading or uploading the
+file.
 
 **Arguments:**
 
@@ -900,7 +912,9 @@ courses` affect local state only.
 | Flag | Description |
 |------|-------------|
 | `-f`, `--file` | Path to the file to submit (required) |
+| `--site` | Site/session binding: `lighthouse` or `trial` (default: `lighthouse`) |
 | `--yes` | Skip confirmation prompt; required in non-TTY mode |
+| `--dry-run` | Resolve the site, course, and folder and print a plan without uploading |
 | `--json` | Output structured JSON result |
 
 **API call:** `POST /d2l/api/le/1.93/{orgId}/dropbox/folders/{folderId}/submissions/mysubmissions/`
@@ -913,7 +927,8 @@ courses` affect local state only.
 
 **Confirmation:** Prompts for confirmation in a TTY unless `--yes` is set. In
 non-TTY environments (e.g. from an agent), `--yes` is required; otherwise the
-command refuses to submit.
+command refuses to submit. The prompt includes the selected site and origin.
+`--dry-run` does not prompt because it cannot create a remote submission.
 
 When `--json` is supplied, a successful submission and any runtime or Click
 failure produce exactly one JSON document on stdout; diagnostics remain on
@@ -934,6 +949,14 @@ Submitted successfully. Submission ID: 5001
 **JSON output (`--json`):**
 ```json
 {
+  "site": "lighthouse",
+  "destination": {
+    "site": "lighthouse",
+    "origin": "https://lighthouse.manipal.edu",
+    "api_root": "https://lighthouse.manipal.edu/d2l/api/le/1.93",
+    "course_id": 1001,
+    "folder_id": 101
+  },
   "submission_id": 5001,
   "folder_id": 101,
   "folder_name": "Homework 1",
@@ -941,6 +964,23 @@ Submitted successfully. Submission ID: 5001
   "course_name": "Introduction to CS",
   "file": {"name": "homework.pdf", "size_bytes": 24576},
   "submitted_at": "2025-05-10T15:30:00Z"
+}
+```
+
+The corresponding trial preflight is safe to inspect before an authorized
+synthetic write:
+
+```json
+{
+  "dry_run": true,
+  "site": "trial",
+  "destination": {
+    "site": "trial",
+    "origin": "https://hetrynow.brightspace.com",
+    "api_root": "https://hetrynow.brightspace.com/d2l/api/le/1.93",
+    "course_id": 22985,
+    "folder_id": 23879
+  }
 }
 ```
 
@@ -1219,12 +1259,16 @@ programmatically. Here's the recommended workflow:
    # returns one normalized payload with folder details and RichText instructions
 
 12. Submit a file to a dropbox folder
-    $ lighthouse submit -f homework.pdf "signals" "Homework 1" --yes --json
-    # returns {submission_id, folder_id, folder_name, course_id, course_name, file: {name, size_bytes}, submitted_at}
+    $ lighthouse submit -f homework.pdf "signals" "Homework 1" --site lighthouse --yes --json
+    # returns {site, destination, submission_id, folder_id, folder_name, course_id, course_name, file: {name, size_bytes}, submitted_at}
 
 13. Resolve folder ID by name
-    $ lighthouse submit -f report.pdf "signals" "Lab Report" --yes --json
+    $ lighthouse submit -f report.pdf "signals" "Lab Report" --site lighthouse --yes --json
     # resolves "Lab Report" -> folder ID
+
+14. Preview a synthetic trial destination without uploading
+    $ lighthouse submit -f report.pdf 22985 23879 --site trial --dry-run --json
+    # prints the trial origin and resolved folder; no submission request is sent
 ```
 
 **Tips for agents:**

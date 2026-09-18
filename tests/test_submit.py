@@ -41,6 +41,7 @@ from lighthouse_cli.api import (
     SubmissionOutcomeUnknownError,
 )
 from lighthouse_cli.config import COOKIE_NAMES
+from lighthouse_cli.connection import connection_for
 
 
 class _TtyStringIO(io.StringIO):
@@ -145,6 +146,45 @@ def _make_client_with_mock_session(status_code: int, json_data: dict | None = No
 
 class TestSubmitFile:
     """Tests for LighthouseClient.submit_file() method."""
+
+    def test_trial_client_keeps_cookie_store_and_post_origin_separate(
+        self,
+        sample_submission_response: dict,
+    ) -> None:
+        """A trial submission cannot read production cookies or post to its host."""
+        from lighthouse_cli import api as api_module
+
+        captured: list[dict] = []
+
+        def mock_request(method, url, **kwargs):
+            captured.append({"method": method, "url": url, "kwargs": kwargs})
+            return _make_mock_response(200, sample_submission_response)
+
+        with patch.object(api_module, "load_cookies", return_value={}) as load:
+            client = LighthouseClient(site="trial")
+            assert client.cookies == {}
+
+        connection = connection_for("trial")
+        assert load.call_args.kwargs == {
+            "read_only": True,
+            "config_dir": connection.cookie_dir,
+            "expected_origin": connection.origin,
+        }
+
+        client._loaded = True
+        client._cookies = {name: "synthetic" for name in COOKIE_NAMES}
+        client._csrf_token = "synthetic-csrf"
+        client._session.request = mock_request
+        client.submit_file(
+            org_unit_id=22985,
+            folder_id=23879,
+            file_bytes=b"synthetic trial body",
+            filename="trial.pdf",
+        )
+
+        assert captured[0]["method"] == "POST"
+        assert captured[0]["url"].startswith(connection.api_le)
+        assert "lighthouse.manipal.edu" not in captured[0]["url"]
 
     def test_submit_file_builds_correct_multipart_body(
         self, sample_submission_response: dict
@@ -451,8 +491,136 @@ class TestSubmitCommand:
         result = cli_runner.invoke(cli, ["submit", "--help"])
         assert result.exit_code == 0
         assert "--file" in result.output
+        assert "--site" in result.output
         assert "--yes" in result.output
+        assert "--dry-run" in result.output
         assert "--json" in result.output
+
+    def test_submit_invalid_site_fails_before_file_or_client_access(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+    ) -> None:
+        """An invalid site is rejected before any local or remote work."""
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch("lighthouse_cli.submit.LighthouseClient") as client_cls,
+            patch.object(Path, "read_bytes", autospec=True) as read_bytes,
+        ):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--site",
+                    "bogus",
+                    "--yes",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {
+            "error": "Invalid command arguments. See --help."
+        }
+        assert "bogus" not in result.output
+        client_cls.assert_not_called()
+        read_bytes.assert_not_called()
+
+    def test_submit_trial_routes_client_and_records_destination(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        sample_submission_response: dict,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Trial selection reaches the client and is visible in JSON output."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as client_cls:
+            client = MagicMock()
+            client_cls.return_value = client
+            client.get_courses.return_value = mock_courses
+            client.get_dropbox_folders.return_value = mock_dropbox_folders
+            client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+            client.submit_file.return_value = sample_submission_response
+
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "--site",
+                    "trial",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--yes",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        client_cls.assert_called_once_with(site="trial")
+        payload = json_module.loads(result.stdout)
+        assert payload["site"] == "trial"
+        assert payload["destination"] == {
+            "site": "trial",
+            "origin": "https://hetrynow.brightspace.com",
+            "api_root": "https://hetrynow.brightspace.com/d2l/api/le/1.93",
+            "course_id": 44347,
+            "folder_id": 789,
+        }
+
+    def test_submit_dry_run_is_read_only_and_reports_destination(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Dry-run resolves the site with a read-only client and never uploads."""
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch("lighthouse_cli.submit.LighthouseClient") as client_cls,
+            patch.object(Path, "read_bytes", autospec=True) as read_bytes,
+        ):
+            client = MagicMock()
+            client_cls.return_value = client
+            client.get_courses.return_value = mock_courses
+            client.get_dropbox_folders.return_value = mock_dropbox_folders
+            client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--site",
+                    "trial",
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        client_cls.assert_called_once_with(read_only_auth=True, site="trial")
+        payload = json_module.loads(result.stdout)
+        assert payload["dry_run"] is True
+        assert payload["site"] == "trial"
+        assert payload["destination"]["origin"] == connection_for("trial").origin
+        assert payload["file"]["size_bytes"] == temp_pdf_file.stat().st_size
+        client.submit_file.assert_not_called()
+        read_bytes.assert_not_called()
 
     def test_submit_requires_file_flag(self, cli_runner: CliRunner) -> None:
         """VAL-SUBMIT-019: Missing --file produces usage error."""
@@ -570,6 +738,8 @@ class TestSubmitCommand:
 
             assert result.exit_code == 0
             output = json_module.loads(result.output)
+            assert output["site"] == "lighthouse"
+            assert output["destination"]["origin"] == "https://lighthouse.manipal.edu"
             assert output["submission_id"] == 99999
             assert output["folder_id"] == 789
             assert output["course_id"] == 44347

@@ -8,6 +8,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+SUPPORTED_SITES = ("lighthouse", "trial")
+
+
 @dataclass(frozen=True)
 class Connection:
     origin: str
