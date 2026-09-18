@@ -69,7 +69,7 @@ def cmd_submit(
     # they bypass Click's Choice validation.
     try:
         connection = connection_for(site)
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, RuntimeError):
         return _submit_error(_INVALID_SITE_ERROR, json_output)
 
     # Validate the local input before constructing a client or resolving any

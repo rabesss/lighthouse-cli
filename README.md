@@ -896,8 +896,8 @@ Brightspace origin. It accepts `lighthouse` (the default production tenant)
 or `trial` (the inspected synthetic tenant). Trial uses its separate sealed
 cookie directory under `LIGHTHOUSE_CONFIG_DIR/sites/hetrynow.brightspace.com`;
 there is no cross-origin cookie fallback. Use `--dry-run` to resolve the
-destination and emit a machine-readable plan without reading or uploading the
-file.
+destination without reading or uploading the file; add `--json` for a
+machine-readable plan.
 The dry-run JSON includes `destination_verified: true` when folder metadata is
 available. If the optional folder-detail lookup cannot be verified, the plan
 is retained with `destination_verified: false`, `folder_name: "Unknown folder"`,

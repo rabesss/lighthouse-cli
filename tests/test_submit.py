@@ -527,9 +527,43 @@ class TestSubmitCommand:
         assert json_module.loads(result.stdout) == {
             "error": "Invalid command arguments. See --help."
         }
-        assert "bogus" not in result.output
+        assert "bogus" not in result.output + result.stderr
         client_cls.assert_not_called()
         read_bytes.assert_not_called()
+
+    def test_submit_connection_failure_is_safe_json(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+    ) -> None:
+        """Connection path failures stay sanitized and fail before client use."""
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch("lighthouse_cli.submit.connection_for", side_effect=RuntimeError("HOME_SENTINEL")),
+            patch("lighthouse_cli.submit.LighthouseClient") as client_cls,
+        ):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--site",
+                    "trial",
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {
+            "error": "Invalid site. Choose lighthouse or trial."
+        }
+        assert "HOME_SENTINEL" not in result.output + result.stderr
+        client_cls.assert_not_called()
 
     def test_submit_trial_routes_client_and_records_destination(
         self,
