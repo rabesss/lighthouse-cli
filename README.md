@@ -127,12 +127,98 @@ stderr. `--help` remains human-readable.
 - **[LOCAL WRITE]:** `auth` stores local session state, `config courses` writes
   `course-config.json`, and `download`/`sync` write files and manifests under
   the local download root (`--output-dir`, default `~/Downloads/lighthouse`).
-- **[REMOTE WRITE]:** `submit` sends a file to Brightspace. It is the only
-  command in this list that mutates remote LMS state and requires confirmation
-  unless `--yes` is supplied.
+- **[REMOTE WRITE]:** `submit` sends a file to Brightspace. Instructor
+  `quiz-create` and `assignment-create` create hidden assessments. These
+  commands require confirmation unless `--yes` is supplied.
 
-`--dry-run` is available on `download` only and writes nothing: it does not
+`download --dry-run` writes nothing: it does not
 create or replace a manifest, create directories, or download file bodies.
+Instructor creation commands also support `--dry-run`; those plans do not
+load credentials, make requests, or write local files.
+
+### Student and instructor course tools
+
+The `student` and `instructor` groups add role-oriented views without changing
+your account's permissions. Both default to Lighthouse. Use numeric course and
+resource IDs; the existing top-level commands continue to accept course names.
+
+```bash
+lighthouse student assignment-history 69472 46748 --json
+lighthouse student classlist 69472 --json
+lighthouse student my-sections 69472 --json
+lighthouse student group-categories 69472 --json
+lighthouse student groups COURSE_ID CATEGORY_ID --json
+lighthouse student surveys COURSE_ID --json
+lighthouse student survey COURSE_ID SURVEY_ID --json
+lighthouse student checklists COURSE_ID --json
+lighthouse student checklist-items COURSE_ID CHECKLIST_ID --json
+lighthouse student forums COURSE_ID --json
+lighthouse student topics COURSE_ID FORUM_ID --json
+lighthouse student posts COURSE_ID FORUM_ID TOPIC_ID --json
+lighthouse student post COURSE_ID FORUM_ID TOPIC_ID POST_ID --json
+
+lighthouse instructor quiz-questions COURSE_ID QUIZ_ID --json
+lighthouse instructor quiz-attempts COURSE_ID QUIZ_ID --json
+lighthouse instructor submissions COURSE_ID FOLDER_ID --json
+lighthouse instructor quiz-create COURSE_ID --name 'Practice' --layout one-way --dry-run --json
+lighthouse instructor assignment-create COURSE_ID --name 'Practice' --submission-type file --dry-run --json
+```
+
+Both groups also provide `quiz`, `quizzes`, `assignment`, `assignments`, and
+the shared course reads above. Their JSON envelope is
+`{"site": "lighthouse", "course_id": 123, "data": ...}`. Responses use a
+bounded field allowlist; unknown fields and credential-bearing properties are
+not returned. Classlists currently omit email and login identifiers.
+
+Quiz creation makes a **hidden shell without questions or a gradebook link**.
+`--layout all` displays questions together; `--layout one-way` selects one
+question per page and prevents backward navigation. `--attempts` accepts 1–10.
+Assignment creation makes a hidden individual file or text assignment. Replace
+`--dry-run` with `--yes` to create the assessment. A `403` remains an error,
+not an empty course or successful operation.
+
+Cookie-authenticated writes first obtain the same-session CSRF bootstrap from
+the LMS homepage and send `X-Csrf-Token`. That token is held only in memory.
+Writes are not automatically replayed after network errors.
+
+For the inspected Brightspace trial, put `--site trial` immediately after
+`student` or `instructor`. Its cookies live in a separate encrypted directory
+under `LIGHTHOUSE_CONFIG_DIR/sites/hetrynow.brightspace.com`. There is no
+automatic fallback to Lighthouse cookies or to its browser-refresh mechanism.
+
+`lighthouse auth import-session --site trial --json` accepts an origin-bound
+JSON object on **piped stdin**, shaped as `{"origin": "https://hetrynow.brightspace.com",
+"cookies": {...}}`, and seals it through `CredentialStore`. The cookie map
+must contain exactly the four required D2L session-cookie names. Do not put
+cookie values in arguments, shell history, or plaintext files. Import does not
+verify login; this command is not a browser-extension cookie-export tool.
+`LIGHTHOUSE_SECRETS_PASSPHRASE` or a supported OS keyring is required as usual.
+
+An experimental **trial-only instructor preview** driver now supports start,
+current-page reads, radio-answer saves with persisted readback, forward-only
+navigation, and submission with a verified receipt:
+
+```bash
+lighthouse instructor --site trial preview start 22985 54488 --yes --json
+lighthouse instructor --site trial preview page 22985 54488 --json
+# Use question and choice IDs returned by page:
+lighthouse instructor --site trial preview answer 22985 54488 QUESTION_ID CHOICE_ID --yes --json
+# For the one-question/no-backtracking fixture (54489), use next after saving:
+lighthouse instructor --site trial preview next 22985 54489 --yes --json
+lighthouse instructor --site trial preview submit 22985 54488 --retain --yes --json
+```
+
+These commands require a separately authenticated trial CLI session. They accept
+untimed text/radio previews only. A sealed, account-bound cursor permits one
+active preview per quiz; uncertain writes block further changes until `page`
+verifies the outcome. `status` reads the local cursor; `abandon` forgets it
+without deleting the remote attempt. Starting another preview in the browser
+can invalidate an unretained CLI preview. Write commands also support `--dry-run`.
+
+Real learner quiz attempts, question authoring, teacher grading and full
+course-administration parity are **not implemented** by these additions.
+Instructor question definitions must not be treated as a student's currently
+accessible attempt page. See [trial evidence and remaining coverage](docs/assessment-coverage.md).
 
 ---
 
@@ -793,7 +879,7 @@ For a single course with no grade items, human output says
 
 Submit a file to a D2L dropbox folder.
 
-This is the CLI's only remote-write command: it sends the selected local file
+This remote-write command sends the selected local file
 to Brightspace and creates a submission. `download`, `sync`, and `config
 courses` affect local state only.
 
