@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import requests
+
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _require_positive_endpoint_id
 from .display import safe_display_text
 
@@ -179,6 +181,13 @@ class AssessmentAPI:
             raise AssessmentWriteUnknownError(
                 "Write outcome unknown. Inspect the assessment before retrying."
             ) from None
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 429 or (isinstance(status, int) and status >= 500):
+                raise AssessmentWriteUnknownError(
+                    "Write outcome unknown. Inspect the assessment before retrying."
+                ) from None
+            raise
         try:
             if response.status_code == 204:
                 if method == "POST":
