@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
-from .assessment_api import AssessmentAPI
 from .display import JsonOutputCommand
+
+if TYPE_CHECKING:
+    from .assessment_api import AssessmentAPI
 
 
 # Exact routes from the D2L developer reference. IDs are typed Click arguments,

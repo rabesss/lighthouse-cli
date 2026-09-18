@@ -5,16 +5,48 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
-from typing import Any
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
 import click
 
-from .api import LighthouseClient
-from .assessment_api import (
-    AssessmentAPI, AssessmentWriteUnknownError, assignment_payload, project, quiz_payload,
-)
 from .display import JsonOutputCommand, JsonOutputGroup, format_user_error, output_json
 from .course_read_commands import register_course_reads
+
+if TYPE_CHECKING:
+    from .assessment_api import AssessmentAPI
+
+
+_LAZY_DEPENDENCIES: dict[str, tuple[str, str]] = {
+    "LighthouseClient": (".api", "LighthouseClient"),
+    "AssessmentAPI": (".assessment_api", "AssessmentAPI"),
+    "AssessmentWriteUnknownError": (".assessment_api", "AssessmentWriteUnknownError"),
+    "assignment_payload": (".assessment_api", "assignment_payload"),
+    "project": (".assessment_api", "project"),
+    "quiz_payload": (".assessment_api", "quiz_payload"),
+}
+_MISSING_DEPENDENCY = object()
+
+
+def _load_dependency(name: str) -> Any:
+    """Load assessment transport/helpers only when a command executes."""
+    value = globals().get(name, _MISSING_DEPENDENCY)
+    if value is not _MISSING_DEPENDENCY:
+        return value
+    try:
+        module_name, attribute = _LAZY_DEPENDENCIES[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name, package=__package__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name: str) -> Any:
+    """Preserve historical module exports without eager API imports."""
+    if name in _LAZY_DEPENDENCIES:
+        return _load_dependency(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _ID = click.IntRange(min=1)
@@ -39,14 +71,18 @@ def _site() -> str:
 def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], Any]) -> None:
     client = None
     site = _site()
+    client_class = _load_dependency("LighthouseClient")
+    assessment_api = _load_dependency("AssessmentAPI")
+    project = _load_dependency("project")
+    write_unknown_error = _load_dependency("AssessmentWriteUnknownError")
     try:
-        client = LighthouseClient(site=site)
-        data = project(action(AssessmentAPI(client, course_id)))
+        client = client_class(site=site)
+        data = project(action(assessment_api(client, course_id)))
         _emit({"site": site, "course_id": course_id, "data": data}, json_output)
     except Exception as exc:
         message = (
             "Write outcome unknown. Inspect the assessment before retrying."
-            if isinstance(exc, AssessmentWriteUnknownError)
+            if isinstance(exc, write_unknown_error)
             else format_user_error(exc)
         )
         click.echo(message, err=True)
@@ -162,6 +198,7 @@ register_course_reads(instructor, _run)
 def _create(course_id: int, resource: str, payload: dict[str, Any], yes: bool, dry_run: bool, json_output: bool) -> None:
     site = _site()
     if dry_run:
+        project = _load_dependency("project")
         _emit({"site": site, "course_id": course_id, "dry_run": True,
                "operation": f"create-{resource}", "data": project(payload)}, json_output)
         return
@@ -202,7 +239,7 @@ def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool
     question definitions but not creating them. one-way means one question
     per page and no backward navigation. all means all questions together.
     """
-    payload = _settings(lambda: quiz_payload(name, layout, attempts), json_output)
+    payload = _settings(lambda: _load_dependency("quiz_payload")(name, layout, attempts), json_output)
     _create(course_id, "quiz", payload, yes, dry_run, json_output)
 
 
@@ -216,5 +253,8 @@ def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool
 @click.option("--json", "json_output", is_flag=True)
 def assignment_create(course_id: int, name: str, instructions: str, submission_type: str, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create a hidden individual assignment, with no gradebook link."""
-    payload = _settings(lambda: assignment_payload(name, instructions, submission_type), json_output)
+    payload = _settings(
+        lambda: _load_dependency("assignment_payload")(name, instructions, submission_type),
+        json_output,
+    )
     _create(course_id, "assignment", payload, yes, dry_run, json_output)

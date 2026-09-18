@@ -6,20 +6,76 @@ import math
 import re
 import sys
 from contextlib import suppress
+from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, unquote, urlparse
 
-from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
-from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
 from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short, utc_now_iso as _utc_now_iso
-from .course_config import load as _load_course_config, semester_state as _semester_state
-from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
-from .assignments import download_single_attachment as _download_single_attachment
-from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
-from .submit import cmd_submit  # noqa: F401 — re-export
-from .show import cmd_grades, cmd_announcements, cmd_calendar, cmd_assignments, cmd_quizzes  # noqa: F401 — re-export
 from .utils import _course_identifier, get_enrolled_course_catalog
+
+if TYPE_CHECKING:
+    from .api import LighthouseClient
+    from .sync_engine import Mode
+
+
+# Keep the legacy command module importable without loading the API, write
+# engines, or presentation command implementations.  These names were
+# historically module-level imports and remain available through __getattr__;
+# command functions use _load_dependency so tests and integrations that patch
+# a compatibility name still affect the call site.
+_LAZY_DEPENDENCIES: dict[str, tuple[str, str]] = {
+    "CourseNotFoundError": (".api", "CourseNotFoundError"),
+    "LighthouseClient": (".api", "LighthouseClient"),
+    "resolve_course_id": (".api", "resolve_course_id"),
+    "BASE_URL": (".config", "BASE_URL"),
+    "DEFAULT_DOWNLOAD_DIR": (".config", "DEFAULT_DOWNLOAD_DIR"),
+    "warn_if_cookies_stale": (".config", "warn_if_cookies_stale"),
+    "_load_course_config": (".course_config", "load"),
+    "_semester_state": (".course_config", "semester_state"),
+    "Mode": (".sync_engine", "Mode"),
+    "run_course": (".sync_engine", "run_course"),
+    "safe_output_path_text": (".sync_engine", "safe_output_path_text"),
+    "validate_output_root": (".sync_engine", "validate_output_root"),
+    "_download_single_attachment": (".assignments", "download_single_attachment"),
+    "MAX_MANIFEST_SIZE": (".manifest", "MAX_MANIFEST_SIZE"),
+    "normalize_sha256": (".manifest", "normalize_sha256"),
+    # These are public compatibility re-exports used by the legacy CLI.
+    "cmd_submit": (".submit", "cmd_submit"),
+    "cmd_grades": (".show", "cmd_grades"),
+    "cmd_announcements": (".show", "cmd_announcements"),
+    "cmd_calendar": (".show", "cmd_calendar"),
+    "cmd_assignments": (".show", "cmd_assignments"),
+    "cmd_quizzes": (".show", "cmd_quizzes"),
+}
+_MISSING_DEPENDENCY = object()
+
+
+def _load_dependency(name: str) -> Any:
+    """Load one historical module-level dependency on first use.
+
+    Looking in globals first is intentional: existing callers and tests patch
+    names such as ``commands.LighthouseClient`` and ``commands.run_course``.
+    A lazy import must retain that supported seam while keeping a cold module
+    import free of API, sync, submission, and show dependencies.
+    """
+    value = globals().get(name, _MISSING_DEPENDENCY)
+    if value is not _MISSING_DEPENDENCY:
+        return value
+    try:
+        module_name, attribute = _LAZY_DEPENDENCIES[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name, package=__package__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve legacy exports without making them eager imports."""
+    if name in _LAZY_DEPENDENCIES:
+        return _load_dependency(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
@@ -86,7 +142,7 @@ def _safe_course_name(value: Any, course_id: Any) -> str:
 
 def _safe_output_path(value: object) -> str | None:
     """Return a path only when its complete text passes the secret guard."""
-    return safe_output_path_text(value)
+    return _load_dependency("safe_output_path_text")(value)
 
 
 def _safe_content_id(value: Any) -> int | None:
@@ -366,6 +422,7 @@ def _single_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _pipeline_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Project an engine entry onto the sync/multi schema (no raw byte size)."""
+    normalize_sha256 = _load_dependency("normalize_sha256")
     projected: dict[str, Any] = {}
     for key in ("topic_id", "size_kb"):
         if key in entry:
@@ -425,13 +482,15 @@ def _safe_orphan_topic_id(value: Any) -> str | None:
 
 def _safe_orphan_entry(entry: Any) -> dict[str, Any]:
     """Project a manifest orphan without exposing its filename or path."""
+    max_manifest_size = _load_dependency("MAX_MANIFEST_SIZE")
+    normalize_sha256 = _load_dependency("normalize_sha256")
     record = entry if isinstance(entry, dict) else {}
     size = record.get("size")
     if (
         isinstance(size, bool)
         or not isinstance(size, int)
         or size < 0
-        or size > MAX_MANIFEST_SIZE
+        or size > max_manifest_size
     ):
         size = 0
     return {
@@ -535,7 +594,8 @@ def _render_assignment_selector_error(
 
 def _single_course_json(result: dict[str, Any], *, action: str, include_assignments: bool) -> Any:
     """Project one engine result into the single-course JSON schema."""
-    if result["mode"] is Mode.PLAN:
+    mode = _load_dependency("Mode")
+    if result["mode"] is mode.PLAN:
         # Keep the historical plan-array shape for a clean dry run.  If a
         # local validation (for example, a symlinked course destination) makes
         # the plan fail, preserve the diagnostic in one command-shaped object
@@ -652,7 +712,8 @@ def _multi_course_failure_json(
 
 def _render_course_human(result: dict[str, Any], *, action: str, include_assignments: bool) -> int:
     """Render one engine result as human-readable text. Returns per-course exit code."""
-    if result["mode"] is Mode.PLAN:
+    mode = _load_dependency("Mode")
+    if result["mode"] is mode.PLAN:
         print(f"Would download {result['topic_count']} files to {result['dest']}/\n")
         print("\n".join(
             f"  [{t.get('topic_id')}] {_safe_server_text(t.get('title'), fallback='Untitled')}"
@@ -727,6 +788,7 @@ def _run_and_render_single(
 ) -> int:
     """Run one course through the sync engine and render it. Returns exit code."""
     try:
+        run_course = _load_dependency("run_course")
         run_kwargs: dict[str, Any] = {
             "mode": mode,
             "types": types,
@@ -768,6 +830,8 @@ def _run_and_render_multi(
     results: list[dict[str, Any]] = []
     failed_courses: list[dict[str, Any]] = []
     rc = 0
+    run_course = _load_dependency("run_course")
+    mode_enum = _load_dependency("Mode")
     for cid in course_ids:
         try:
             results.append(run_course(client, cid, root, mode=mode, types=types, include_assignments=include_assignments))
@@ -794,7 +858,7 @@ def _run_and_render_multi(
             # Engine warnings reach stderr in every mode — an unknown
             # --types value must never change the downloaded set silently.
             _print_warnings(result)
-            if result["mode"] is Mode.PLAN:
+            if result["mode"] is mode_enum.PLAN:
                 plan_course = {
                     "course_id": result["org_id"],
                     "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
@@ -848,6 +912,12 @@ def cmd_download(
 
     Supports --semester, --also, --include-assignments, --assignment/--attachment.
     Creates sanitized folder per course with .lighthouse.json manifest."""
+    default_download_dir = _load_dependency("DEFAULT_DOWNLOAD_DIR")
+    validate_output_root = _load_dependency("validate_output_root")
+    client_class = _load_dependency("LighthouseClient")
+    mode_enum = _load_dependency("Mode")
+    resolve_course_id = _load_dependency("resolve_course_id")
+    download_single_attachment = _load_dependency("_download_single_attachment")
     # Assignment-specific operations are intentionally single-course only.
     # Validate before constructing a client so malformed combinations cannot
     # touch credentials, make API calls, or enter a write-capable path.
@@ -886,12 +956,12 @@ def cmd_download(
     payload = _single_error_payload(course_id, action="download") if course_id is not None else _scope_error_payload()
     try:
         root = validate_output_root(
-            Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR,
+            Path(output_dir).expanduser() if output_dir else default_download_dir,
         )
     except Exception as e:
         return _error(e, json_output=json_output, payload=payload)
     try:
-        client = LighthouseClient(read_only_auth=dry_run)
+        client = client_class(read_only_auth=dry_run)
     except Exception as e:
         return _error(
             e,
@@ -899,7 +969,7 @@ def cmd_download(
             payload=payload,
         )
     also_courses = also_courses or []
-    mode = Mode.PLAN if dry_run else (Mode.FORCE if force else Mode.DOWNLOAD)
+    mode = mode_enum.PLAN if dry_run else (mode_enum.FORCE if force else mode_enum.DOWNLOAD)
 
     if course_id is not None:
         try:
@@ -924,7 +994,7 @@ def cmd_download(
                     org_id, assignment_error, json_output=json_output,
                 )
         if assignment_id is not None and attachment_id is not None:
-            return _download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
+            return download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
         return _run_and_render_single(
             client, org_id, root, mode, "download", types, json_output,
             include_assignments=include_assignments or assignment_id is not None,
@@ -959,15 +1029,20 @@ def cmd_sync(
     include_assignments: bool = False,
 ) -> int:
     """Incremental sync: skip unchanged files using manifest. Same scope options as download."""
+    default_download_dir = _load_dependency("DEFAULT_DOWNLOAD_DIR")
+    validate_output_root = _load_dependency("validate_output_root")
+    client_class = _load_dependency("LighthouseClient")
+    mode_enum = _load_dependency("Mode")
+    resolve_course_id = _load_dependency("resolve_course_id")
     payload = _single_error_payload(course_id, action="sync") if course_id is not None else _scope_error_payload()
     try:
         root = validate_output_root(
-            Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR,
+            Path(output_dir).expanduser() if output_dir else default_download_dir,
         )
     except Exception as e:
         return _error(e, json_output=json_output, payload=payload)
     try:
-        client = LighthouseClient()
+        client = client_class()
     except Exception as e:
         return _error(
             e,
@@ -975,7 +1050,7 @@ def cmd_sync(
             payload=payload,
         )
     also_courses = also_courses or []
-    mode = Mode.FORCE if force else Mode.SYNC
+    mode = mode_enum.FORCE if force else mode_enum.SYNC
 
     if course_id is not None and (semester is not None or also_courses):
         return _error(
@@ -1063,9 +1138,10 @@ def _resolve_semester(
 
 def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     """Resolve an --also course identifier (name or numeric ID) to an OrgUnitId."""
+    course_not_found_error = _load_dependency("CourseNotFoundError")
     normalized_identifier = identifier.strip()
     if not normalized_identifier:
-        raise CourseNotFoundError(
+        raise course_not_found_error(
             "Course identifier cannot be empty. Run: lighthouse courses"
         )
     courses = get_enrolled_course_catalog(client)
@@ -1074,7 +1150,7 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     try:
         cid = int(normalized_identifier)
         if not any(_positive_id(c.get("OrgUnitId")) == cid for c in courses):
-            raise CourseNotFoundError(
+            raise course_not_found_error(
                 f"Course '{identifier}' not found. Run: lighthouse courses"
             )
         return cid
@@ -1091,7 +1167,7 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     if len(matches) == 1:
         return _positive_id(matches[0]["OrgUnitId"]) or 0
     if len(matches) > 1:
-        raise CourseNotFoundError(
+        raise course_not_found_error(
             "Ambiguous match '" + identifier + "'. Multiple courses found:\n"
             + "\n".join(
                 f"  {_positive_id(c.get('OrgUnitId'))} – "
@@ -1100,7 +1176,7 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
             )
             + "\n\nUse the numeric OrgUnitId for an exact match."
         )
-    raise CourseNotFoundError(
+    raise course_not_found_error(
         f"Course '{identifier}' not found. Run: lighthouse courses"
     )
 
@@ -1113,7 +1189,7 @@ def _filter_courses_by_semester(
 ) -> list[int]:
     """Filter enrollments to courses in a specific semester using course-config.json."""
     if config is None:
-        config = _load_course_config()
+        config = _load_dependency("_load_course_config")()
 
     if not config:
         # Never widen a local write operation to every enrollment when the
@@ -1167,8 +1243,9 @@ def _resolve_course_scope(
     json_output: bool = False,
 ) -> tuple[list[int], str, int, list[str]] | int:
     """Resolve course scope for multi-course ops. Returns (ids, sem_name, sem_id, errors) or int exit code."""
+    course_not_found_error = _load_dependency("CourseNotFoundError")
     try:
-        config = _load_course_config()
+        config = _load_dependency("_load_course_config")()
     except Exception as e:
         return _error(e, json_output=json_output, payload=_scope_error_payload())
 
@@ -1231,7 +1308,7 @@ def _resolve_course_scope(
     for ident in also_courses:
         try:
             also_ids.append(_resolve_also_course(client, ident))
-        except CourseNotFoundError as e:
+        except course_not_found_error as e:
             also_errors.append(str(e))
         except Exception as e:
             return _error(e, json_output=json_output, payload=_scope_error_payload())
@@ -1268,7 +1345,7 @@ def _resolve_course_scope(
 def cmd_auth_status(json_output: bool = False) -> int:
     """Check if stored cookies are valid."""
     try:
-        client = LighthouseClient()
+        client = _load_dependency("LighthouseClient")()
         cookies = client.cookies
     except Exception as e:
         return _error(
@@ -1296,7 +1373,7 @@ def cmd_auth_status(json_output: bool = False) -> int:
             _output_json({"valid": True, "cookies": list(cookies.keys())})
             return 0
         print(f"Session valid. Cookies: {', '.join(cookies.keys())}")
-        warn_if_cookies_stale()
+        _load_dependency("warn_if_cookies_stale")()
         return 0
     return _error(
         "Session expired. Run: lighthouse auth login",
@@ -1308,7 +1385,7 @@ def cmd_auth_status(json_output: bool = False) -> int:
 def cmd_semesters(json_output: bool = False) -> int:
     """List all semesters."""
     try:
-        client = LighthouseClient()
+        client = _load_dependency("LighthouseClient")()
         semesters = client.get_semesters()
     except Exception as e:
         return _error(
@@ -1344,7 +1421,7 @@ def cmd_courses(
 ) -> int:
     """List courses, optionally filtered by semester or tracked status."""
     try:
-        client = LighthouseClient()
+        client = _load_dependency("LighthouseClient")()
         enrolled_courses = get_enrolled_course_catalog(client)
     except Exception as e:
         return _error(
@@ -1361,7 +1438,7 @@ def cmd_courses(
         )
 
     try:
-        config = _load_course_config()
+        config = _load_dependency("_load_course_config")()
         if not isinstance(config, dict):
             config = {}
     except Exception as e:
@@ -1388,7 +1465,7 @@ def cmd_courses(
             "Name": _safe_server_text(enrolled_course.get("Name")),
             "Code": _safe_server_text(enrolled_course.get("Code")),
             "IsActive": _coerce_boolish(enrolled_course.get("IsActive", True), default=True),
-            **_semester_state(configured),
+            **_load_dependency("_semester_state")(configured),
         })
 
     if (tracked_only or semester) and not config:
@@ -1424,8 +1501,8 @@ def cmd_courses(
 def cmd_content(course_id: str, json_output: bool = False) -> int:
     """Show content tree for a course."""
     try:
-        client = LighthouseClient()
-        org_id = resolve_course_id(client, course_id)
+        client = _load_dependency("LighthouseClient")()
+        org_id = _load_dependency("resolve_course_id")(client, course_id)
         toc = client.get_content_toc(org_id)
     except Exception as e:
         return _error(
@@ -1691,8 +1768,8 @@ def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
 def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> int:
     """Show detailed info for a specific quiz."""
     try:
-        client = LighthouseClient()
-        org_id = resolve_course_id(client, course_id)
+        client = _load_dependency("LighthouseClient")()
+        org_id = _load_dependency("resolve_course_id")(client, course_id)
         quiz = client.get_quiz_detail(org_id, quiz_id)
     except Exception as e:
         return _error(
@@ -1759,5 +1836,6 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
         print(f"   Instructions: {_short(instr_text, 200)}")
 
     print("\n   ⚠ Quiz questions and past attempts require instructor-level API access.")
-    print(f"   View in browser: {BASE_URL}/d2l/lms/quizzing/user/quizzes_list.d2l?ou={org_id}")
+    base_url = _load_dependency("BASE_URL")
+    print(f"   View in browser: {base_url}/d2l/lms/quizzing/user/quizzes_list.d2l?ou={org_id}")
     return 0
