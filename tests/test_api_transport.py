@@ -27,6 +27,19 @@ from lighthouse_cli.api import (
 )
 
 
+def test_legacy_state_creating_get_is_not_retried_or_refreshed() -> None:
+    client = LighthouseClient()
+    client._loaded = True
+    client._cookies = {key: "synthetic" for key in api.COOKIE_NAMES}
+    client._session.request = MagicMock(side_effect=requests.ConnectionError("token=SENTINEL"))
+    with patch.object(api, "refresh_auth_from_browser") as refresh:
+        with pytest.raises(NetworkError):
+            client._request("GET", BASE_URL + "/d2l/legacy-start", _replay_safe=False)
+    assert client._session.request.call_count == 1
+    assert "_replay_safe" not in client._session.request.call_args.kwargs
+    refresh.assert_not_called()
+
+
 class FakeResponse:
     """Small requests.Response substitute for transport tests."""
 
@@ -66,6 +79,8 @@ class FakeSession:
 
 def _client_with_session(responses: list[FakeResponse]) -> tuple[LighthouseClient, FakeSession]:
     client = LighthouseClient()
+    # Transport tests start after CSRF bootstrap, tested separately.
+    client._csrf_token = "synthetic-csrf"
     session = FakeSession(responses)
     client._session = session
     return client, session

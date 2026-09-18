@@ -20,7 +20,7 @@ from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import requests
 
-from .config import API_LE, BASE_URL, COOKIE_NAMES, COOKIE_SETTING_HOST, d2l_cookies_from_entries, load_cookies, missing_cookie_names, save_cookies
+from .config import API_LE, BASE_URL, COOKIE_NAMES, d2l_cookies_from_entries, load_cookies, missing_cookie_names, save_cookies
 from .utils import _sanitize_filename, get_enrolled_course_catalog
 
 # CDP port for browser-harness
@@ -386,12 +386,18 @@ class LighthouseClient:
     session refresh so dry-run callers cannot modify local auth state.
     """
 
-    def __init__(self, read_only_auth: bool = False) -> None:
+    def __init__(self, read_only_auth: bool = False, *, site: str = "lighthouse") -> None:
+        from .connection import connection_for
+        self.connection = connection_for(site)
+        self.base_url = self.connection.origin
+        self.api_le = self.connection.api_le
+        self.cookie_host = self.connection.host
         self._session = requests.Session()
         self._cookies: dict[str, str] = {}
         self._loaded = False
         self._cache: dict[str, Any] = {}
-        self._read_only_auth = bool(read_only_auth)
+        self._csrf_token: str | None = None
+        self._read_only_auth = bool(read_only_auth) or site != "lighthouse"
 
     # -- cookie management --------------------------------------------------
 
@@ -401,14 +407,18 @@ class LighthouseClient:
             self._session.cookies.set(
                 name,
                 cookies.get(name, ""),
-                domain=COOKIE_SETTING_HOST,
+                domain=self.cookie_host,
                 path="/",
             )
 
     def _ensure_cookies(self) -> dict[str, str]:
         """Load cookies from disk on first use."""
         if not self._loaded:
-            self._cookies = load_cookies(read_only=self._read_only_auth)
+            self._cookies = (
+                load_cookies(read_only=True, config_dir=self.connection.cookie_dir, expected_origin=self.base_url)
+                if self.connection.cookie_dir is not None
+                else load_cookies(read_only=self._read_only_auth)
+            )
             self._apply_cookies_to_session(self._cookies)
             self._loaded = True
         return self._cookies
@@ -432,7 +442,7 @@ class LighthouseClient:
     # chain must not make a command loop or issue unbounded requests.
     _MAX_PAGINATION_PAGES = 100
 
-    def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, **kwargs: Any) -> requests.Response:
+    def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, _replay_safe: bool = True, **kwargs: Any) -> requests.Response:
         """Make an authenticated request with safe retry and auto-refresh.
 
         GET and HEAD requests retry HTTP 429 (Too Many Requests) with
@@ -451,16 +461,18 @@ class LighthouseClient:
             _skip_raise: If True, skip raise_for_status() and return the raw
                 response. Caller handles error status codes.
             _timeout: Request timeout in seconds (default 30).
+            _replay_safe: False for legacy GET routes that create state, such
+                as preview start. Disables retries and automatic auth replay.
         """
         cookies = self.cookies
         if missing_cookie_names(cookies):
             raise SessionExpiredError(_session_expired_msg("no cookies found"), recovery=_SESSION_EXPIRED_RECOVERY)
 
-        retryable = method.upper() in self._RETRYABLE_METHODS
+        retryable = method.upper() in self._RETRYABLE_METHODS and _replay_safe
         refresh_attempted = False
         while True:
             try:
-                return self._do_request(method, url, _skip_raise, _timeout, **kwargs)
+                return self._do_request(method, url, _skip_raise, _timeout, _replay_safe=_replay_safe, **kwargs)
             except SessionExpiredError:
                 if self._read_only_auth or not retryable:
                     # A POST/PUT/etc. may already have been accepted by the
@@ -493,12 +505,13 @@ class LighthouseClient:
 
                 save_cookies(new_cookies)
                 self._cookies = new_cookies
+                self._csrf_token = None
                 self._apply_cookies_to_session(new_cookies)
 
     def _do_request(
         self, method: str, url: str,
         # skip_raise forwarded from _request._skip_raise
-        skip_raise: bool, timeout: int, **kwargs: Any,
+        skip_raise: bool, timeout: int, _replay_safe: bool = True, **kwargs: Any,
     ) -> requests.Response:
         """Execute the HTTP request with bounded idempotent retries.
 
@@ -507,7 +520,7 @@ class LighthouseClient:
         several exception messages, and pagination/query URLs can contain
         sensitive values that must not escape through a CLI error.
         """
-        retryable = method.upper() in self._RETRYABLE_METHODS
+        retryable = method.upper() in self._RETRYABLE_METHODS and _replay_safe
         max_attempts = self._MAX_RETRIES + 1 if retryable else 1
         for attempt in range(max_attempts):
             try:
@@ -597,12 +610,27 @@ class LighthouseClient:
         # an arbitrary-origin HTTP client and prevents path traversal from
         # reaching the request layer.  Query-only paths remain supported for
         # pagination-style callers and resolve beneath the API root here.
-        url = self._canonical_pagination_url(path, error_message="Invalid API URL.")
+        url = self.canonical_url(path, error_message="Invalid API URL.")
         return self._request("GET", url, **kwargs)
 
     def get_json(self, path: str, **kwargs: Any) -> Any:
         """GET request returning parsed JSON."""
         return self.get(path, **kwargs).json()
+
+    def get_csrf_token(self) -> str:
+        """Bootstrap request protection from the authenticated LMS homepage.
+
+        The value stays in memory and is used only with same-origin writes.
+        Never infer a permission failure from a missing CSRF bootstrap.
+        """
+        if self._csrf_token is None:
+            from .request_protection import csrf_from_homepage
+            body, _headers = self.get_raw("/d2l/home", max_bytes=2 * 1024 * 1024)
+            try:
+                self._csrf_token = csrf_from_homepage(body)
+            except ValueError:
+                raise NetworkError("Could not initialize request protection.") from None
+        return self._csrf_token
 
     def _paginate_list(self, path: str, items_key: str = "Objects") -> list[dict[str, Any]]:
         """GET a potentially paginated list endpoint.
@@ -623,7 +651,7 @@ class LighthouseClient:
         while url is not None and url != "":
             if pages_fetched >= self._MAX_PAGINATION_PAGES:
                 raise NetworkError("Pagination exceeded the maximum page count.")
-            canonical_url = self._canonical_pagination_url(url, base_url=base_url)
+            canonical_url = self.canonical_url(url, base_url=base_url)
             if canonical_url in seen_urls:
                 raise NetworkError("Pagination cycle detected while following a Next link.")
             seen_urls.add(canonical_url)
@@ -641,6 +669,10 @@ class LighthouseClient:
                 data = self.get_json(request_url)
             except (NetworkError, SessionExpiredError):
                 raise
+            except requests.HTTPError as exc:
+                # Preserve status (especially permission failures) without
+                # retaining an alternate adapter's URL-bearing message.
+                raise _safe_http_error(exc.response) from None
             except Exception:
                 # The normal request path already converts transport errors,
                 # but keep this pagination boundary safe for alternate client
@@ -661,12 +693,19 @@ class LighthouseClient:
             url = data.get("Next")
         return all_items
 
+    def canonical_url(self, url: str, **kwargs: Any) -> str:
+        return self._canonical_pagination_url(
+            url, origin=self.base_url, api_root=self.api_le, **kwargs,
+        )
+
     @staticmethod
     def _canonical_pagination_url(
         url: str,
         *,
         base_url: str | None = None,
         error_message: str = "Invalid pagination link returned by the server.",
+        origin: str = BASE_URL,
+        api_root: str = API_LE,
     ) -> str:
         """Validate and canonicalize one server-provided pagination target.
 
@@ -708,7 +747,7 @@ class LighthouseClient:
             if (
                 parsed.scheme.lower() != "https"
                 or hostname is None
-                or hostname.lower() != COOKIE_SETTING_HOST
+                or hostname.lower() != urlparse(origin).hostname
                 or parsed.username is not None
                 or parsed.password is not None
                 or port not in (None, 443)
@@ -717,7 +756,7 @@ class LighthouseClient:
             ):
                 raise NetworkError(invalid)
             path = parsed.path or "/"
-            return f"{BASE_URL}{path}" + (f"?{parsed.query}" if parsed.query else "")
+            return f"{origin}{path}" + (f"?{parsed.query}" if parsed.query else "")
 
         # Relative API paths are scoped beneath API_LE. In particular,
         # ``//evil.example`` has a parsed netloc and is rejected above, while
@@ -725,21 +764,21 @@ class LighthouseClient:
         if parsed.fragment:
             raise NetworkError(invalid)
         if not (url.startswith("/") or url.startswith("?")):
-            return f"{API_LE}/{url}"
+            return f"{api_root}/{url}"
         if url.startswith("?") and base_url is not None:
             try:
                 base = LighthouseClient._canonical_pagination_url(
-                    base_url, error_message=error_message
+                    base_url, error_message=error_message, origin=origin, api_root=api_root
                 )
                 base_parsed = urlparse(base)
             except (TypeError, ValueError):
                 raise NetworkError(invalid) from None
-            return f"{BASE_URL}{base_parsed.path or '/'}" + (
+            return f"{origin}{base_parsed.path or '/'}" + (
                 f"?{parsed.query}" if parsed.query else ""
             )
         if parsed.path.startswith("/d2l/"):
-            return f"{BASE_URL}{url}"
-        return f"{API_LE}{url}"
+            return f"{origin}{url}"
+        return f"{api_root}{url}"
 
     def get_raw(
         self,
@@ -801,11 +840,11 @@ class LighthouseClient:
 
     def get_semesters(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mysemesters (cached)."""
-        return self._cached("semesters", lambda: self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/mysemesters"))
+        return self._cached("semesters", lambda: self.get_json(f"{self.base_url}/d2l/le/manageCourses/api/mysemesters"))
 
     def get_courses(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mycourses – returns the Courses list (cached)."""
-        return self._cached("courses", lambda: self.get_json(f"{BASE_URL}/d2l/le/manageCourses/api/mycourses").get("Courses", []))
+        return self._cached("courses", lambda: self.get_json(f"{self.base_url}/d2l/le/manageCourses/api/mycourses").get("Courses", []))
 
     def get_content_toc(self, org_unit_id: int) -> dict[str, Any]:
         """GET content table-of-contents for a course."""
@@ -840,7 +879,7 @@ class LighthouseClient:
         return self._cached(
             "enrollments",
             lambda: self._paginate_list(
-                f"{BASE_URL}/d2l/api/lp/1.47/enrollments/myenrollments/", "Items"
+                f"{self.base_url}/d2l/api/lp/1.47/enrollments/myenrollments/", "Items"
             ),
         )
 
@@ -972,7 +1011,7 @@ class LighthouseClient:
     def check_auth(self) -> bool:
         """Quick auth check via /d2l/api/versions/."""
         try:
-            self.get_json(f"{BASE_URL}/d2l/api/versions/")
+            self.get_json(f"{self.base_url}/d2l/api/versions/")
             return True
         except (SessionExpiredError, requests.HTTPError):
             return False
@@ -1056,14 +1095,22 @@ class LighthouseClient:
         ).encode()
         footer = f"\r\n--{boundary}--\r\n".encode()
         payload = body_bytes + file_bytes + footer
+        # The documented cookie-authenticated endpoint does not require a
+        # homepage CSRF bootstrap. Reuse a token already held in memory when a
+        # preceding assessment operation obtained one, without adding a GET to
+        # the file-submission fast path.
+        csrf_token = self._csrf_token
+        headers = {
+            "Content-Type": f"multipart/mixed; boundary={boundary}",
+            "Content-Length": str(len(payload)),
+        }
+        if csrf_token is not None:
+            headers["X-Csrf-Token"] = csrf_token
         resp = self._request(
             "POST",
-            f"{API_LE}/{course_id}/dropbox/folders/{dropbox_id}/submissions/mysubmissions/",
+            f"{self.api_le}/{course_id}/dropbox/folders/{dropbox_id}/submissions/mysubmissions/",
             data=payload,
-            headers={
-                "Content-Type": f"multipart/mixed; boundary={boundary}",
-                "Content-Length": str(len(payload)),
-            },
+            headers=headers,
             _skip_raise=True,
             _timeout=60,
         )

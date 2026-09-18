@@ -130,6 +130,8 @@ def _make_client_with_mock_session(status_code: int, json_data: dict | None = No
     mock_session.request = mock_request
 
     client = LighthouseClient()
+    # These tests isolate the multipart POST after session bootstrap.
+    client._csrf_token = "synthetic-csrf"
     client._loaded = True
     client._cookies = {"d2lSecureSessionVal": "abc", "d2lSessionVal": "def", "d2lSameSiteCanaryA": "x", "d2lSameSiteCanaryB": "y"}
     client._session = mock_session

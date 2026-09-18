@@ -159,7 +159,7 @@ def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
     return merged
 
 
-def load_cookies(*, read_only: bool = False) -> dict[str, str]:
+def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, expected_origin: str | None = None) -> dict[str, str]:
     """Load cookies from disk. Returns empty dict if file is missing.
 
     Sealed v2 documents are decrypted with their recorded key source; an
@@ -169,7 +169,7 @@ def load_cookies(*, read_only: bool = False) -> dict[str, str]:
     ``read_only`` is true.  Read-only callers fail closed on legacy plaintext
     and leave the file byte-for-byte unchanged.
     """
-    store = CredentialStore()
+    store = CredentialStore(config_dir=config_dir) if config_dir is not None else CredentialStore()
     path = store.cookie_file
     _validate_credential_path(store.config_dir)
     _validate_credential_path(path)
@@ -199,9 +199,11 @@ def load_cookies(*, read_only: bool = False) -> dict[str, str]:
         if artifact is None:
             return {}
         _meta, secret = artifact
+        if (expected_origin is not None or "origin" in secret) and secret.get("origin") != (expected_origin or BASE_URL):
+            return {}
         return _filter_cookie_names(secret.get("cookies", {}))
 
-    if read_only:
+    if read_only or config_dir is not None:
         print(
             "Warning: legacy plaintext cookies are ignored in read-only mode. "
             "Run: lighthouse auth login",
