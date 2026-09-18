@@ -1,7 +1,7 @@
 name: Droid Auto Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, ready_for_review, reopened, synchronize]
 
 concurrency:
@@ -23,13 +23,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Install Droid custom model settings
         shell: bash
         run: |
+          git fetch --no-tags origin "${{ github.event.pull_request.base.sha }}" --depth=1
           install -d -m 700 "$HOME/.factory"
-          install -m 600 .github/droid-zai-settings.json "$HOME/.factory/settings.json"
+          git show "${{ github.event.pull_request.base.sha }}:.github/droid-zai-settings.json" > "$HOME/.factory/settings.json"
+          chmod 600 "$HOME/.factory/settings.json"
       - name: Run Droid Auto Review
         uses: Factory-AI/droid-action@e5ae50268211d2e9ac85edb57c28bf253b6627f7 # v6
         with:
@@ -39,7 +42,6 @@ jobs:
           review_model: custom:zai-coding-anthropic/glm-5.3
           security_model: custom:zai-coding-anthropic/glm-5.3
           reasoning_effort: max
-          settings: .github/droid-zai-settings.json
+          allowed_bots: dependabot,factory-droid
         env:
           CLIPROXY_CLAUDE_CODE_API_KEY: ${{ secrets.CLIPROXY_CLAUDE_CODE_API_KEY }}
-          allowed_bots: dependabot,factory-droid
