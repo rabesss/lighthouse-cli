@@ -92,16 +92,16 @@ API roots used: LE `1.93`, LP `1.47`.
 | Quiz attempt summaries | Not treated as learner access | 200, includes preview summaries | `instructor quiz-attempts` |
 | Create assignment via cookie auth | No university write attempted | 403 without CSRF, 200 with CSRF | Hidden file/text creation |
 | Create quiz via cookie auth | No university write attempted | 200 for final payload | Hidden shell creation, both layouts |
-| Submit synthetic file | No university write attempted | 403 even with CSRF | Existing upload command includes CSRF when available; learner-role live validation remains blocked |
+| Submit synthetic file | No university write attempted | 403 even with CSRF | Existing upload command uses the documented cookie-only endpoint; learner-role live validation remains blocked |
 | Content userprogress route | 404 for inspected URL | 404 for inspected URL | Not added based on this failed probe |
 
 The homepage embeds a `localStorage.setItem('XSRF.Token', ...)` bootstrap in a
 script. Its parsed value matched the active browser token without exposing
 either value. Assessment creation bootstraps that value through a bounded
 homepage GET, caches it per client, and clears it when cookies refresh. File
-submission includes it when the initializer is present but remains compatible
-with the documented cookie-only endpoint when it is absent. No token is logged
-or written in plaintext.
+submission uses the documented cookie-only endpoint and can reuse a token
+already held by the same client without adding a homepage request. No token is
+logged or written in plaintext.
 
 The first quiz creation payload returned 400. Replacing its unenforced timing
 and late-submission defaults with the accepted values in `quiz_payload()`
