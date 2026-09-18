@@ -102,7 +102,7 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" |
             jq -r --arg since "$DROID_GUARD_SINCE" \
               'add[] | select(.created_at >= $since) | .body' |
-            grep -Eiq 'retrying with the organization.s default model|not a recognized model id|not allowed by your organization.s model policy'; then
+            grep -Eiq 'used your organization.s default model|retried with your organization.s default model|retrying with the organization.s default model|not a recognized model id|not allowed by your organization.s model policy'; then
             echo "::error::Droid reported a custom-model fallback; refusing a Factory-default review"
             exit 1
           fi
