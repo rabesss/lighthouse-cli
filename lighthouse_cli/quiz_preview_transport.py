@@ -159,7 +159,11 @@ def save_current_preview_answer(
         )
         if response.status_code != 200:
             raise PreviewSaveUnknownError()
-        verified = read_current_preview(client, **identity)
+        try:
+            verified = read_current_preview(client, **identity)
+        except SessionExpiredError:
+            # The POST was accepted before the readback lost authentication.
+            raise PreviewSaveUnknownError() from None
         if not verified.confirms_answer(question_id, choice_id):
             raise PreviewSaveUnknownError()
         return verified
@@ -188,7 +192,11 @@ def advance_current_preview(
                                    headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
         if response.status_code != 200:
             raise PreviewAdvanceUnknownError()
-        return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
+        try:
+            return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
+        except SessionExpiredError:
+            # The navigation POST completed before the readback lost auth.
+            raise PreviewAdvanceUnknownError() from None
     except SessionExpiredError:
         raise
     except Exception:

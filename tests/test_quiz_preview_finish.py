@@ -78,3 +78,11 @@ def test_receipt_session_expiry_is_not_masked_as_unknown_submission():
     client.get_raw = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(SessionExpiredError):
         verify_receipt(client, course_id=10, quiz_id=20, attempt_id=30, actor_id=7)
+
+
+def test_submit_receipt_auth_expiry_is_unknown_after_write_dispatch():
+    client, _, _ = client_for_submit()
+    calls = list(client.get_raw.side_effect)
+    client.get_raw = Mock(side_effect=[calls[0], calls[1], calls[2], SessionExpiredError("session expired")])
+    with pytest.raises(PreviewSubmitUnknownError):
+        submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)

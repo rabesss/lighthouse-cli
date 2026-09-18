@@ -245,12 +245,12 @@ def test_ambiguous_http_write_status_is_unknown(status):
         AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
 
 
-def test_classlist_uses_the_lp_route():
+def test_classlist_uses_the_le_route():
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
         client.return_value.get_json.return_value = []
         result = CliRunner().invoke(cli, ["instructor", "classlist", "12", "--json"])
     assert result.exit_code == 0
-    client.return_value.get_json.assert_called_once_with("/d2l/api/lp/1.47/12/classlist/")
+    client.return_value.get_json.assert_called_once_with("/12/classlist/")
 
 
 def test_pagination_preserves_forbidden_status_without_raw_error():

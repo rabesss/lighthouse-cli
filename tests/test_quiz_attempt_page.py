@@ -10,8 +10,8 @@ import pytest
 
 from lighthouse_cli.quiz_attempt_page import MAX_PAGE_BYTES, PreviewPageError, parse_preview_page
 from lighthouse_cli.request_protection import FormProtection
-from lighthouse_cli.quiz_preview_transport import PreviewSaveUnknownError, PreviewStartUnknownError, save_current_preview_answer, start_preview
-from lighthouse_cli.api import LighthouseClient
+from lighthouse_cli.quiz_preview_transport import PreviewAdvanceUnknownError, PreviewSaveUnknownError, PreviewStartUnknownError, advance_current_preview, save_current_preview_answer, start_preview
+from lighthouse_cli.api import LighthouseClient, SessionExpiredError
 
 
 def question(number: int, page: int = 1, *, saved: str = "True", selected: bool = True) -> str:
@@ -163,6 +163,24 @@ def test_http_200_without_persisted_answer_is_unknown_not_success():
     client._request = Mock(return_value=Mock(status_code=200))
     with pytest.raises(PreviewSaveUnknownError):
         save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
+    client._request.assert_called_once()
+
+
+def test_save_readback_auth_expiry_is_unknown_after_post_dispatch():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {}), SessionExpiredError("session expired")])
+    client._request = Mock(return_value=Mock(status_code=200))
+    with pytest.raises(PreviewSaveUnknownError):
+        save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
+    client._request.assert_called_once()
+
+
+def test_advance_readback_auth_expiry_is_unknown_after_post_dispatch():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {}), SessionExpiredError("session expired")])
+    client._request = Mock(return_value=Mock(status_code=200))
+    with pytest.raises(PreviewAdvanceUnknownError):
+        advance_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
     client._request.assert_called_once()
 
 

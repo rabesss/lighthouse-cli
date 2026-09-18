@@ -100,6 +100,7 @@ def submit_preview(
     fields = current.answer_fields(first["question_id"], first["selected_choice_ids"][0], protection)
     fields["d2l_actionparam"] = f"5,{page}"
     response = None
+    write_dispatched = False
     try:
         save_url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({
             "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,
@@ -107,6 +108,7 @@ def submit_preview(
         response = client._request("POST", save_url,
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
+        write_dispatched = True
         if response.status_code != 200:
             raise PreviewSubmitUnknownError()
         _close_response(response)
@@ -142,6 +144,8 @@ def submit_preview(
         result["retained_for_grading"] = retain
         return result
     except SessionExpiredError:
+        if write_dispatched:
+            raise PreviewSubmitUnknownError() from None
         raise
     except Exception:
         raise PreviewSubmitUnknownError() from None
