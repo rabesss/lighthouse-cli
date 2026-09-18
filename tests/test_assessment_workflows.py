@@ -211,11 +211,21 @@ def test_quiz_create_204_is_an_unknown_write_outcome():
     response.close.assert_called_once()
 
 
-def test_assessment_session_expiry_is_an_unknown_write_outcome():
+def test_assessment_session_expiry_during_write_is_an_unknown_write_outcome():
     client = LighthouseClient()
-    client.get_csrf_token = Mock(side_effect=SessionExpiredError("session expired"))
+    client._csrf_token = "synthetic-csrf"
+    client._request = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(AssessmentWriteUnknownError, match="outcome unknown"):
         AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
+
+
+def test_assessment_csrf_bootstrap_failure_is_retryable_before_write():
+    client = LighthouseClient()
+    client.get_csrf_token = Mock(side_effect=SessionExpiredError("session expired"))
+    client._request = Mock()
+    with pytest.raises(SessionExpiredError):
+        AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
+    client._request.assert_not_called()
 
 
 def test_pagination_preserves_forbidden_status_without_raw_error():

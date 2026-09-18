@@ -170,8 +170,10 @@ class AssessmentAPI:
         if method not in {"POST", "PUT"}:
             raise ValueError("Unsupported assessment operation.")
         url = self.client.canonical_url(self.path(resource, identifier))
+        # Homepage protection is a read-only prerequisite. If it fails, no
+        # assessment write was attempted and callers may safely retry it.
+        csrf_token = self.client.get_csrf_token()
         try:
-            csrf_token = self.client.get_csrf_token()
             response = self.client._request(method, url, json=data, headers={"X-Csrf-Token": csrf_token})
         except (NetworkError, SessionExpiredError):
             raise AssessmentWriteUnknownError(
