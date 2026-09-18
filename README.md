@@ -898,6 +898,10 @@ cookie directory under `LIGHTHOUSE_CONFIG_DIR/sites/hetrynow.brightspace.com`;
 there is no cross-origin cookie fallback. Use `--dry-run` to resolve the
 destination and emit a machine-readable plan without reading or uploading the
 file.
+The dry-run JSON includes `destination_verified: true` when folder metadata is
+available. If the optional folder-detail lookup cannot be verified, the plan
+is retained with `destination_verified: false`, `folder_name: "Unknown folder"`,
+and a fixed `warning`; no upload is made.
 
 **Arguments:**
 
@@ -980,7 +984,8 @@ synthetic write:
     "api_root": "https://hetrynow.brightspace.com/d2l/api/le/1.93",
     "course_id": 22985,
     "folder_id": 23879
-  }
+  },
+  "destination_verified": true
 }
 ```
 

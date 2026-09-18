@@ -622,6 +622,89 @@ class TestSubmitCommand:
         client.submit_file.assert_not_called()
         read_bytes.assert_not_called()
 
+    def test_submit_default_dry_run_uses_read_only_auth(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """Default Lighthouse dry-run cannot migrate cookies or submit."""
+        from lighthouse_cli.cli import cli
+
+        with (
+            patch("lighthouse_cli.submit.LighthouseClient") as client_cls,
+            patch.object(Path, "read_bytes", autospec=True) as read_bytes,
+        ):
+            client = MagicMock()
+            client_cls.return_value = client
+            client.get_courses.return_value = mock_courses
+            client.get_dropbox_folders.return_value = mock_dropbox_folders
+            client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
+
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        client_cls.assert_called_once_with(read_only_auth=True, site="lighthouse")
+        payload = json_module.loads(result.stdout)
+        assert payload["site"] == "lighthouse"
+        assert payload["destination_verified"] is True
+        assert "warning" not in payload
+        client.submit_file.assert_not_called()
+        read_bytes.assert_not_called()
+
+    def test_submit_dry_run_marks_expired_folder_detail_unverified(
+        self,
+        cli_runner: CliRunner,
+        temp_pdf_file: Path,
+        mock_courses: list[dict],
+        mock_dropbox_folders: list[dict],
+    ) -> None:
+        """An optional folder-detail expiry leaves a clearly unverified plan."""
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as client_cls:
+            client = MagicMock()
+            client_cls.return_value = client
+            client.get_courses.return_value = mock_courses
+            client.get_dropbox_folders.return_value = mock_dropbox_folders
+            client.get_dropbox_folder_detail.side_effect = SessionExpiredError("expired")
+
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "submit",
+                    "44347",
+                    "789",
+                    "--file",
+                    str(temp_pdf_file),
+                    "--site",
+                    "trial",
+                    "--dry-run",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json_module.loads(result.stdout)
+        assert payload["destination_verified"] is False
+        assert payload["folder_name"] == "Unknown folder"
+        assert payload["warning"] == (
+            "Dry-run destination metadata could not be fully verified; no submission was sent."
+        )
+        client.submit_file.assert_not_called()
+
     def test_submit_requires_file_flag(self, cli_runner: CliRunner) -> None:
         """VAL-SUBMIT-019: Missing --file produces usage error."""
         from lighthouse_cli.cli import cli

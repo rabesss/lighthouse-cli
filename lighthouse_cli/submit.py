@@ -25,6 +25,9 @@ _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
 _INVALID_SITE_ERROR = "Invalid site. Choose lighthouse or trial."
+_DRY_RUN_UNVERIFIED_WARNING = (
+    "Dry-run destination metadata could not be fully verified; no submission was sent."
+)
 _TRIAL_SESSION_EXPIRED_ERROR = (
     "Trial session expired for https://hetrynow.brightspace.com. "
     "Run: lighthouse auth import-session --site trial."
@@ -113,7 +116,7 @@ def cmd_submit(
     except Exception as e:
         return _submit_error(e, json_output, site=site)
 
-    folder_name = _get_folder_name(client, org_id, folder_id_int)
+    folder_name, folder_name_verified = _get_folder_name(client, org_id, folder_id_int)
     destination = {
         "site": site,
         "origin": connection.origin,
@@ -128,21 +131,27 @@ def cmd_submit(
         except OSError:
             return _submit_error("Could not read file.", json_output)
         if json_output:
-            _output_json({
+            payload = {
                 "dry_run": True,
                 "site": site,
                 "destination": destination,
+                "destination_verified": folder_name_verified,
                 "folder_id": folder_id_int,
                 "folder_name": folder_name,
                 "course_id": org_id,
                 "course_name": course_name,
                 "file": {"name": display_filename, "size_bytes": file_size},
-            })
+            }
+            if not folder_name_verified:
+                payload["warning"] = _DRY_RUN_UNVERIFIED_WARNING
+            _output_json(payload)
         else:
             print(
                 f"Would submit to '{folder_name}' in '{course_name}' on {site} "
                 f"({connection.origin}).\n  File: {display_filename}"
             )
+            if not folder_name_verified:
+                print(f"Warning: {_DRY_RUN_UNVERIFIED_WARNING}")
         return 0
 
     # Confirmation prompt (skip with --yes). JSON-mode prompts must not pollute
@@ -382,15 +391,19 @@ def _positive_folder_id(value: object) -> int | None:
     return None
 
 
-def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> str:
-    """Get the name of a dropbox folder by ID."""
+def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> tuple[str, bool]:
+    """Get a dropbox folder name and whether its metadata was verified."""
     try:
         detail = client.get_dropbox_folder_detail(org_id, folder_id)
     except Exception:
-        return _DEFAULT_FOLDER_NAME
+        return _DEFAULT_FOLDER_NAME, False
     if not isinstance(detail, dict):
-        return _DEFAULT_FOLDER_NAME
-    return _safe_display_name(detail.get("Name"), _DEFAULT_FOLDER_NAME)
+        return _DEFAULT_FOLDER_NAME, False
+    raw_name = detail.get("Name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return _DEFAULT_FOLDER_NAME, False
+    name = _safe_display_name(raw_name, _DEFAULT_FOLDER_NAME)
+    return name, name != _DEFAULT_FOLDER_NAME
 
 
 def _safe_display_name(value: object, fallback: str) -> str:
