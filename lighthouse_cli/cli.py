@@ -72,6 +72,15 @@ def auth() -> None:
     """Manage authentication (session cookies)."""
 
 
+@auth.command("import-session", cls=JsonOutputCommand)
+@click.option("--site", type=click.Choice(["lighthouse", "trial"]), required=True)
+@click.option("--json", "json_output", is_flag=True)
+def auth_import_session(site: str, json_output: bool) -> None:
+    """Import origin-bound cookies from JSON stdin into encrypted storage."""
+    from .session_import import import_session
+    click.get_current_context().invoke(import_session, site=site, json_output=json_output)
+
+
 @auth.command("status", cls=JsonOutputCommand)
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
 def auth_status(json_output: bool) -> None:
