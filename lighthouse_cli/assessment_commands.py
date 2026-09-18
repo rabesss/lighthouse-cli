@@ -148,7 +148,9 @@ def assignment_history(course_id: int, folder_id: int, json_output: bool) -> Non
 @click.option("--json", "json_output", is_flag=True)
 def classlist(course_id: int, json_output: bool) -> None:
     """Read class members and roles; excludes email and login identifiers."""
-    _run(course_id, json_output, lambda api: api.client.get_json(f"/{api.course_id}/classlist/"))
+    _run(course_id, json_output, lambda api: api.client.get_json(
+        f"/d2l/api/lp/1.47/{api.course_id}/classlist/"
+    ))
 
 
 student.add_command(classlist)

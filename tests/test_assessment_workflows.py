@@ -228,6 +228,25 @@ def test_assessment_csrf_bootstrap_failure_is_retryable_before_write():
     client._request.assert_not_called()
 
 
+@pytest.mark.parametrize("status", [429, 502])
+def test_ambiguous_http_write_status_is_unknown(status):
+    client = LighthouseClient()
+    client._csrf_token = "synthetic-csrf"
+    response = requests.Response()
+    response.status_code = status
+    client._request = Mock(side_effect=requests.HTTPError(response=response))
+    with pytest.raises(AssessmentWriteUnknownError, match="outcome unknown"):
+        AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
+
+
+def test_classlist_uses_the_lp_route():
+    with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
+        client.return_value.get_json.return_value = []
+        result = CliRunner().invoke(cli, ["instructor", "classlist", "12", "--json"])
+    assert result.exit_code == 0
+    client.return_value.get_json.assert_called_once_with("/d2l/api/lp/1.47/12/classlist/")
+
+
 def test_pagination_preserves_forbidden_status_without_raw_error():
     client = LighthouseClient()
     response = requests.Response()
