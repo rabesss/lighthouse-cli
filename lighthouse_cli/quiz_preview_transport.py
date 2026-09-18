@@ -68,6 +68,7 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         fields["bypass"] = "1"
     post_url = client.canonical_url(summary + "&cfql=0&inProgress=0")
     response = None
+    state_created = False
     try:
         # The summary POST registers the preview/bypass choice. Skipping it
         # can appear to work for visible quizzes but fails for hidden ones.
@@ -93,6 +94,7 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         # This legacy GET creates server state: it is deliberately not replayed.
         result, _ = client.get_raw(process_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
                                   headers={"Referer": client.canonical_url(frame_path)})
+        state_created = True
         matches: set[tuple[int, int]] = set()
         for script in BeautifulSoup(result, "html.parser").find_all("script"):
             for match in re.finditer(
@@ -105,6 +107,8 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         attempt_id, page = matches.pop()
         return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     except SessionExpiredError:
+        if state_created:
+            raise PreviewStartUnknownError() from None
         raise
     except Exception:
         raise PreviewStartUnknownError() from None

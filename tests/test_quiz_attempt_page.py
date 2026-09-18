@@ -223,6 +223,24 @@ def test_start_rejects_missing_button_without_creating_attempt():
     client.get_raw.assert_called_once()
 
 
+def test_start_readback_auth_expiry_is_unknown_after_state_creation():
+    client = LighthouseClient(site="trial")
+    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
+    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
+    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
+    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
+    client.get_raw = Mock(side_effect=[
+        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
+        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
+        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
+        (b'<script>parent.GoToAttemptQuizAuto( 30,1,0 );</script>', {}),
+        SessionExpiredError("session expired"),
+    ])
+    with pytest.raises(PreviewStartUnknownError):
+        start_preview(client, course_id=10, quiz_id=20)
+    assert client._request.call_count == 1
+
+
 def test_ambiguous_start_does_not_retry_or_trust_script_strings():
     client = LighthouseClient(site="trial")
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'

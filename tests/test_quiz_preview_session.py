@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from lighthouse_cli.cli import cli
 from lighthouse_cli.quiz_preview_session import PreviewWorkflow, PreviewWorkflowError
-from lighthouse_cli.quiz_preview_transport import PreviewAdvanceUnknownError, PreviewSaveUnknownError
+from lighthouse_cli.quiz_preview_transport import PreviewAdvanceUnknownError, PreviewSaveUnknownError, PreviewStartUnknownError
 from lighthouse_cli.quiz_attempt_page import parse_preview_page
 from tests.test_quiz_attempt_page import html, question
 
@@ -49,6 +49,18 @@ def test_one_active_preview_per_quiz_and_sealed_cursor(remote):
     assert workflow.status()["status"] == "active"
     raw = workflow.path.read_text()
     assert '"actor_id"' not in raw
+    with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
+        with pytest.raises(PreviewWorkflowError, match="already exists"):
+            workflow.run("start")
+    start.assert_not_called()
+
+
+def test_start_readback_uncertainty_is_durable_and_blocks_restart(remote):
+    workflow = PreviewWorkflow("trial", 10, 20)
+    with patch("lighthouse_cli.quiz_preview_session.start_preview", side_effect=PreviewStartUnknownError()):
+        with pytest.raises(PreviewStartUnknownError):
+            workflow.run("start")
+    assert workflow.status()["status"] == "uncertain"
     with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
         with pytest.raises(PreviewWorkflowError, match="already exists"):
             workflow.run("start")
