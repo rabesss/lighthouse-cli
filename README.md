@@ -212,10 +212,12 @@ lighthouse instructor --site trial preview submit 22985 54488 --retain --yes --j
 
 These commands require a separately authenticated trial CLI session. They accept
 untimed text/radio previews only. A sealed, account-bound cursor permits one
-active preview per quiz; uncertain writes block further changes until `page`
-verifies the outcome. `status` reads the local cursor; `abandon` forgets it
-without deleting the remote attempt. Starting another preview in the browser
-can invalidate an unretained CLI preview. Write commands also support `--dry-run`.
+active preview per quiz; uncertain answer saves and completed submissions can
+be verified with `page`, while uncertain navigation requires browser inspection
+before continuing or abandoning. `status` reads the local cursor; `abandon`
+forgets it without deleting the remote attempt. Starting another preview in the
+browser can invalidate an unretained CLI preview. Write commands also support
+`--dry-run`.
 
 Real learner quiz attempts, question authoring, teacher grading and full
 course-administration parity are **not implemented** by these additions.

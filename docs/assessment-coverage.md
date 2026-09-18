@@ -151,9 +151,10 @@ required: an HTTP 200 alone did not prove an answer was saved. Save verification
 reads back the selected choice and saved marker. Forward transitions require all
 current answers saved. Start and writes are never automatically replayed; an
 uncertain result leaves a durable checkpoint and blocks further writes. Final
-submission requires both the saved/submitted receipt and a matching completed
-REST attempt record. Unsupported media, question types, timers, and session
-locking fail closed.
+submission requires a matching completed REST attempt record with verified
+identifiers. The receipt heading is recorded when available but is not
+required, because localized tenants render it differently. Unsupported media,
+question types, timers, and session locking fail closed.
 
 Authenticated browser HTTP probes completed and retained these synthetic
 previews on September 17, 2026:

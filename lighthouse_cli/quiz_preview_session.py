@@ -116,7 +116,7 @@ class PreviewWorkflow:
             elif not previous or previous["status"] not in {"active", "uncertain"}:
                 raise PreviewWorkflowError("No active preview exists for this quiz.")
             elif previous["status"] == "uncertain" and operation != "page":
-                raise PreviewWorkflowError("The last operation is uncertain. Use preview page to verify it before another write.")
+                raise PreviewWorkflowError("The last operation is uncertain. Inspect the browser before another write or abandon the preview.")
             client = LighthouseClient(read_only_auth=True, site=self.site)
             try:
                 actor = self._actor(client)

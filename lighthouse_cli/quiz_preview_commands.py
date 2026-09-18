@@ -82,7 +82,11 @@ def start(course_id: int, quiz_id: int, bypass_availability: bool, yes: bool, dr
 @click.argument("quiz_id", type=_ID)
 @click.option("--json", "json_output", is_flag=True)
 def page(course_id: int, quiz_id: int, json_output: bool) -> None:
-    """Read the current page; verify an uncertain save/advance/submit by GET."""
+    """Read the current page; verify answer saves and completed submissions.
+
+    An uncertain navigation outcome requires browser inspection before
+    continuing or abandoning the preview.
+    """
     _execute("page", course_id, quiz_id, json_output)
 
 
