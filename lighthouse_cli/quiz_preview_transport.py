@@ -92,9 +92,9 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
             raise PreviewStartUnknownError()
         process_url = _start_target(client, frames[0]["src"], "quiz_start_process_auto.d2l", course_id, quiz_id)
         # This legacy GET creates server state: it is deliberately not replayed.
+        state_created = True
         result, _ = client.get_raw(process_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
                                   headers={"Referer": client.canonical_url(frame_path)})
-        state_created = True
         matches: set[tuple[int, int]] = set()
         for script in BeautifulSoup(result, "html.parser").find_all("script"):
             for match in re.finditer(
