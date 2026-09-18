@@ -11,8 +11,8 @@ import pytest
 import requests
 from click.testing import CliRunner
 
-from lighthouse_cli.api import LighthouseClient, NetworkError
-from lighthouse_cli.assessment_api import AssessmentAPI, assignment_payload, project, quiz_payload
+from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredError
+from lighthouse_cli.assessment_api import AssessmentAPI, AssessmentWriteUnknownError, assignment_payload, project, quiz_payload
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.connection import connection_for
@@ -192,6 +192,13 @@ def test_quiz_create_requires_verifiable_success_identifier():
         AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
     client._request.assert_called_once()
     response.close.assert_called_once()
+
+
+def test_assessment_session_expiry_is_an_unknown_write_outcome():
+    client = LighthouseClient()
+    client.get_csrf_token = Mock(side_effect=SessionExpiredError("session expired"))
+    with pytest.raises(AssessmentWriteUnknownError, match="outcome unknown"):
+        AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
 
 
 def test_pagination_preserves_forbidden_status_without_raw_error():
