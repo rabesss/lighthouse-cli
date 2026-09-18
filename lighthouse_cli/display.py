@@ -64,6 +64,22 @@ class JsonOutputCommand(click.Command):
             raise safe_error from None
 
 
+class JsonOutputGroup(click.Group):
+    """Apply the JSON usage-error contract at a group boundary as well."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        requested_json = _has_json_option(list(args))
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError:
+            if requested_json and not ctx.resilient_parsing:
+                output_json({"error": JSON_USAGE_ERROR})
+            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
+            if requested_json:
+                safe_error.exit_code = 1
+            raise safe_error from None
+
+
 # ---------------------------------------------------------------------------
 # Rich table rendering (optional dependency)
 # ---------------------------------------------------------------------------
