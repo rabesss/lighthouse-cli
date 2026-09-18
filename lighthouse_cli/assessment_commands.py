@@ -89,6 +89,9 @@ class _LazyPreview(JsonOutputGroup):
         return self._implementation().invoke(ctx)
 
 
+instructor.add_command(_LazyPreview(name="preview", help="Experimental trial-only, checkpointed quiz previews."))
+
+
 def _register_read(group: click.Group, name: str, resource: str, detail: bool) -> None:
     def command(course_id: int, json_output: bool, identifier: int | None = None) -> None:
         _run(course_id, json_output, lambda api: api.read(resource, identifier))
