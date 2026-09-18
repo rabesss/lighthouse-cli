@@ -62,10 +62,10 @@ jobs:
         with:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
           settings: .github/droid-zai-settings.json
-          prompt: Verify the configured custom model route without reading or changing repository files.
+          prompt: Return exactly ZAI_DROID_ROUTE_OK and nothing else.
           droid_args: >-
             --model "custom:zai-coding-anthropic/glm-5.3"
-            --list-tools
+            --remove-tools "Execute,Edit,Create,ApplyPatch,Task,FetchUrl,Skill"
           reasoning_effort: max
         env:
           CLIPROXY_CLAUDE_CODE_API_KEY: ${{ secrets.CLIPROXY_CLAUDE_CODE_API_KEY }}
