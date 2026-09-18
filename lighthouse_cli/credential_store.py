@@ -264,9 +264,9 @@ class CredentialStore:
     SERVICE_NAME = SERVICE_NAME
     KEY_NAME = KEY_NAME
 
-    def __init__(self) -> None:
+    def __init__(self, *, config_dir: Path | None = None) -> None:
         self.config_dir = Path(
-            os.getenv(CONFIG_DIR_ENV, DEFAULT_CONFIG_DIR)
+            config_dir if config_dir is not None else os.getenv(CONFIG_DIR_ENV, DEFAULT_CONFIG_DIR)
         ).expanduser()
         self.credentials_file = self.config_dir / "credentials.json"
         self.cookie_file = self.config_dir / "cookies.json"

@@ -12,24 +12,38 @@ from __future__ import annotations
 import click
 
 from . import __version__
-from .auth import cmd_auth_login, cmd_auth_mfa_methods, cmd_auth_refresh, cmd_auth_verify
-from .commands import (
-    cmd_announcements,
-    cmd_assignments,
-    cmd_auth_status,
-    cmd_calendar,
-    cmd_content,
-    cmd_courses,
-    cmd_download,
-    cmd_grades,
-    cmd_quiz_detail,
-    cmd_quizzes,
-    cmd_semesters,
-    cmd_submit,
-    cmd_sync,
-)
-from .course_config import cmd_config_courses
+from collections.abc import Callable
+from importlib import import_module
+from typing import Any
+
 from .display import JsonOutputCommand
+
+
+def _lazy_command(module: str, name: str) -> Callable[..., int]:
+    """Keep help/version independent of HTTP, crypto and browser dependencies."""
+    def invoke(*args: Any, **kwargs: Any) -> int:
+        return getattr(import_module(module, package=__package__), name)(*args, **kwargs)
+    return invoke
+
+
+cmd_auth_login = _lazy_command(".auth", "cmd_auth_login")
+cmd_auth_mfa_methods = _lazy_command(".auth", "cmd_auth_mfa_methods")
+cmd_auth_refresh = _lazy_command(".auth", "cmd_auth_refresh")
+cmd_auth_verify = _lazy_command(".auth", "cmd_auth_verify")
+cmd_auth_status = _lazy_command(".commands", "cmd_auth_status")
+cmd_content = _lazy_command(".commands", "cmd_content")
+cmd_courses = _lazy_command(".commands", "cmd_courses")
+cmd_download = _lazy_command(".commands", "cmd_download")
+cmd_quiz_detail = _lazy_command(".commands", "cmd_quiz_detail")
+cmd_semesters = _lazy_command(".commands", "cmd_semesters")
+cmd_sync = _lazy_command(".commands", "cmd_sync")
+cmd_announcements = _lazy_command(".show", "cmd_announcements")
+cmd_assignments = _lazy_command(".show", "cmd_assignments")
+cmd_calendar = _lazy_command(".show", "cmd_calendar")
+cmd_grades = _lazy_command(".show", "cmd_grades")
+cmd_quizzes = _lazy_command(".show", "cmd_quizzes")
+cmd_submit = _lazy_command(".submit", "cmd_submit")
+cmd_config_courses = _lazy_command(".course_config", "cmd_config_courses")
 
 # ---------------------------------------------------------------------------
 # Root group
