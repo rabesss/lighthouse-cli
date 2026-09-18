@@ -241,6 +241,21 @@ def test_start_readback_auth_expiry_is_unknown_after_state_creation():
     assert client._request.call_count == 1
 
 
+def test_start_process_auth_expiry_is_unknown_after_dispatch():
+    client = LighthouseClient(site="trial")
+    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
+    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
+    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
+    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
+    client.get_raw = Mock(side_effect=[
+        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
+        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
+        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
+        SessionExpiredError("session expired"),
+    ])
+    with pytest.raises(PreviewStartUnknownError):
+        start_preview(client, course_id=10, quiz_id=20)
+    assert client._request.call_count == 1
 def test_ambiguous_start_does_not_retry_or_trust_script_strings():
     client = LighthouseClient(site="trial")
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
