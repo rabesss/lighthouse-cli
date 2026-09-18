@@ -89,6 +89,8 @@ namespace = {}
 exec('from lighthouse_cli.commands import *', namespace)
 assert namespace['LighthouseClient'].__module__ == 'lighthouse_cli.api'
 assert namespace['cmd_submit'].__module__ == 'lighthouse_cli.submit'
+for name in ('cmd_download', 'cmd_sync', 'cmd_auth_status', 'cmd_content', 'cmd_quiz_detail'):
+    assert name in namespace
 """,
     )
     assert result.returncode == 0, result.stderr
@@ -107,6 +109,8 @@ namespace = {}
 exec('from lighthouse_cli.assessment_commands import *', namespace)
 assert namespace['AssessmentAPI'].__module__ == 'lighthouse_cli.assessment_api'
 assert namespace['project'].__module__ == 'lighthouse_cli.assessment_api'
+for name in ('instructor', 'student', 'quiz_questions', 'quiz_create', 'assignment_create'):
+    assert name in namespace
 """,
     )
     assert result.returncode == 0, result.stderr

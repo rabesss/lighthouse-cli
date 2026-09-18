@@ -26,8 +26,6 @@ _LAZY_DEPENDENCIES: dict[str, tuple[str, str]] = {
     "quiz_payload": (".assessment_api", "quiz_payload"),
 }
 _MISSING_DEPENDENCY = object()
-_LAZY_PUBLIC_EXPORTS = tuple(name for name in _LAZY_DEPENDENCIES if not name.startswith("_"))
-__all__ = _LAZY_PUBLIC_EXPORTS
 
 
 def _load_dependency(name: str) -> Any:
@@ -265,3 +263,12 @@ def assignment_create(course_id: int, name: str, instructions: str, submission_t
         json_output,
     )
     _create(course_id, "assignment", payload, yes, dry_run, json_output)
+
+
+# Preserve the complete historical wildcard surface, including role and
+# assessment commands defined in this module, while keeping heavy helpers lazy.
+__all__ = tuple(sorted(
+    name
+    for name in (set(globals()) | set(_LAZY_DEPENDENCIES))
+    if not name.startswith("_") and name not in {"import_module", "TYPE_CHECKING"}
+))

@@ -49,8 +49,6 @@ _LAZY_DEPENDENCIES: dict[str, tuple[str, str]] = {
     "cmd_quizzes": (".show", "cmd_quizzes"),
 }
 _MISSING_DEPENDENCY = object()
-_LAZY_PUBLIC_EXPORTS = tuple(name for name in _LAZY_DEPENDENCIES if not name.startswith("_"))
-__all__ = _LAZY_PUBLIC_EXPORTS
 
 
 def _load_dependency(name: str) -> Any:
@@ -1846,3 +1844,13 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
     base_url = _load_dependency("BASE_URL")
     print(f"   View in browser: {base_url}/d2l/lms/quizzing/user/quizzes_list.d2l?ou={org_id}")
     return 0
+
+
+# Preserve the complete historical wildcard surface, including command
+# functions defined in this module, while resolving heavy compatibility names
+# only when a wildcard import explicitly requests them.
+__all__ = tuple(sorted(
+    name
+    for name in (set(globals()) | set(_LAZY_DEPENDENCIES))
+    if not name.startswith("_") and name not in {"import_module", "TYPE_CHECKING"}
+))
