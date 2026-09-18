@@ -199,14 +199,15 @@ class PreviewWorkflow:
             self._save(state)
             return receipt
         if operation == "next":
-            # A failed advance may have happened before the server moved the
-            # cursor. Read the old page first; only probe the next page when
-            # the old page is no longer available. This resolves both outcomes
-            # without replaying the navigation POST.
+            # A failed advance may have happened before or after the server
+            # moved the cursor. Probe the expected next page first, then fall
+            # back to the recorded page; both are read-only and avoid replaying
+            # the navigation POST.
             try:
+                identity["page"] += 1
                 result = read_current_preview(client, **identity)
             except Exception:
-                identity["page"] += 1
+                identity["page"] -= 1
                 result = read_current_preview(client, **identity)
             state.update(status="active", operation=None, page=result.page)
             self._save(state)

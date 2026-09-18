@@ -193,8 +193,8 @@ implementations. File splitting alone is not counted as a latency improvement.
 ## Local verification
 
 Full suite: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q
--p no:cacheprovider --basetemp=/var/tmp/lighthouse-pr-delivery-8sn7bl/full-tests-after-review-fixes`
-— **1,443 passed in 37.91 seconds**. The temporary test directory is disposable.
+-p no:cacheprovider --basetemp=/var/tmp/lighthouse-pr-delivery-8sn7bl/full-tests-after-bot-fixes`
+— **1,446 passed in 38.41 seconds**. The temporary test directory is disposable.
 `ruff check --no-cache` passed for changed production modules and new tests;
 `git diff --check` passed. The stacked PRs are open with hosted checks and
 review bots still running; no merge or deployment has been performed.

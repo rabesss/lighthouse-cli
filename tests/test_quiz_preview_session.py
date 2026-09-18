@@ -88,9 +88,9 @@ def test_uncertain_advance_recovers_without_replaying_navigation(remote):
         with pytest.raises(PreviewAdvanceUnknownError):
             workflow.run("next")
     advance.assert_called_once()
-    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", return_value=page()) as read:
+    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", side_effect=[ValueError("next page unavailable"), page()]) as read:
         assert workflow.run("page")["page"] == 1
-    read.assert_called_once()
+    assert [call.kwargs["page"] for call in read.call_args_list] == [2, 1]
     assert workflow.status()["status"] == "active"
     assert workflow.status()["page"] == 1
 
@@ -112,9 +112,10 @@ def test_commit_failure_after_advance_never_restores_old_active_cursor(remote):
             workflow.run("next")
     advance.assert_called_once()
     assert workflow.status()["status"] == "uncertain"
-    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", side_effect=[ValueError("old page unavailable"), page(2)]) as read:
+    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", return_value=page(2)) as read:
         assert workflow.run("page")["page"] == 2
-    assert [call.kwargs["page"] for call in read.call_args_list] == [1, 2]
+    read.assert_called_once()
+    assert read.call_args.kwargs["page"] == 2
     assert workflow.status()["page"] == 2
 
 
