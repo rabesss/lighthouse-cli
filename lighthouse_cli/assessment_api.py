@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .api import LighthouseClient, NetworkError, _require_positive_endpoint_id
+from .api import LighthouseClient, NetworkError, SessionExpiredError, _require_positive_endpoint_id
 from .display import safe_display_text
 
 
@@ -170,10 +170,10 @@ class AssessmentAPI:
         if method not in {"POST", "PUT"}:
             raise ValueError("Unsupported assessment operation.")
         url = self.client.canonical_url(self.path(resource, identifier))
-        csrf_token = self.client.get_csrf_token()
         try:
+            csrf_token = self.client.get_csrf_token()
             response = self.client._request(method, url, json=data, headers={"X-Csrf-Token": csrf_token})
-        except NetworkError:
+        except (NetworkError, SessionExpiredError):
             raise AssessmentWriteUnknownError(
                 "Write outcome unknown. Inspect the assessment before retrying."
             ) from None
