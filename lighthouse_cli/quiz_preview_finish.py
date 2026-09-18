@@ -105,10 +105,12 @@ def submit_preview(
         save_url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({
             "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,
         }))
+        # The preparatory save can be accepted even when its response is an
+        # auth redirect, so mark the operation before dispatch.
+        write_dispatched = True
         response = client._request("POST", save_url,
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
-        write_dispatched = True
         if response.status_code != 200:
             raise PreviewSubmitUnknownError()
         _close_response(response)

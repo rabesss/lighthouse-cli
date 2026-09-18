@@ -175,10 +175,28 @@ def test_save_readback_auth_expiry_is_unknown_after_post_dispatch():
     client._request.assert_called_once()
 
 
+def test_save_post_auth_expiry_is_unknown_after_dispatch():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {})])
+    client._request = Mock(side_effect=SessionExpiredError("session expired"))
+    with pytest.raises(PreviewSaveUnknownError):
+        save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
+    client._request.assert_called_once()
+
+
 def test_advance_readback_auth_expiry_is_unknown_after_post_dispatch():
     client = LighthouseClient(site="trial")
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {}), SessionExpiredError("session expired")])
     client._request = Mock(return_value=Mock(status_code=200))
+    with pytest.raises(PreviewAdvanceUnknownError):
+        advance_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+    client._request.assert_called_once()
+
+
+def test_advance_post_auth_expiry_is_unknown_after_dispatch():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {})])
+    client._request = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(PreviewAdvanceUnknownError):
         advance_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
     client._request.assert_called_once()
@@ -256,6 +274,16 @@ def test_start_process_auth_expiry_is_unknown_after_dispatch():
     with pytest.raises(PreviewStartUnknownError):
         start_preview(client, course_id=10, quiz_id=20)
     assert client._request.call_count == 1
+
+
+def test_start_summary_post_auth_expiry_is_unknown_after_dispatch():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(return_value=(html("", extra="<button>Start Quiz!</button>") + bootstrap(), {}))
+    client._request = Mock(side_effect=SessionExpiredError("session expired"))
+    with pytest.raises(PreviewStartUnknownError):
+        start_preview(client, course_id=10, quiz_id=20)
+    client.get_raw.assert_called_once()
+    client._request.assert_called_once()
 def test_ambiguous_start_does_not_retry_or_trust_script_strings():
     client = LighthouseClient(site="trial")
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'

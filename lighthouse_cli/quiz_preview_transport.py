@@ -69,9 +69,13 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
     post_url = client.canonical_url(summary + "&cfql=0&inProgress=0")
     response = None
     state_created = False
+    start_dispatched = False
     try:
         # The summary POST registers the preview/bypass choice. Skipping it
         # can appear to work for visible quizzes but fails for hidden ones.
+        # Mark it before dispatch because a session expiry can arrive after
+        # Brightspace has already created the pending preview state.
+        start_dispatched = True
         response = client._request("POST", post_url, _skip_raise=True,
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(summary)})
@@ -108,6 +112,8 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     except SessionExpiredError:
         if state_created:
+            raise PreviewStartUnknownError() from None
+        if start_dispatched:
             raise PreviewStartUnknownError() from None
         raise
     except Exception:
@@ -155,7 +161,11 @@ def save_current_preview_answer(
         + urlencode({"d2l_body_type": 3, "ou": course_id, "fromQB": 0})
     )
     response = None
+    write_dispatched = False
     try:
+        # A session-expiry raised by the request itself is ambiguous: the
+        # server may have accepted the answer before returning a login page.
+        write_dispatched = True
         response = client._request(
             "POST", url,
             files=[(key, (None, value)) for key, value in fields.items()],
@@ -172,6 +182,8 @@ def save_current_preview_answer(
             raise PreviewSaveUnknownError()
         return verified
     except SessionExpiredError:
+        if write_dispatched:
+            raise PreviewSaveUnknownError() from None
         raise
     except Exception:
         raise PreviewSaveUnknownError() from None
@@ -191,7 +203,11 @@ def advance_current_preview(
         "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,
     }))
     response = None
+    write_dispatched = False
     try:
+        # Treat an auth failure from this request as post-dispatch unknown;
+        # the navigation may already have moved the remote cursor.
+        write_dispatched = True
         response = client._request("POST", url, files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
         if response.status_code != 200:
@@ -202,6 +218,8 @@ def advance_current_preview(
             # The navigation POST completed before the readback lost auth.
             raise PreviewAdvanceUnknownError() from None
     except SessionExpiredError:
+        if write_dispatched:
+            raise PreviewAdvanceUnknownError() from None
         raise
     except Exception:
         raise PreviewAdvanceUnknownError() from None

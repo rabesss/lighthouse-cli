@@ -86,3 +86,19 @@ def test_submit_receipt_auth_expiry_is_unknown_after_write_dispatch():
     client.get_raw = Mock(side_effect=[calls[0], calls[1], calls[2], SessionExpiredError("session expired")])
     with pytest.raises(PreviewSubmitUnknownError):
         submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+
+
+def test_submit_preparatory_post_auth_expiry_is_unknown_after_dispatch():
+    client, _, _ = client_for_submit()
+    client._request = Mock(side_effect=SessionExpiredError("session expired"))
+    with pytest.raises(PreviewSubmitUnknownError):
+        submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+    client._request.assert_called_once()
+
+
+def test_submit_rpc_auth_expiry_is_unknown_after_dispatch():
+    client, prep, _ = client_for_submit()
+    client._request = Mock(side_effect=[prep, SessionExpiredError("session expired")])
+    with pytest.raises(PreviewSubmitUnknownError):
+        submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+    assert client._request.call_count == 2
