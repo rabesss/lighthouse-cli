@@ -17,10 +17,32 @@ Install Playwright Chromium only when working on browser-assisted auth:
 playwright install chromium
 ```
 
+## Quality Gates
+
+CI runs on every PR and push to `main` (`.github/workflows/ci.yml`): formatting,
+linting (`ruff`), strict type checking (`mypy`), architecture layers
+(`import-linter`), dependency hygiene (`deptry`), a complexity ratchet
+(`xenon`), secret scanning (gitleaks + `detect-secrets` baseline), the test
+matrix (Python 3.10 pinned / 3.13 latest), and repository policy tests
+(`tests/test_repo_policies.py`).
+
+Install the pinned toolchain and reproduce any job locally:
+
+```sh
+pip install -r requirements-dev.txt
+pip install -e . --no-deps
+pre-commit install            # ruff + detect-secrets on every commit
+```
+
+The full local gate and per-job commands are documented in the
+`contribution-toolchain` skill (`.agents/skills/contribution-toolchain/`).
+If you change `pyproject.toml` dependencies, regenerate both lockfiles with
+`uv pip compile` (exact commands in the skill) so CI stays reproducible.
+
 ## PR Guidelines
 
 - Keep PRs small and focused.
-- Run `pytest -q` before opening a PR.
+- Run the full quality gate before opening a PR (see *Quality Gates*); at minimum `pytest -q` must be green.
 - Update README/docs when changing command behavior or JSON output.
 - Keep `--json` output stable for agent workflows.
 - Do not commit local auth files, course data, private LMS files, local manifests, or screenshots containing student data.

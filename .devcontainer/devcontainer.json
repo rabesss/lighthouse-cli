@@ -1,0 +1,17 @@
+{
+  "name": "lighthouse-cli",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -r requirements-dev.txt && pip install -e . --no-deps && pre-commit install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+        "ms-python.python"
+      ]
+    }
+  },
+  "remoteEnv": {
+    "LIGHTHOUSE_SECRETS_PASSPHRASE": "${localEnv:LIGHTHOUSE_SECRETS_PASSPHRASE}"
+  }
+}

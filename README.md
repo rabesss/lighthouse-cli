@@ -1355,7 +1355,13 @@ extra.
 
 Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md); the
 PR-review charter (what reviewers check, by severity) lives in
-[`REVIEW.md`](REVIEW.md). Run `pytest -q` before opening a PR.
+[`REVIEW.md`](REVIEW.md). CI (`.github/workflows/ci.yml`) gates every PR on
+formatting, lint, strict types, architecture layers, dependency hygiene,
+secret scanning, and the test matrix — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the local equivalents. A verbatim
+`--help` transcript of every command is maintained in
+[docs/cli-reference.md](docs/cli-reference.md)
+(regenerate with `python scripts/generate_cli_reference.py`).
 
 This repo is wired for several AI reviewers. Each reads its own committed
 config; all derive from `REVIEW.md`:
