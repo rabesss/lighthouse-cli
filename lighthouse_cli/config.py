@@ -14,6 +14,7 @@ import sys
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from lighthouse_cli.credential_store import (
     FORMAT_VERSION,
@@ -36,8 +37,10 @@ API_LE = f"{BASE_URL}/d2l/api/le/1.93"
 
 # Cookie names we care about
 COOKIE_NAMES = (
-    "d2lSameSiteCanaryA", "d2lSameSiteCanaryB",
-    "d2lSecureSessionVal", "d2lSessionVal",
+    "d2lSameSiteCanaryA",
+    "d2lSameSiteCanaryB",
+    "d2lSecureSessionVal",
+    "d2lSessionVal",
 )
 
 # Paths (defaults; storage functions resolve LIGHTHOUSE_CONFIG_DIR per call)
@@ -83,9 +86,11 @@ def _trusted_iso_timestamp(value: object) -> str | None:
         return None
     return value
 
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
+
 
 def ensure_config_dir() -> Path:
     """Create the config directory if it doesn't exist with 0700 permissions."""
@@ -148,18 +153,16 @@ def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
         domain = str(entry.get("domain") or "")
         if not cookie_domain_accepted(domain):
             continue
-        target = (
-            host_only
-            if domain.lstrip(".").lower() == COOKIE_SETTING_HOST
-            else domain_scoped
-        )
+        target = host_only if domain.lstrip(".").lower() == COOKIE_SETTING_HOST else domain_scoped
         target[name] = value
     merged = dict(domain_scoped)
     merged.update(host_only)
     return merged
 
 
-def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, expected_origin: str | None = None) -> dict[str, str]:
+def load_cookies(
+    *, read_only: bool = False, config_dir: Path | None = None, expected_origin: str | None = None
+) -> dict[str, str]:
     """Load cookies from disk. Returns empty dict if file is missing.
 
     Sealed v2 documents are decrypted with their recorded key source; an
@@ -199,7 +202,9 @@ def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, exp
         if artifact is None:
             return {}
         _meta, secret = artifact
-        if (expected_origin is not None or "origin" in secret) and secret.get("origin") != (expected_origin or BASE_URL):
+        if (expected_origin is not None or "origin" in secret) and secret.get("origin") != (
+            expected_origin or BASE_URL
+        ):
             return {}
         return _filter_cookie_names(secret.get("cookies", {}))
 
@@ -211,7 +216,7 @@ def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, exp
         )
         return {}
 
-    # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
+    # Legacy plaintext ({"cookies": ...} wrapper or flat dict[str, Any]).
     cookies = _cookies_from_legacy_doc(doc)
     legacy_extracted = doc.get("extracted_at")
     upgraded = _try_upgrade_plaintext_cookies(
@@ -251,8 +256,7 @@ def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) ->
         store.cookie_file,
         metadata={
             "extracted_at": (
-                _trusted_iso_timestamp(extracted_at)
-                or datetime.now(timezone.utc).isoformat()
+                _trusted_iso_timestamp(extracted_at) or datetime.now(timezone.utc).isoformat()
             )
         },
         secret={"cookies": filtered},
@@ -285,7 +289,7 @@ def get_cookie_age_days() -> float | None:
         return None
 
 
-def _cookies_from_legacy_doc(doc: dict) -> dict[str, str]:
+def _cookies_from_legacy_doc(doc: dict[str, Any]) -> dict[str, str]:
     """Extract cookies from a legacy plaintext document."""
     source = doc.get("cookies") if "cookies" in doc else doc
     if not isinstance(source, dict):
@@ -339,7 +343,8 @@ def _try_upgrade_plaintext_cookies(
 # MFA pending checkpoint (sealed via CredentialStore)
 # ---------------------------------------------------------------------------
 
-def save_mfa_pending(payload: dict) -> None:
+
+def save_mfa_pending(payload: dict[str, Any]) -> None:
     """Persist in-progress MFA state between ``auth login`` and ``auth verify``.
 
     Everything except the metadata allowlist (``created_at``, ``mfa_method``)
@@ -357,7 +362,7 @@ def save_mfa_pending(payload: dict) -> None:
     store.write_artifact(store.mfa_pending_file, metadata=metadata, secret=secret)
 
 
-def load_mfa_pending() -> dict | None:
+def load_mfa_pending() -> dict[str, Any] | None:
     """Load pending MFA state (metadata + sealed secret merged), or None.
 
     Compatibility policy:
@@ -427,7 +432,7 @@ def _discard_pending(path: Path, version: object) -> None:
         )
 
 
-def update_mfa_pending(updates: dict) -> None:
+def update_mfa_pending(updates: dict[str, Any]) -> None:
     """Merge fields into the existing pending MFA file (no-op if missing)."""
     data = load_mfa_pending()
     if not data:

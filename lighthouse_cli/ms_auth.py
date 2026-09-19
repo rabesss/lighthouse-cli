@@ -36,7 +36,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
@@ -60,14 +60,8 @@ from lighthouse_cli.ms_errors import (
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
     MFA_AUTH_SMS,
-    MFA_METHOD_APP as MFA_METHOD_APP,
-    MFA_METHOD_AUTH_IDS as MFA_METHOD_AUTH_IDS,
     MFA_METHOD_AUTO,
-    MFA_METHOD_CALL as MFA_METHOD_CALL,
-    MFA_METHOD_CHOOSE as MFA_METHOD_CHOOSE,
     MFA_METHOD_INSTRUCTIONS,
-    MFA_METHOD_PUSH as MFA_METHOD_PUSH,
-    MFA_METHOD_SMS as MFA_METHOD_SMS,
     MS_ERROR_CODES,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
@@ -77,17 +71,39 @@ from lighthouse_cli.ms_errors import (
     safe_diagnostic_text,
     safe_upstream_text,
 )
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_APP as MFA_METHOD_APP,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_AUTH_IDS as MFA_METHOD_AUTH_IDS,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_CALL as MFA_METHOD_CALL,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_CHOOSE as MFA_METHOD_CHOOSE,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_PUSH as MFA_METHOD_PUSH,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_SMS as MFA_METHOD_SMS,
+)
 from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
     UserProof,
+    _parse_user_proofs,
+    _select_user_proof,
     format_user_proof,
     safe_proof_destination,
-    _parse_user_proofs,
+)
+from lighthouse_cli.ms_mfa import (
     _prompt_user_proof_choice as _prompt_user_proof_choice,
-    _select_user_proof,
 )
 from lighthouse_cli.ms_parse import (
     _extract_balanced_json_object as _extract_balanced_json_object,
+)
+from lighthouse_cli.ms_parse import (
     _extract_config_json,
     _extract_error_code_and_msg,
 )
@@ -104,11 +120,13 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # Exact origins used by the Microsoft flow.  Do not turn these into substring
 # checks: the values come from untrusted redirects and embedded page config.
-_MICROSOFT_ALLOWED_HOSTS = frozenset({
-    "login.microsoftonline.com",
-    "login.live.com",
-    "autologon.microsoftazuread-sso.com",
-})
+_MICROSOFT_ALLOWED_HOSTS = frozenset(
+    {
+        "login.microsoftonline.com",
+        "login.live.com",
+        "autologon.microsoftazuread-sso.com",
+    }
+)
 _D2L_ALLOWED_HOSTS = frozenset({COOKIE_SETTING_HOST})
 _FLOW_ALLOWED_HOSTS = _MICROSOFT_ALLOWED_HOSTS | _D2L_ALLOWED_HOSTS
 _SAFE_FIELD_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
@@ -160,7 +178,7 @@ def _safe_flow_location(url: object) -> str:
     else:
         delimiter = re.search(r"[?#]", path)
         if delimiter:
-            path = path[:delimiter.start()]
+            path = path[: delimiter.start()]
         marker = re.search(
             r"(?i)(?<![a-z0-9])(?:password|passwd|passphrase|pass|otp|totp|"
             r"token|canary|ctx|flow[\s_-]*token|cookie(?:value)?|"
@@ -170,7 +188,7 @@ def _safe_flow_location(url: object) -> str:
             path,
         )
         if marker:
-            path = path[:marker.start()].rstrip(";&,/")
+            path = path[: marker.start()].rstrip(";&,/")
         path = "".join(char for char in path if char.isprintable())[:256]
         if safe_diagnostic_text(path, fallback="") != path:
             path = ""
@@ -197,6 +215,7 @@ def _safe_flow_field_names(field_names: object) -> list[str]:
     if redacted:
         safe.append("(redacted)")
     return safe
+
 
 _MAX_POST_MFA_HOPS = 12
 _MAX_ENDAUTH_POLLS = 30
@@ -368,15 +387,8 @@ def describe_page_shape(snapshot: ResponseSnapshot) -> str:
     }
     flags = " ".join(f"{k}={int(v)}" for k, v in markers.items())
     title_match = re.search(r"<title[^>]*>([^<]{0,80})", html)
-    title = (
-        safe_diagnostic_text(title_match.group(1).strip(), fallback="-")
-        if title_match
-        else "-"
-    )
-    return (
-        f"page: status={snapshot.status_code} url={location} pgid={pgid} "
-        f"title={title!r} {flags}"
-    )
+    title = safe_diagnostic_text(title_match.group(1).strip(), fallback="-") if title_match else "-"
+    return f"page: status={snapshot.status_code} url={location} pgid={pgid} title={title!r} {flags}"
 
 
 _PAGE_SHAPE_RE = re.compile(
@@ -684,10 +696,7 @@ def is_sso_reload_page(snapshot: ResponseSnapshot) -> bool:
     except (TypeError, ValueError):
         return False
     reload_values = [
-        value
-        for key, values in query.items()
-        if key.lower() == "sso_reload"
-        for value in values
+        value for key, values in query.items() if key.lower() == "sso_reload" for value in values
     ]
     return (
         snapshot.status_code == 200
@@ -860,11 +869,13 @@ class MicrosoftSSOClient:
         # form field NAMES, page shape). Never request/response bodies, never
         # headers, cookies, tokens, or query strings.
         self._flow_log = flow_log or os.environ.get("LIGHTHOUSE_DEBUG_FLOW") or ""
-        self._session.headers.update({
-            "User-Agent": self._user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
+        self._session.headers.update(
+            {
+                "User-Agent": self._user_agent,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
 
     # -- transport -------------------------------------------------------------
 
@@ -976,8 +987,7 @@ class MicrosoftSSOClient:
             d2l_cookies = {
                 cookie.name: str(cookie.value or "")
                 for cookie in self._session.cookies
-                if cookie.name.startswith("d2l")
-                and cookie_domain_accepted(cookie.domain or "")
+                if cookie.name.startswith("d2l") and cookie_domain_accepted(cookie.domain or "")
             }
             if not missing_cookie_names(d2l_cookies):
                 return response
@@ -1023,7 +1033,9 @@ class MicrosoftSSOClient:
         update_mfa_pending(updates)
 
     @staticmethod
-    def _parse_mfa_pending(pending: dict[str, Any]) -> tuple[UserProof, dict[str, Any], dict[str, Any], str]:
+    def _parse_mfa_pending(
+        pending: dict[str, Any],
+    ) -> tuple[UserProof, dict[str, Any], dict[str, Any], str]:
         """Validate pending MFA file shape; raise if corrupted."""
         required = ("mfa_page_url", "mfa_config", "begin", "selected_proof")
         missing = [k for k in required if k not in pending]
@@ -1083,9 +1095,7 @@ class MicrosoftSSOClient:
                     urljoin(kmsi_snap.url, str(mfa_config.get("urlPost") or mfa_page_url)),
                 )
             else:
-                skip_end_auth = bool(
-                    pending.get("end_auth_flow") and pending.get("end_auth_ctx")
-                )
+                skip_end_auth = bool(pending.get("end_auth_flow") and pending.get("end_auth_ctx"))
                 step_snap = self._mfa_finish_after_begin(
                     mfa_page_url,
                     mfa_config,
@@ -1122,10 +1132,7 @@ class MicrosoftSSOClient:
             resumable = False
             with suppress(CredentialStoreError):
                 checkpoint = load_mfa_pending() or {}
-                resumable = bool(
-                    checkpoint.get("end_auth_flow")
-                    and checkpoint.get("end_auth_ctx")
-                )
+                resumable = bool(checkpoint.get("end_auth_flow") and checkpoint.get("end_auth_ctx"))
             if not resumable:
                 clear_mfa_pending()
             raise
@@ -1177,11 +1184,13 @@ class MicrosoftSSOClient:
 
         # Create a fresh session for each login attempt (safe reuse).
         self._session = requests.Session()
-        self._session.headers.update({
-            "User-Agent": self._user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
+        self._session.headers.update(
+            {
+                "User-Agent": self._user_agent,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
 
         # Step 1: Initiate D2L SAML login
         ms_url = self._step_initiate_saml()
@@ -1196,9 +1205,7 @@ class MicrosoftSSOClient:
         snap = self._step_post_credentials(
             ms_config, username, password, skip_username_prepare=True
         )
-        self._record_flow(
-            "PAGE", snap.url, snap.status_code, page_shape=describe_page_shape(snap)
-        )
+        self._record_flow("PAGE", snap.url, snap.status_code, page_shape=describe_page_shape(snap))
         # Aug-2026 Microsoft session-pull interstitial: a form-less 200
         # "Redirecting" page whose $Config asks the client to re-POST the
         # echoed credential params (oPostParams) to urlPost. The bounded
@@ -1272,9 +1279,7 @@ class MicrosoftSSOClient:
         ms_url = self._step_initiate_saml()
         config = self._step_get_ms_config(ms_url)
         config = self._step_prepare_username(config, username)
-        snap = self._step_post_credentials(
-            config, username, password, skip_username_prepare=True
-        )
+        snap = self._step_post_credentials(config, username, password, skip_username_prepare=True)
         # Same session-pull interstitial as login(): re-POST echoed params
         # (bounded) before deciding whether an MFA page was reached.
         snap = self._advance_to_saml(snap, snap.url, checkpoint_kmsi=False)
@@ -1327,7 +1332,7 @@ class MicrosoftSSOClient:
                 if isinstance(content, list):
                     content = content[0] if content else ""
                 if isinstance(content, str):
-                    m = re.search(r'url=(.+)', content, re.IGNORECASE)
+                    m = re.search(r"url=(.+)", content, re.IGNORECASE)
                     if m:
                         return _trusted_url(
                             login_url,
@@ -1538,15 +1543,22 @@ class MicrosoftSSOClient:
             label="Microsoft login",
         )
 
-        user_agent = self._session.headers.get("User-Agent", "")
+        raw_user_agent = self._session.headers.get("User-Agent", "")
+        user_agent = (
+            raw_user_agent
+            if isinstance(raw_user_agent, str)
+            else raw_user_agent.decode("utf-8", "replace")
+        )
         export_cookies: list[dict[str, Any]] = []
         for cookie in self._session.cookies:
-            export_cookies.append({
-                "name": cookie.name,
-                "value": cookie.value,
-                "domain": cookie.domain,
-                "path": cookie.path or "/",
-            })
+            export_cookies.append(
+                {
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path or "/",
+                }
+            )
 
         try:
             manager = sync_playwright()
@@ -1572,7 +1584,7 @@ class MicrosoftSSOClient:
             try:
                 context = browser.new_context(user_agent=user_agent)
                 if export_cookies:
-                    context.add_cookies(export_cookies)
+                    context.add_cookies(cast(Any, export_cookies))
                 page = context.new_page()
                 page.goto(ms_url, wait_until="networkidle", timeout=60000)
                 login_input = page.query_selector('input[name="loginfmt"]')
@@ -1597,7 +1609,7 @@ class MicrosoftSSOClient:
                     step="prepare username",
                     label="Microsoft page",
                 )
-                pw_cookies = context.cookies()
+                pw_cookies: list[dict[str, Any]] = [{**cookie} for cookie in context.cookies()]
             except MicrosoftSSOError:
                 raise
             except Exception as exc:
@@ -1626,9 +1638,7 @@ class MicrosoftSSOClient:
         updated["_ms_url"] = referer
         return updated
 
-    def _step_prepare_username_http(
-        self, config: dict[str, Any], username: str
-    ) -> dict[str, Any]:
+    def _step_prepare_username_http(self, config: dict[str, Any], username: str) -> dict[str, Any]:
         """Mirror the browser's pre-password HTTP requests (Me.htm, SSO probe, GCT)."""
         if not config.get("sFT") or not config.get("sCtx"):
             return config
@@ -1677,15 +1687,11 @@ class MicrosoftSSOClient:
         post_gct_canary = str(updated.get("apiCanary") or canary_hdr)
         self._post_dsso_status(updated, post_gct_canary)
 
-        self._session.cookies.set(
-            "brcap", "0", domain=".login.microsoftonline.com", path="/"
-        )
+        self._session.cookies.set("brcap", "0", domain=".login.microsoftonline.com", path="/")
         _prune_stale_esctx_cookies(self._session)
         return updated
 
-    def _step_prepare_username(
-        self, config: dict[str, Any], username: str
-    ) -> dict[str, Any]:
+    def _step_prepare_username(self, config: dict[str, Any], username: str) -> dict[str, Any]:
         """Establish Microsoft session state after the user enters their username."""
         if not config.get("urlGetCredentialType"):
             return config
@@ -1701,9 +1707,7 @@ class MicrosoftSSOClient:
             )
             return self._step_prepare_username_http(config, username)
 
-    def _step_get_credential_type(
-        self, config: dict[str, Any], username: str
-    ) -> dict[str, Any]:
+    def _step_get_credential_type(self, config: dict[str, Any], username: str) -> dict[str, Any]:
         """Call GetCredentialType to refresh flowToken before password POST."""
         gct_url = config.get("urlGetCredentialType")
         if not gct_url or not config.get("sFT") or not config.get("sCtx"):
@@ -1953,8 +1957,7 @@ class MicrosoftSSOClient:
                 "2FA code is required but was empty.",
                 step="MFA",
                 recovery=(
-                    "Run interactively, or use --totp - and pipe the code after "
-                    "you receive it."
+                    "Run interactively, or use --totp - and pipe the code after you receive it."
                 ),
             )
 
@@ -2060,27 +2063,35 @@ class MicrosoftSSOClient:
         if defer_mfa_to_pending:
             from lighthouse_cli.config import save_mfa_pending
 
-            save_mfa_pending({
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "mfa_method": mfa_method,
-                "mfa_page_url": mfa_snap.url,
-                "mfa_config": {
-                    k: mfa_config[k]
-                    for k in (
-                        "sFT", "sCtx", "canary", "urlEndAuth", "urlPost", "sFTName",
-                        "oPerAuthPollingInterval", "sPOST_Username",
-                    )
-                    if k in mfa_config
-                },
-                "begin": begin_data,
-                "selected_proof": {
-                    "auth_method_id": selected.auth_method_id,
-                    "display": selected.display,
-                    "data": selected.data,
-                    "is_default": selected.is_default,
-                },
-                "cookies": _export_session_cookies(self._session),
-            })
+            save_mfa_pending(
+                {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "mfa_method": mfa_method,
+                    "mfa_page_url": mfa_snap.url,
+                    "mfa_config": {
+                        k: mfa_config[k]
+                        for k in (
+                            "sFT",
+                            "sCtx",
+                            "canary",
+                            "urlEndAuth",
+                            "urlPost",
+                            "sFTName",
+                            "oPerAuthPollingInterval",
+                            "sPOST_Username",
+                        )
+                        if k in mfa_config
+                    },
+                    "begin": begin_data,
+                    "selected_proof": {
+                        "auth_method_id": selected.auth_method_id,
+                        "display": selected.display,
+                        "data": selected.data,
+                        "is_default": selected.is_default,
+                    },
+                    "cookies": _export_session_cookies(self._session),
+                }
+            )
             if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
                 raise MfaPendingError(
                     "Authenticator approval requested.",
@@ -2123,7 +2134,11 @@ class MicrosoftSSOClient:
                 )
 
         return self._mfa_finish_after_begin(
-            mfa_snap.url, mfa_config, selected, begin_data, totp_code or "",
+            mfa_snap.url,
+            mfa_config,
+            selected,
+            begin_data,
+            totp_code or "",
             str(mfa_config.get("sPOST_Username") or ""),
         )
 
@@ -2202,9 +2217,7 @@ class MicrosoftSSOClient:
         polling = mfa_config.get("oPerAuthPollingInterval") or {}
         try:
             raw_poll_seconds = (
-                polling.get(selected.auth_method_id, 2)
-                if isinstance(polling, dict)
-                else 2
+                polling.get(selected.auth_method_id, 2) if isinstance(polling, dict) else 2
             )
             poll_seconds = float(raw_poll_seconds)
         except (TypeError, ValueError):
@@ -2232,8 +2245,11 @@ class MicrosoftSSOClient:
             end_resp = self._post(
                 self._resolve_mfa_url(base_url, str(end_url)),
                 json=build_end_payload(
-                    selected, begin_data, totp_code,
-                    end_flow=end_flow, end_ctx=end_ctx,
+                    selected,
+                    begin_data,
+                    totp_code,
+                    end_flow=end_flow,
+                    end_ctx=end_ctx,
                 ),
                 headers={"Content-Type": "application/json"},
             )
@@ -2299,10 +2315,7 @@ class MicrosoftSSOClient:
                         flush=True,
                         file=sys.stderr,
                     )
-                elif (
-                    raw_entropy not in (None, "")
-                    and shown_entropy != _INVALID_ENTROPY_SENTINEL
-                ):
+                elif raw_entropy not in (None, "") and shown_entropy != _INVALID_ENTROPY_SENTINEL:
                     shown_entropy = _INVALID_ENTROPY_SENTINEL
                     print(
                         "Approve sign-in in Authenticator to continue.",
@@ -2358,7 +2371,11 @@ class MicrosoftSSOClient:
         if totp_code is None:
             if sys.stdin.isatty():
                 print("\n--- Second factor required ---", flush=True, file=sys.stderr)
-                print("Enter the verification code shown on the Microsoft sign-in page.", flush=True, file=sys.stderr)
+                print(
+                    "Enter the verification code shown on the Microsoft sign-in page.",
+                    flush=True,
+                    file=sys.stderr,
+                )
                 totp_code = _getpass.getpass("Enter verification code: ")
             else:
                 totp_code = sys.stdin.readline().strip()
@@ -2521,8 +2538,7 @@ class MicrosoftSSOClient:
         d2l_cookies = {
             cookie.name: str(cookie.value or "")
             for cookie in self._session.cookies
-            if cookie.name.startswith("d2l")
-            and cookie_domain_accepted(cookie.domain or "")
+            if cookie.name.startswith("d2l") and cookie_domain_accepted(cookie.domain or "")
         }
         if not missing_cookie_names(d2l_cookies):
             return
@@ -2553,8 +2569,7 @@ class MicrosoftSSOClient:
         d2l_cookies = {
             cookie.name: str(cookie.value or "")
             for cookie in self._session.cookies
-            if cookie.name.startswith("d2l")
-            and cookie_domain_accepted(cookie.domain or "")
+            if cookie.name.startswith("d2l") and cookie_domain_accepted(cookie.domain or "")
         }
         if home_resp.status_code < 400 and not missing_cookie_names(d2l_cookies):
             return
@@ -2570,9 +2585,7 @@ class MicrosoftSSOClient:
         cookies: dict[str, str] = {}
 
         for cookie in self._session.cookies:
-            if cookie.name.startswith("d2l") and cookie_domain_accepted(
-                cookie.domain or ""
-            ):
+            if cookie.name.startswith("d2l") and cookie_domain_accepted(cookie.domain or ""):
                 cookie_val = cookie.value if cookie.value is not None else ""
                 cookies[cookie.name] = cookie_val
 
@@ -2582,7 +2595,7 @@ class MicrosoftSSOClient:
                 f"Missing required D2L cookies after SSO: {missing}",
                 step="extract cookies",
                 recovery="The login may have completed but cookies were not set. "
-                         "Try again or check your account status.",
+                "Try again or check your account status.",
             )
 
         return cookies

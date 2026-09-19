@@ -12,9 +12,10 @@ from .api import (
     SubmissionOutcomeUnknownError,
     resolve_course_id,
 )
-from .display import format_user_error, output_json as _output_json, safe_display_text, utc_now_iso as _utc_now_iso
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
+from .display import utc_now_iso as _utc_now_iso
 from .utils import get_course_name as _get_course_name
-
 
 _MAX_DISPLAY_NAME_LENGTH = 256
 _MAX_SUBMISSION_ID = (1 << 63) - 1
@@ -140,18 +141,24 @@ def cmd_submit(
     submission_id = _safe_submission_id(result.get("submissionId"))
     output_filename = display_filename
     if json_output:
-        _output_json({
-            "submission_id": submission_id, "folder_id": folder_id_int,
-            "folder_name": folder_name, "course_id": org_id,
-            "course_name": course_name,
-            "file": {"name": output_filename, "size_bytes": len(file_bytes)},
-            "submitted_at": submitted_at,
-        })
+        _output_json(
+            {
+                "submission_id": submission_id,
+                "folder_id": folder_id_int,
+                "folder_name": folder_name,
+                "course_id": org_id,
+                "course_name": course_name,
+                "file": {"name": output_filename, "size_bytes": len(file_bytes)},
+                "submitted_at": submitted_at,
+            }
+        )
     else:
-        print(f"Submitted successfully!\n"
-              f"  Submission ID: {submission_id}\n  Folder: {folder_name}\n"
-              f"  Course: {course_name}\n  File: {output_filename}\n"
-              f"  Submitted at: {submitted_at}")
+        print(
+            f"Submitted successfully!\n"
+            f"  Submission ID: {submission_id}\n  Folder: {folder_name}\n"
+            f"  Course: {course_name}\n  File: {output_filename}\n"
+            f"  Submitted at: {submitted_at}"
+        )
 
     return 0
 
@@ -264,9 +271,7 @@ def _resolve_folder_id(client: LighthouseClient, org_id: int, identifier: object
 
     # Do not echo folder IDs, names, or the caller's identifier in a normal
     # diagnostic; those values originate in untrusted API/user input.
-    raise FileNotFoundError(
-        "Folder not found. Run: lighthouse assignments"
-    )
+    raise FileNotFoundError("Folder not found. Run: lighthouse assignments")
 
 
 class _InvalidFolderIdentifierError(ValueError):

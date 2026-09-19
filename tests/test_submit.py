@@ -54,6 +54,7 @@ class _TtyStringIO(io.StringIO):
 # Test fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
@@ -66,7 +67,10 @@ def sample_submission_response() -> dict:
         "submissionId": 99999,
         "submittedBy": {"value": "12345", "displayName": "Student Name"},
         "submittedAt": "2026-05-11T10:30:00Z",
-        "text": {"Text": "Submitted via lighthouse-cli: test.pdf", "Html": "<p>Submitted via lighthouse-cli: test.pdf</p>"},
+        "text": {
+            "Text": "Submitted via lighthouse-cli: test.pdf",
+            "Html": "<p>Submitted via lighthouse-cli: test.pdf</p>",
+        },
         "attachments": [
             {"FileName": "test.pdf", "FileSize": 4096},
         ],
@@ -85,7 +89,11 @@ def temp_pdf_file(tmp_path) -> Path:
 def mock_courses() -> list[dict]:
     return [
         {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "009_BME2125_2025-2026"},
-        {"OrgUnitId": 44348, "Name": "Engineering Mathematics III", "Code": "009_MAT3001_2025-2026"},
+        {
+            "OrgUnitId": 44348,
+            "Name": "Engineering Mathematics III",
+            "Code": "009_MAT3001_2025-2026",
+        },
     ]
 
 
@@ -101,6 +109,7 @@ def mock_dropbox_folders() -> list[dict]:
 # Helper: mock client factory
 # ---------------------------------------------------------------------------
 
+
 def _make_mock_response(status_code: int, json_data: dict | None = None) -> MagicMock:
     mock_resp = MagicMock()
     mock_resp.status_code = status_code
@@ -111,19 +120,23 @@ def _make_mock_response(status_code: int, json_data: dict | None = None) -> Magi
     return mock_resp
 
 
-def _make_client_with_mock_session(status_code: int, json_data: dict | None = None) -> tuple[LighthouseClient, list]:
+def _make_client_with_mock_session(
+    status_code: int, json_data: dict | None = None
+) -> tuple[LighthouseClient, list]:
     """Create a client with a mock session that captures requests."""
     captured: list = []
 
     def mock_request(method, url, **kwargs):
-        captured.append({
-            "method": method,
-            "url": url,
-            "headers": kwargs.get("headers", {}),
-            "data": kwargs.get("data", b""),
-            "cookies": kwargs.get("cookies", {}),
-            "timeout": kwargs.get("timeout"),
-        })
+        captured.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": kwargs.get("headers", {}),
+                "data": kwargs.get("data", b""),
+                "cookies": kwargs.get("cookies", {}),
+                "timeout": kwargs.get("timeout"),
+            }
+        )
         return _make_mock_response(status_code, json_data)
 
     mock_session = MagicMock()
@@ -133,7 +146,12 @@ def _make_client_with_mock_session(status_code: int, json_data: dict | None = No
     # These tests isolate the multipart POST after session bootstrap.
     client._csrf_token = "synthetic-csrf"
     client._loaded = True
-    client._cookies = {"d2lSecureSessionVal": "abc", "d2lSessionVal": "def", "d2lSameSiteCanaryA": "x", "d2lSameSiteCanaryB": "y"}
+    client._cookies = {
+        "d2lSecureSessionVal": "abc",
+        "d2lSessionVal": "def",
+        "d2lSameSiteCanaryA": "x",
+        "d2lSameSiteCanaryB": "y",
+    }
     client._session = mock_session
 
     return client, captured
@@ -142,6 +160,7 @@ def _make_client_with_mock_session(status_code: int, json_data: dict | None = No
 # ---------------------------------------------------------------------------
 # API-level tests: submit_file method
 # ---------------------------------------------------------------------------
+
 
 class TestSubmitFile:
     """Tests for LighthouseClient.submit_file() method."""
@@ -170,7 +189,10 @@ class TestSubmitFile:
         body = req["data"]
         assert b"Content-Type: application/json" in body
         assert b'"Text": "My submission"' in body
-        assert b"Content-Type: application/pdf" in body or b"Content-Type: application/octet-stream" in body
+        assert (
+            b"Content-Type: application/pdf" in body
+            or b"Content-Type: application/octet-stream" in body
+        )
         assert b'Content-Disposition: form-data; name=""; filename="test.pdf"' in body
         assert b"test file content" in body
 
@@ -269,9 +291,7 @@ class TestSubmitFile:
         assert len(captured) == 1
         assert captured[0]["method"] == "POST"
 
-    def test_submit_file_uses_correct_api_path(
-        self, sample_submission_response: dict
-    ) -> None:
+    def test_submit_file_uses_correct_api_path(self, sample_submission_response: dict) -> None:
         """Verify the correct D2L API path is used."""
         client, captured = _make_client_with_mock_session(200, sample_submission_response)
 
@@ -299,7 +319,9 @@ class TestSubmitFile:
         """RichText JSON part contains both Text and Html fields."""
         client, captured = _make_client_with_mock_session(200, sample_submission_response)
 
-        client.submit_file(org_unit_id=44347, folder_id=789, file_bytes=b"x", filename="x.pdf", description="Hello")
+        client.submit_file(
+            org_unit_id=44347, folder_id=789, file_bytes=b"x", filename="x.pdf", description="Hello"
+        )
 
         body = captured[0]["data"].decode("utf-8")
         assert '"Text": "Hello"' in body
@@ -312,7 +334,9 @@ class TestSubmitFile:
         client, captured = _make_client_with_mock_session(200, sample_submission_response)
 
         file_bytes = b"x" * 100
-        client.submit_file(org_unit_id=44347, folder_id=789, file_bytes=file_bytes, filename="x.pdf")
+        client.submit_file(
+            org_unit_id=44347, folder_id=789, file_bytes=file_bytes, filename="x.pdf"
+        )
 
         headers = captured[0]["headers"]
         assert "Content-Length" in headers
@@ -334,7 +358,7 @@ class TestSubmitFile:
 
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(SessionExpiredError) as exc_info:
@@ -351,7 +375,7 @@ class TestSubmitFile:
         mock_session.request.return_value = mock_resp
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(NetworkError, match="unexpected redirect"):
@@ -383,7 +407,7 @@ class TestSubmitFile:
         mock_session.request.return_value = mock_resp
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(NetworkError, match="unexpected redirect"):
@@ -417,7 +441,7 @@ class TestSubmitFile:
         mock_session.request.return_value = mock_resp
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(SessionExpiredError):
@@ -435,12 +459,14 @@ class TestSubmitFile:
 # CLI-level tests: submit command
 # ---------------------------------------------------------------------------
 
+
 class TestSubmitCommand:
     """Tests for the lighthouse submit CLI command."""
 
     def test_submit_command_exists(self, cli_runner: CliRunner) -> None:
         """VAL-CROSS-011: submit command appears in help."""
         from lighthouse_cli.cli import cli
+
         result = cli_runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "submit" in result.output
@@ -448,6 +474,7 @@ class TestSubmitCommand:
     def test_submit_help_shows_options(self, cli_runner: CliRunner) -> None:
         """VAL-CROSS-011: submit --help shows all options."""
         from lighthouse_cli.cli import cli
+
         result = cli_runner.invoke(cli, ["submit", "--help"])
         assert result.exit_code == 0
         assert "--file" in result.output
@@ -457,6 +484,7 @@ class TestSubmitCommand:
     def test_submit_requires_file_flag(self, cli_runner: CliRunner) -> None:
         """VAL-SUBMIT-019: Missing --file produces usage error."""
         from lighthouse_cli.cli import cli
+
         result = cli_runner.invoke(cli, ["submit", "44347", "789"], catch_exceptions=True)
         assert result.exit_code != 0
         # Click gives exit code 2 for usage errors
@@ -683,7 +711,10 @@ class TestSubmitCommand:
         from lighthouse_cli.cli import cli
 
         response = {
-            "submissionId": {"token": "RESPONSE_TOKEN_SENTINEL", "password": "RESPONSE_PASSWORD_SENTINEL"},
+            "submissionId": {
+                "token": "RESPONSE_TOKEN_SENTINEL",
+                "password": "RESPONSE_PASSWORD_SENTINEL",
+            },
             "submittedAt": {"token": "RESPONSE_TIMESTAMP_SENTINEL"},
         }
         with patch("lighthouse_cli.submit.LighthouseClient") as mock_client_cls:
@@ -1301,9 +1332,7 @@ class TestSubmitCommand:
 
         assert exit_code == 1
         parsed = json_module.loads(stdout.getvalue())
-        assert parsed == {
-            "error": "Remote server error (HTTP 500). Run: lighthouse auth login"
-        }
+        assert parsed == {"error": "Remote server error (HTTP 500). Run: lighthouse auth login"}
         combined = stdout.getvalue() + stderr.getvalue()
         for sentinel in (
             "SUBMIT_TOKEN_SENTINEL",
@@ -1342,9 +1371,7 @@ class TestSubmitCommand:
             )
 
         assert result.exit_code == 1
-        assert json_module.loads(result.stdout) == {
-            "error": "Remote server error (HTTP 500)."
-        }
+        assert json_module.loads(result.stdout) == {"error": "Remote server error (HTTP 500)."}
         for sentinel in (
             "CLI_TOKEN_SENTINEL",
             "CLI_BODY_SENTINEL",
@@ -1463,9 +1490,7 @@ class TestSubmitCommand:
             result = cli_runner.invoke(cli, args)
 
         message = (
-            json_module.loads(result.stdout)["error"]
-            if json_output
-            else result.output
+            json_module.loads(result.stdout)["error"] if json_output else result.output
         ).casefold()
         assert result.exit_code == 1
         assert "submission outcome is unknown" in message
@@ -1681,7 +1706,9 @@ class TestSubmitConfirmation:
             mock_client.get_dropbox_folder_detail.return_value = {"Name": "Assignment 1 - Signals"}
             mock_client.submit_file.return_value = sample_submission_response
 
-            with patch("builtins.input", side_effect=AssertionError("unexpected prompt")) as input_mock:
+            with patch(
+                "builtins.input", side_effect=AssertionError("unexpected prompt")
+            ) as input_mock:
                 result = cli_runner.invoke(
                     cli,
                     ["submit", "44347", "789", "--file", str(temp_pdf_file), "--yes", "--json"],
@@ -1876,6 +1903,7 @@ class TestSubmitConfirmation:
 # ---------------------------------------------------------------------------
 # Multipart request invariants
 # ---------------------------------------------------------------------------
+
 
 class TestSubmissionIntegration:
     """End-to-end invariants exercised with the HTTP transport mocked."""

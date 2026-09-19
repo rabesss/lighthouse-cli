@@ -21,6 +21,7 @@ def cli_runner() -> CliRunner:
 # VAL-ASGN-001 & VAL-ASGN-002: Single course listing
 # ---------------------------------------------------------------------------
 
+
 class TestSingleCourseAssignments:
     """Test lighthouse assignments COURSE_ID with table and JSON output."""
 
@@ -44,11 +45,16 @@ class TestSingleCourseAssignments:
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347"])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -75,11 +81,16 @@ class TestSingleCourseAssignments:
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347", "--json"])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -102,11 +113,16 @@ class TestSingleCourseAssignments:
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347", "--json"])
 
             assert result.exit_code == 0
@@ -122,17 +138,27 @@ class TestSingleCourseAssignments:
                 "Name": "Link Assignment",
                 "DueDate": "2026-05-20T23:59:00Z",
                 "Attachments": [
-                    {"Id": 10, "FileName": "https://example.com/resource", "Size": 0, "Type": "Link"},
+                    {
+                        "Id": 10,
+                        "FileName": "https://example.com/resource",
+                        "Size": 0,
+                        "Type": "Link",
+                    },
                     {"Id": 11, "FileName": "question.pdf", "Size": 4096, "Type": "File"},
                 ],
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347", "--json"])
 
             assert result.exit_code == 0
@@ -155,11 +181,16 @@ class TestSingleCourseAssignments:
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347", "--json"])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -186,11 +217,16 @@ class TestSingleCourseAssignments:
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347"])
             assert result.exit_code == 0
             # HTML tags should be stripped from display
@@ -220,11 +256,16 @@ class TestSingleCourseAssignments:
             },
         ]
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347"])
             assert result.exit_code == 0
             assert "Opens:" in result.output
@@ -232,10 +273,13 @@ class TestSingleCourseAssignments:
 
     def test_course_not_found_error(self, cli_runner):
         """Non-existent course shows error with remediation hint."""
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Signals", "Code": "X"},
-        ]):
-
+        with patch.object(
+            LighthouseClient,
+            "get_courses",
+            return_value=[
+                {"OrgUnitId": 44347, "Name": "Signals", "Code": "X"},
+            ],
+        ):
             result = cli_runner.invoke(cli, ["assignments", "nonexistent"])
 
             assert result.exit_code == 1
@@ -246,6 +290,7 @@ class TestSingleCourseAssignments:
 # ---------------------------------------------------------------------------
 # VAL-ASGN-003 & VAL-ASGN-004: All-courses listing
 # ---------------------------------------------------------------------------
+
 
 class TestAllCoursesAssignments:
     """Test lighthouse assignments (no course) iterates all courses."""
@@ -260,7 +305,12 @@ class TestAllCoursesAssignments:
             {"Id": 101, "Name": "Assign A1", "DueDate": "2026-05-20T23:59:00Z", "Attachments": []},
         ]
         folders_b = [
-            {"Id": 201, "Name": "Assign B1", "DueDate": "2026-05-21T23:59:00Z", "Attachments": [{"Id": 1, "FileName": "f.pdf", "Size": 100, "Type": "File"}]},
+            {
+                "Id": 201,
+                "Name": "Assign B1",
+                "DueDate": "2026-05-21T23:59:00Z",
+                "Attachments": [{"Id": 1, "FileName": "f.pdf", "Size": 100, "Type": "File"}],
+            },
         ]
 
         def get_dropbox_folders(cid):
@@ -270,9 +320,10 @@ class TestAllCoursesAssignments:
                 return folders_b
             return []
 
-        with patch.object(LighthouseClient, "get_courses", return_value=courses), \
-             patch.object(LighthouseClient, "get_dropbox_folders", side_effect=get_dropbox_folders):
-
+        with (
+            patch.object(LighthouseClient, "get_courses", return_value=courses),
+            patch.object(LighthouseClient, "get_dropbox_folders", side_effect=get_dropbox_folders),
+        ):
             result = cli_runner.invoke(cli, ["assignments"])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -297,9 +348,10 @@ class TestAllCoursesAssignments:
                 return folders_b
             return []
 
-        with patch.object(LighthouseClient, "get_courses", return_value=courses), \
-             patch.object(LighthouseClient, "get_dropbox_folders", side_effect=get_dropbox_folders):
-
+        with (
+            patch.object(LighthouseClient, "get_courses", return_value=courses),
+            patch.object(LighthouseClient, "get_dropbox_folders", side_effect=get_dropbox_folders),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "--json"])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -316,16 +368,22 @@ class TestAllCoursesAssignments:
 # VAL-ASGN-005: Course with no assignments
 # ---------------------------------------------------------------------------
 
+
 class TestCourseWithNoAssignments:
     """Test course with zero dropbox folders completes gracefully."""
 
     def test_course_with_zero_assignments_human_mode(self, cli_runner):
         """VAL-ASGN-005: Course with no folders shows 'No assignments found' and exits 0."""
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=[]), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Empty Course", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=[]),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Empty Course", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347"])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -333,11 +391,16 @@ class TestCourseWithNoAssignments:
 
     def test_course_with_zero_assignments_json_mode(self, cli_runner):
         """VAL-ASGN-005: JSON mode returns empty assignments array with exit 0."""
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=[]), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Empty Course", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", return_value=[]),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Empty Course", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347", "--json"])
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -350,6 +413,7 @@ class TestCourseWithNoAssignments:
 # Session expiry handling
 # ---------------------------------------------------------------------------
 
+
 class TestSessionExpiry:
     """Test session expiry produces actionable error."""
 
@@ -360,11 +424,16 @@ class TestSessionExpiry:
         def raise_expired(cid):
             raise SessionExpiredError("Session expired. Run: lighthouse auth login")
 
-        with patch.object(LighthouseClient, "get_dropbox_folders", side_effect=raise_expired), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
-             ]):
-
+        with (
+            patch.object(LighthouseClient, "get_dropbox_folders", side_effect=raise_expired),
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Test", "Code": "X"},
+                ],
+            ),
+        ):
             result = cli_runner.invoke(cli, ["assignments", "44347"])
 
             assert result.exit_code == 1

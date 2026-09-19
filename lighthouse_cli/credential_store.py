@@ -180,9 +180,7 @@ def _decode_kdf_salt(salt_b64: str) -> bytes:
             "Sealed data has an invalid KDF salt and cannot be opened."
         ) from None
     if not salt:
-        raise CredentialStoreError(
-            "Sealed data has an invalid KDF salt and cannot be opened."
-        )
+        raise CredentialStoreError("Sealed data has an invalid KDF salt and cannot be opened.")
     return salt
 
 
@@ -313,9 +311,7 @@ class CredentialStore:
     ) -> None:
         """Atomically write ``metadata`` (plaintext) + sealed ``secret``."""
         if not isinstance(metadata, dict) or not isinstance(secret, dict):
-            raise CredentialStoreError(
-                "Credential data is malformed and cannot be sealed."
-            )
+            raise CredentialStoreError("Credential data is malformed and cannot be sealed.")
         # Check both the directory and final target lexically before any
         # mkdir/chmod or atomic replacement.  In particular, os.replace() is
         # safe for a symlink target itself but a read would follow it, while a
@@ -327,8 +323,7 @@ class CredentialStore:
             self.config_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise CredentialStoreError(
-                f"Credential storage directory could not be created "
-                f"({exc.__class__.__name__})."
+                f"Credential storage directory could not be created ({exc.__class__.__name__})."
             ) from None
         try:
             self.config_dir.chmod(0o700)
@@ -337,9 +332,7 @@ class CredentialStore:
         try:
             plaintext = json.dumps(secret, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError):
-            raise CredentialStoreError(
-                "Secret data is malformed and cannot be sealed."
-            ) from None
+            raise CredentialStoreError("Secret data is malformed and cannot be sealed.") from None
         doc = self._build_document(metadata, plaintext)
         try:
             atomic_write(path, doc, mode=mode)
@@ -419,8 +412,7 @@ class CredentialStore:
             blob = self.credentials_file.read_bytes()
         except OSError as exc:
             raise CredentialStoreError(
-                f"{self.credentials_file.name} could not be read "
-                f"({exc.__class__.__name__})."
+                f"{self.credentials_file.name} could not be read ({exc.__class__.__name__})."
             ) from None
         if not blob.lstrip().startswith(b"{"):
             return self._load_and_migrate_legacy(blob)
@@ -482,7 +474,9 @@ class CredentialStore:
         # Migration re-seals under the provider that just decrypted the data —
         # never the current env-first selection.
         doc = self._build_document(
-            {}, plaintext, force_source="keyring",
+            {},
+            plaintext,
+            force_source="keyring",
         )
         try:
             atomic_write(self.credentials_file, doc, mode=0o600)
@@ -519,15 +513,12 @@ class CredentialStore:
             passphrase = _passphrase_from_env()
             if passphrase is None:
                 raise CredentialStoreError(
-                    f"{PASSPHRASE_ENV} is not set; cannot seal with the "
-                    "passphrase key source."
+                    f"{PASSPHRASE_ENV} is not set; cannot seal with the passphrase key source."
                 )
             salt = os.urandom(16)
             doc["kdf_salt"] = base64.b64encode(salt).decode("ascii")
             doc["kdf_iterations"] = _KDF_ITERATIONS
-            fernet = _fernet_from_key(
-                _derive_passphrase_key(passphrase, salt, _KDF_ITERATIONS)
-            )
+            fernet = _fernet_from_key(_derive_passphrase_key(passphrase, salt, _KDF_ITERATIONS))
         else:
             fernet = _fernet_from_key(_keyring_key(create=True))
         doc["ciphertext"] = fernet.encrypt(plaintext).decode("ascii")
@@ -563,9 +554,7 @@ class CredentialStore:
                     iterations = _LEGACY_KDF_ITERATIONS
                 else:
                     raw_iterations = envelope.get("kdf_iterations")
-                    if not isinstance(raw_iterations, int) or isinstance(
-                        raw_iterations, bool
-                    ):
+                    if not isinstance(raw_iterations, int) or isinstance(raw_iterations, bool):
                         raise CredentialStoreError(
                             "Sealed data records an invalid KDF iteration count "
                             "and cannot be opened."
@@ -576,9 +565,7 @@ class CredentialStore:
                             f"{raw_iterations} and cannot be opened."
                         )
                     iterations = raw_iterations
-                key = _derive_passphrase_key(
-                    passphrase, _decode_kdf_salt(salt_b64), iterations
-                )
+                key = _derive_passphrase_key(passphrase, _decode_kdf_salt(salt_b64), iterations)
             elif source == "keyring":
                 key = _keyring_key(create=False)
             else:
@@ -599,8 +586,7 @@ class CredentialStore:
             ) from None
         except (binascii.Error, UnicodeError, ValueError) as exc:
             raise CredentialStoreError(
-                "Sealed data is corrupted "
-                f"({exc.__class__.__name__}) and cannot be opened."
+                f"Sealed data is corrupted ({exc.__class__.__name__}) and cannot be opened."
             ) from None
 
 

@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
-from typing import Any
+from typing import Any, cast
 
 from .api import LighthouseClient, SessionExpiredError, resolve_course_id
 from .assignments import (
@@ -18,9 +18,13 @@ from .assignments import (
     safe_assignment_folder_name,
     safe_attachment_filename,
 )
-from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short
+from .display import error as _error
+from .display import fmt_date as _fmt_date
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
+from .display import print_table as _print_table
+from .display import short as _short
 from .utils import _course_identifier, get_enrolled_course_catalog
-
 
 # ---------------------------------------------------------------------------
 # Shared helper for "one course or all courses" commands
@@ -37,6 +41,7 @@ MAX_WORKERS = 5
 _MAX_DISPLAY_TEXT_LENGTH = 512
 _MAX_RICH_TEXT_LENGTH = 4096
 _MAX_ANNOUNCEMENT_ATTACHMENT_SIZE = (1 << 63) - 1
+
 
 def _close_client(client: Any) -> None:
     """Close a client when its implementation exposes an explicit close hook.
@@ -75,11 +80,15 @@ def _emit_all_course_limit_error(
     message = _all_course_limit_message(course_count)
     print(f"Error: {message}", file=sys.stderr)
     if json_output:
-        _output_json([{
-            "course_id": None,
-            collection_key: [],
-            "error": message,
-        }])
+        _output_json(
+            [
+                {
+                    "course_id": None,
+                    collection_key: [],
+                    "error": message,
+                }
+            ]
+        )
     return 1
 
 
@@ -137,7 +146,7 @@ def _for_course_or_all(
             payload, failed = _normalise_json_payload(result, resolved_id, collection_key)
             _output_json(payload)
             return 1 if failed else 0
-        return result
+        return cast(int, result)
 
     try:
         courses = get_enrolled_course_catalog(client)
@@ -241,9 +250,11 @@ def _course_sort_key(payload: dict[str, Any]) -> tuple[int, int | str]:
     """Sort numeric course IDs numerically and malformed IDs deterministically."""
     value = payload.get("course_id")
     try:
-        return 0, int(value)
+        if isinstance(value, (int, float, str)):
+            return 0, int(value)
     except (TypeError, ValueError):
-        return 1, "" if value is None else str(value)
+        pass
+    return 1, "" if value is None else str(value)
 
 
 def _course_error_payload(
@@ -252,7 +263,9 @@ def _course_error_payload(
     error: Exception | str,
 ) -> dict[str, Any]:
     """Build the stable JSON shape used for a failed course fetch."""
-    message = _exception_message(error) if isinstance(error, Exception) else format_user_error(str(error))
+    message = (
+        _exception_message(error) if isinstance(error, Exception) else format_user_error(str(error))
+    )
     return {"course_id": _course_identifier(course_id), collection_key: [], "error": message}
 
 
@@ -328,7 +341,6 @@ def _emit_command_error(
         _output_json([payload] if all_courses else payload)
         return 1
     return _error(error)
-
 
 
 def _show_with_error_handling(
@@ -579,13 +591,15 @@ def _normalise_grade_schema(value: Any) -> list[dict[str, Any]]:
         if grade_id is None:
             continue
         weight = _safe_grade_scalar(record.get("Weight"))
-        schema.append({
-            "id": grade_id,
-            "name": _safe_announcement_text(record.get("Name")),
-            "weight": weight if weight is not None else "",
-            "type": _safe_announcement_text(record.get("GradeType")),
-            "max_points": _safe_grade_number(record.get("MaxPoints")),
-        })
+        schema.append(
+            {
+                "id": grade_id,
+                "name": _safe_announcement_text(record.get("Name")),
+                "weight": weight if weight is not None else "",
+                "type": _safe_announcement_text(record.get("GradeType")),
+                "max_points": _safe_grade_number(record.get("MaxPoints")),
+            }
+        )
     return schema
 
 
@@ -630,7 +644,7 @@ def _show_course_grades(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display grades for a single course.
 
     Returns int (exit code) when json_output=False, or dict when json_output=True.
@@ -652,11 +666,16 @@ def _show_course_grades(
         if den is None or den == 0:
             den = g["max_points"]
         display_denominator = den if den is not None else "–"
-        merged.append({
-            "name": g["name"], "weight": g["weight"],
-            "grade": f"{num}/{display_denominator}" if num is not None else f"–/{display_denominator}",
-            "type": g["type"],
-        })
+        merged.append(
+            {
+                "name": g["name"],
+                "weight": g["weight"],
+                "grade": f"{num}/{display_denominator}"
+                if num is not None
+                else f"–/{display_denominator}",
+                "type": g["type"],
+            }
+        )
 
     if json_output:
         return {"course_id": org_id, "grades": merged}
@@ -666,7 +685,11 @@ def _show_course_grades(
             print("No grades found for this course.")
         return 0
 
-    _print_table(["Item", "Grade", "Weight", "Type"], [[m["name"], m["grade"], str(m["weight"]), m["type"]] for m in merged], title=f"Grades – {title or str(org_id)}")
+    _print_table(
+        ["Item", "Grade", "Weight", "Type"],
+        [[m["name"], m["grade"], str(m["weight"]), m["type"]] for m in merged],
+        title=f"Grades – {title or str(org_id)}",
+    )
     return 0
 
 
@@ -680,12 +703,13 @@ def _show_announcements(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display announcements for a single course."""
+
     def _fetch(org_unit_id: int) -> list[dict[str, Any]]:
         return _normalise_announcements(client.get_announcements(org_unit_id))
 
-    def _render(announcements, t):
+    def _render(announcements: list[dict[str, Any]], t: str) -> None:
         print(f"\n📢 {t}")
         for a in announcements:
             print(f"  [{_fmt_date(a.get('CreatedDate'))}] {a.get('Title', '')}")
@@ -701,6 +725,7 @@ def _show_announcements(
                     if not isinstance(size, (int, float)) or isinstance(size, bool):
                         size = 0
                     print(f"    📎 {att.get('FileName', '')} ({size / 1024:.0f} KB)")
+
     return _show_with_error_handling(
         org_id,
         _fetch,
@@ -722,16 +747,26 @@ def _show_calendar(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display calendar events for a single course."""
+
     def _fetch(org_unit_id: int) -> list[dict[str, Any]]:
         return _normalise_calendar_events(client.get_calendar(org_unit_id))
 
-    def _render(events, t):
-        _print_table(["Date", "Title", "Course"], [
-            [_fmt_date(e.get("StartDateTime")), _short(_display_text(e.get("Title", "")), 40), e.get("OrgUnitName", "")]
-            for e in events
-        ], title=f"Calendar – {t}")
+    def _render(events: list[dict[str, Any]], t: str) -> None:
+        _print_table(
+            ["Date", "Title", "Course"],
+            [
+                [
+                    _fmt_date(e.get("StartDateTime")),
+                    _short(_display_text(e.get("Title", "")), 40),
+                    e.get("OrgUnitName", ""),
+                ]
+                for e in events
+            ],
+            title=f"Calendar – {t}",
+        )
+
     return _show_with_error_handling(
         org_id,
         _fetch,
@@ -757,7 +792,7 @@ def _rich_text_string(value: Any) -> str | None:
     Brightspace normally returns ``{"Text": ..., "Html": ...}``, but nested
     ``Text``/``Html`` objects and plain strings also occur across endpoint
     versions. Walk those shapes iteratively so malformed upstream data cannot
-    trigger recursion failures or be rendered through ``str(dict)``. The
+    trigger recursion failures or be rendered through ``str(dict[str, Any])``. The
     bounded walk also keeps a cyclic response from hanging the command.
     """
     pending: list[tuple[Any, int]] = [(value, 0)]
@@ -782,9 +817,7 @@ def _rich_text_string(value: Any) -> str | None:
             pending.append((text_value, depth + 1))
 
         html_value = current.get("Html")
-        if isinstance(html_value, dict) or (
-            isinstance(html_value, str) and html_value
-        ):
+        if isinstance(html_value, dict) or (isinstance(html_value, str) and html_value):
             pending.append((html_value, depth + 1))
     return None
 
@@ -799,8 +832,7 @@ def _strip_html(value: Any) -> str:
     stripped = re.sub(r"[\r\n\t\f\v]+", " ", stripped)
     decoded = html.unescape(stripped).strip()
     if any(
-        character in "\r\n\t\f\v"
-        or (not character.isprintable() and not character.isspace())
+        character in "\r\n\t\f\v" or (not character.isprintable() and not character.isspace())
         for character in decoded
     ):
         return ""
@@ -831,7 +863,7 @@ def _show_course_assignments(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display dropbox folders (assignments) for a single course.
 
     Returns int (exit code) when json_output=False, or dict when json_output=True.
@@ -852,7 +884,7 @@ def _show_course_assignments(
         )
 
     # Process folders into structured format
-    assignments = []
+    assignments: list[dict[str, Any]] = []
     seen_folder_ids: set[int] = set()
     for f in folders:
         if not isinstance(f, dict):
@@ -925,22 +957,20 @@ def _show_course_assignments(
             attachment_type = _safe_announcement_text(attachment_type)
             if not attachment_type:
                 attachment_type = "File"
-            attachments.append({
-                "file_id": file_id,
-                "file_name": file_name,
-                "size": size,
-                "attachment_type": attachment_type,
-            })
-
-
+            attachments.append(
+                {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "size": size,
+                    "attachment_type": attachment_type,
+                }
+            )
 
         # Availability info
         availability = f.get("Availability")
         if not isinstance(availability, dict):
             availability = {}
-        instructions = _safe_rich_text(
-            _rich_text_string(f.get("CustomInstructions"))
-        )
+        instructions = _safe_rich_text(_rich_text_string(f.get("CustomInstructions")))
         instructions_preview = _short(_strip_html(instructions), 80) if instructions else None
         if not instructions_preview:
             instructions_preview = None
@@ -953,20 +983,25 @@ def _show_course_assignments(
             category_name = _safe_announcement_text(f.get("SubmissionType"))
         start_date = _safe_announcement_text(availability.get("StartDate")) or None
         end_date = _safe_announcement_text(availability.get("EndDate")) or None
-        assignments.append({
-            "folder_id": folder_id,
-            "name": safe_assignment_folder_name(
-                _strip_html(f.get("Name", "")),
-                folder_id,
-                fallback=False,
-            ),
-            "due_date": due_date,
-            "attachment_count": len(attachments), "attachments": attachments,
-            "custom_instructions": instructions or None,
-            "custom_instructions_preview": instructions_preview,
-            "submission_type": category_name,
-            "availability": {"start": start_date, "end": end_date} if (start_date or end_date) else None,
-        })
+        assignments.append(
+            {
+                "folder_id": folder_id,
+                "name": safe_assignment_folder_name(
+                    _strip_html(f.get("Name", "")),
+                    folder_id,
+                    fallback=False,
+                ),
+                "due_date": due_date,
+                "attachment_count": len(attachments),
+                "attachments": attachments,
+                "custom_instructions": instructions or None,
+                "custom_instructions_preview": instructions_preview,
+                "submission_type": category_name,
+                "availability": {"start": start_date, "end": end_date}
+                if (start_date or end_date)
+                else None,
+            }
+        )
 
     if json_output:
         return {"course_id": org_id, "assignments": assignments}
@@ -979,10 +1014,18 @@ def _show_course_assignments(
 
     print(f"\n📋 {title or str(org_id)}")
 
-    _print_table(["ID", "Name", "Due Date", "Attachments"], [
-        [str(a["folder_id"]), _short(a["name"], 40), _fmt_date(a["due_date"]), str(a["attachment_count"])]
-        for a in assignments
-    ])
+    _print_table(
+        ["ID", "Name", "Due Date", "Attachments"],
+        [
+            [
+                str(a["folder_id"]),
+                _short(a["name"], 40),
+                _fmt_date(a["due_date"]),
+                str(a["attachment_count"]),
+            ]
+            for a in assignments
+        ],
+    )
 
     for a in assignments:
         if a["custom_instructions_preview"]:
@@ -1004,16 +1047,27 @@ def _show_course_quizzes(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display quizzes for a single course."""
+
     def _fetch(org_unit_id: int) -> list[dict[str, Any]]:
         return _normalise_quizzes(client.get_quizzes(org_unit_id))
 
-    def _render(quizzes, t):
-        _print_table(["ID", "Name", "Start", "End"], [
-            [str(q.get("QuizId", "")), _short(_display_text(q.get("Name", "")), 35), _fmt_date(q.get("StartDate")), _fmt_date(q.get("EndDate"))]
-            for q in quizzes
-        ], title=f"Quizzes – {t}")
+    def _render(quizzes: list[dict[str, Any]], t: str) -> None:
+        _print_table(
+            ["ID", "Name", "Start", "End"],
+            [
+                [
+                    str(q.get("QuizId", "")),
+                    _short(_display_text(q.get("Name", "")), 35),
+                    _fmt_date(q.get("StartDate")),
+                    _fmt_date(q.get("EndDate")),
+                ]
+                for q in quizzes
+            ],
+            title=f"Quizzes – {t}",
+        )
+
     return _show_with_error_handling(
         org_id,
         _fetch,

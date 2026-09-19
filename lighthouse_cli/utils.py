@@ -6,17 +6,17 @@ import json
 import math
 import os
 import re
-import uuid
 import urllib.parse
+import uuid
 from contextlib import suppress
 from inspect import isfunction, ismethod
 from pathlib import Path
 from typing import Any, NoReturn
 
-
 # ---------------------------------------------------------------------------
 # External result identifiers
 # ---------------------------------------------------------------------------
+
 
 def _course_identifier(value: Any) -> int | None:
     """Return only a numeric course ID for an external result payload.
@@ -39,6 +39,7 @@ def _course_identifier(value: Any) -> int | None:
 # ---------------------------------------------------------------------------
 # Strict JSON parsing
 # ---------------------------------------------------------------------------
+
 
 def _reject_non_finite_json(_value: str) -> NoReturn:
     """Reject Python's non-standard ``NaN`` and ``Infinity`` extensions."""
@@ -101,8 +102,8 @@ def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> N
         text_mode = not isinstance(data, bytes)
         with os.fdopen(
             fd,
-            "wb" if not text_mode else "w",
-            **({} if not text_mode else {"encoding": "utf-8"}),
+            "w" if text_mode else "wb",
+            encoding="utf-8" if text_mode else None,
         ) as fh:
             fh.write(data)
             fh.flush()
@@ -113,6 +114,7 @@ def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> N
             tmp_path.unlink(missing_ok=True)
         raise
 
+
 # ---------------------------------------------------------------------------
 # Filesystem sanitization
 # ---------------------------------------------------------------------------
@@ -122,8 +124,14 @@ _SANITIZE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # Windows reserves these device names regardless of extension (CON.txt is
 # invalid too), so the stem is what must be checked.
 _WINDOWS_RESERVED = frozenset(
-    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
-     *(f"LPT{i}" for i in range(1, 10))}
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
 )
 
 
@@ -133,7 +141,7 @@ def _fit_filename(name: str, *, max_bytes: int = MAX_ATOMIC_TARGET_NAME_BYTES) -
         return name
     path = Path(name)
     suffix = path.suffix if len(path.suffix.encode("utf-8")) <= 17 else ""
-    stem = path.name[:-len(suffix)] if suffix else path.name
+    stem = path.name[: -len(suffix)] if suffix else path.name
     budget = max_bytes - len(suffix.encode("utf-8"))
     while stem and len(stem.encode("utf-8")) > budget:
         stem = stem[:-1]
@@ -213,8 +221,6 @@ def _is_explicit_legacy_override(client: Any, candidate: Any) -> bool:
     return True
 
 
-
-
 def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
     """Return a normalized course catalog from the enrollment source.
 
@@ -244,6 +250,8 @@ def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
                 and _is_explicit_legacy_override(client, legacy_getter)
             ):
                 raise
+            if legacy_getter is None:
+                raise
             raw_courses = legacy_getter()
             legacy_used = True
     elif callable(legacy_getter):
@@ -252,9 +260,13 @@ def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
     else:
         raw_courses = []
 
-    if not legacy_used and not isinstance(raw_courses, (list, tuple)) and _is_explicit_legacy_override(
-        client, legacy_getter
+    if (
+        not legacy_used
+        and not isinstance(raw_courses, (list, tuple))
+        and _is_explicit_legacy_override(client, legacy_getter)
     ):
+        if legacy_getter is None:
+            return []
         raw_courses = legacy_getter()
     if not isinstance(raw_courses, (list, tuple)):
         return []

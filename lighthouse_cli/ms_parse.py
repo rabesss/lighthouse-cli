@@ -72,7 +72,7 @@ def _extract_error_code_and_msg(html: str) -> tuple[int | None, str | None]:
     in the page's JavaScript or HTML.
     """
     # Try serverError in a script -- "serverError": "50126" (JSON-style)
-    m = re.search(r'''serverError["']?\s*:\s*["']([0-9]+)["']''', html)
+    m = re.search(r"""serverError["']?\s*:\s*["']([0-9]+)["']""", html)
     if not m:
         # Try without the key quote: serverError": "50126"
         m = re.search(r'serverError["\'][^:]*:\s*["\']([0-9]+)["\']', html)
@@ -87,29 +87,37 @@ def _extract_error_code_and_msg(html: str) -> tuple[int | None, str | None]:
         except ValueError:
             pass
     if page_cfg.get("pgid") == "ConvergedError":
-        msg = msg or str(page_cfg.get("strServiceExceptionMessage") or page_cfg.get("strMainMessage") or "")
+        msg = msg or str(
+            page_cfg.get("strServiceExceptionMessage") or page_cfg.get("strMainMessage") or ""
+        )
 
     # ConvergedTFA / KMSI pages often embed error.aspx?err=504 in JS -- not a real failure.
-    if code == 504 and "error.aspx" in html.lower() and (
-        "ConvergedTFA" in html or page_cfg.get("pgid") in ("ConvergedTFA", "CmsiInterrupt")
+    if (
+        code == 504
+        and "error.aspx" in html.lower()
+        and ("ConvergedTFA" in html or page_cfg.get("pgid") in ("ConvergedTFA", "CmsiInterrupt"))
     ):
         code = None
 
     # Try sErrTxt -- flexible pattern for JSON key
-    m = re.search(r'''sErrTxt["']?\s*:\s*["'](.+?)["']''', html, re.DOTALL)
+    m = re.search(r"""sErrTxt["']?\s*:\s*["'](.+?)["']""", html, re.DOTALL)
     msg = m.group(1) if m else msg
 
     # Fallback: look for <div class="error"> text (case-insensitive)
     if not msg:
         soup = BeautifulSoup(html, "html.parser")
         for err_div in soup.find_all(
-            lambda tag: tag.name == "div"
-            and any(
-                "error" in (
-                    " ".join(tag.get(attr, [])) if attr == "class"
-                    else (tag.get(attr, "") or "")
-                ).lower()
-                for attr in ("id", "class")
+            lambda tag: (
+                tag.name == "div"
+                and any(
+                    "error"
+                    in (
+                        " ".join(tag.get(attr, []))
+                        if attr == "class"
+                        else (tag.get(attr, "") or "")
+                    ).lower()
+                    for attr in ("id", "class")
+                )
             )
         ):
             text = err_div.get_text(strip=True)
