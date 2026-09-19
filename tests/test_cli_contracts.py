@@ -8,14 +8,19 @@ import math
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
-import requests
 import pytest
+import requests
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, NetworkError
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _resolve_course_scope
-from lighthouse_cli.display import _has_json_option, format_user_error, output_json, safe_display_text
+from lighthouse_cli.display import (
+    _has_json_option,
+    format_user_error,
+    output_json,
+    safe_display_text,
+)
 from lighthouse_cli.utils import get_course_name, get_enrolled_course_catalog
 
 
@@ -43,17 +48,21 @@ def test_content_json_failure_has_one_command_shaped_document() -> None:
 
 def test_content_projection_suppresses_quoted_secret_labels() -> None:
     toc = {
-        "Modules": [{
-            "ModuleId": 1,
-            "Title": 'headers={"Cookie":"abcd1234"}',
-            "Modules": [],
-            "Topics": [{
-                "TopicId": 2,
-                "Title": 'data={"password":"abcd1234"}',
-                "TypeIdentifier": "File",
-                "Url": "https://example.invalid/content?page=2",
-            }],
-        }],
+        "Modules": [
+            {
+                "ModuleId": 1,
+                "Title": 'headers={"Cookie":"abcd1234"}',
+                "Modules": [],
+                "Topics": [
+                    {
+                        "TopicId": 2,
+                        "Title": 'data={"password":"abcd1234"}',
+                        "TypeIdentifier": "File",
+                        "Url": "https://example.invalid/content?page=2",
+                    }
+                ],
+            }
+        ],
     }
     with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
         result = CliRunner().invoke(cli, ["content", "123", "--json"])
@@ -85,17 +94,21 @@ def test_content_projection_omits_unsafe_or_secret_bearing_urls(
     unsafe_url: str,
 ) -> None:
     toc = {
-        "Modules": [{
-            "ModuleId": 1,
-            "Title": "Module",
-            "Modules": [],
-            "Topics": [{
-                "TopicId": 2,
-                "Title": "Topic",
-                "TypeIdentifier": "File",
-                "Url": unsafe_url,
-            }],
-        }],
+        "Modules": [
+            {
+                "ModuleId": 1,
+                "Title": "Module",
+                "Modules": [],
+                "Topics": [
+                    {
+                        "TopicId": 2,
+                        "Title": "Topic",
+                        "TypeIdentifier": "File",
+                        "Url": unsafe_url,
+                    }
+                ],
+            }
+        ],
     }
     with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
         result = CliRunner().invoke(cli, ["content", "123", "--json"])
@@ -136,7 +149,7 @@ def test_submit_projection_suppresses_quoted_secret_labels(tmp_path: Path) -> No
     }
     client.submit_file.return_value = {
         "submissionId": 'data={"password":"abcd1234"}',
-        "submittedAt": 'responseBody=abcd1234',
+        "submittedAt": "responseBody=abcd1234",
     }
     with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
         result = CliRunner().invoke(
@@ -154,22 +167,22 @@ def test_submit_projection_suppresses_quoted_secret_labels(tmp_path: Path) -> No
 def test_show_projections_suppress_quoted_secret_labels() -> None:
     from lighthouse_cli import show
 
-    announcement = show._normalise_announcements([
-        {
-            "Id": 1,
-            "Title": 'headers={"Cookie":"abcd1234"}',
-            "Body": {"Text": 'data={"password":"abcd1234"}'},
-        }
-    ])[0]
-    calendar = show._normalise_calendar_events([
-        {"Id": 2, "Title": 'responseBody=abcd1234', "OrgUnitName": "Normal"}
-    ])[0]
-    quiz = show._normalise_quizzes([
-        {"QuizId": 3, "Name": 'client_secret: abcdef123'}
-    ])[0]
-    grade = show._normalise_grade_schema([
-        {"Id": 4, "Name": 'headers={"Cookie":"abcd1234"}', "MaxPoints": 10}
-    ])[0]
+    announcement = show._normalise_announcements(
+        [
+            {
+                "Id": 1,
+                "Title": 'headers={"Cookie":"abcd1234"}',
+                "Body": {"Text": 'data={"password":"abcd1234"}'},
+            }
+        ]
+    )[0]
+    calendar = show._normalise_calendar_events(
+        [{"Id": 2, "Title": "responseBody=abcd1234", "OrgUnitName": "Normal"}]
+    )[0]
+    quiz = show._normalise_quizzes([{"QuizId": 3, "Name": "client_secret: abcdef123"}])[0]
+    grade = show._normalise_grade_schema(
+        [{"Id": 4, "Name": 'headers={"Cookie":"abcd1234"}', "MaxPoints": 10}]
+    )[0]
 
     assert announcement["Title"] == ""
     assert announcement["Body"] == ""
@@ -191,15 +204,19 @@ def test_failed_content_identifier_is_not_echoed_in_json_or_stderr() -> None:
 
 
 def test_name_substring_is_kept_for_internal_course_resolution() -> None:
-    with patch.object(
-        LighthouseClient,
-        "get_enrolled_courses",
-        return_value=[{"OrgUnitId": 123, "Name": "Signals & Systems"}],
-    ), patch.object(
-        LighthouseClient,
-        "get_courses",
-        side_effect=AssertionError("name lookup should use enrollments"),
-    ), patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}):
+    with (
+        patch.object(
+            LighthouseClient,
+            "get_enrolled_courses",
+            return_value=[{"OrgUnitId": 123, "Name": "Signals & Systems"}],
+        ),
+        patch.object(
+            LighthouseClient,
+            "get_courses",
+            side_effect=AssertionError("name lookup should use enrollments"),
+        ),
+        patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}),
+    ):
         result = CliRunner().invoke(cli, ["content", "signals", "--json"])
 
     assert result.exit_code == 0
@@ -471,9 +488,7 @@ def test_json_usage_error_is_parseable_but_human_usage_stays_on_stderr() -> None
     result = CliRunner().invoke(cli, ["content", "--json"])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
-        "error": "Invalid command arguments. See --help."
-    }
+    assert json.loads(result.stdout) == {"error": "Invalid command arguments. See --help."}
     assert "Invalid command arguments. See --help." in result.stderr
 
     human = CliRunner().invoke(cli, ["content"])
@@ -506,9 +521,7 @@ def test_json_usage_errors_never_echo_invalid_secret_like_values(
     result = CliRunner().invoke(cli, argv)
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
-        "error": "Invalid command arguments. See --help."
-    }
+    assert json.loads(result.stdout) == {"error": "Invalid command arguments. See --help."}
     assert "Invalid command arguments. See --help." in result.stderr
     assert sentinel not in result.stdout + result.stderr
 
@@ -549,18 +562,19 @@ def test_fixed_cookie_and_download_limit_errors_remain_actionable() -> None:
     assert format_user_error("No cookies found. Run: lighthouse auth login") == (
         "No cookies found. Run: lighthouse auth login"
     )
-    assert format_user_error(
-        NetworkError("Binary download exceeds the configured size limit.")
-    ) == "Binary download exceeds the configured size limit."
-    assert format_user_error(
-        NetworkError("The server returned an unexpected redirect.")
-    ) == "The server returned an unexpected redirect."
+    assert (
+        format_user_error(NetworkError("Binary download exceeds the configured size limit."))
+        == "Binary download exceeds the configured size limit."
+    )
+    assert (
+        format_user_error(NetworkError("The server returned an unexpected redirect."))
+        == "The server returned an unexpected redirect."
+    )
 
 
 def test_format_user_error_strips_relative_query_and_body() -> None:
     message = format_user_error(
-        "Request failed: /d2l/api?session=SESSION_SENTINEL; "
-        "response body: BODY_SENTINEL"
+        "Request failed: /d2l/api?session=SESSION_SENTINEL; response body: BODY_SENTINEL"
     )
 
     assert message == "Network error. Check your connection and try again."
@@ -777,15 +791,18 @@ def test_course_catalog_does_not_fallback_after_projection_failure() -> None:
 
 def test_production_catalog_does_not_fallback_after_native_failure() -> None:
     client = LighthouseClient()
-    with patch.object(
-        LighthouseClient,
-        "get_enrolled_courses",
-        side_effect=RuntimeError("native enrollment failed"),
-    ), patch.object(
-        LighthouseClient,
-        "get_courses",
-        return_value=[{"OrgUnitId": 7, "Name": "Legacy"}],
-    ) as legacy:
+    with (
+        patch.object(
+            LighthouseClient,
+            "get_enrolled_courses",
+            side_effect=RuntimeError("native enrollment failed"),
+        ),
+        patch.object(
+            LighthouseClient,
+            "get_courses",
+            return_value=[{"OrgUnitId": 7, "Name": "Legacy"}],
+        ) as legacy,
+    ):
         with pytest.raises(RuntimeError, match="native enrollment failed"):
             get_enrolled_course_catalog(client)
 
@@ -808,9 +825,7 @@ def test_course_catalog_accepts_subclass_legacy_getter_override() -> None:
             return [{"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}]
 
     client = LegacySubclass()
-    assert get_enrolled_course_catalog(client) == [
-        {"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}
-    ]
+    assert get_enrolled_course_catalog(client) == [{"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}]
 
 
 def test_course_catalog_uses_configured_legacy_mock_when_projection_is_empty() -> None:
@@ -820,9 +835,7 @@ def test_course_catalog_uses_configured_legacy_mock_when_projection_is_empty() -
         {"OrgUnitId": "7", "Name": "Legacy", "Code": "L"},
     ]
 
-    assert get_enrolled_course_catalog(client) == [
-        {"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}
-    ]
+    assert get_enrolled_course_catalog(client) == [{"OrgUnitId": 7, "Name": "Legacy", "Code": "L"}]
     assert get_course_name(client, 7) == "Legacy"
     assert client.get_courses.call_count == 2
 
@@ -844,10 +857,13 @@ def test_courses_expose_explicit_semester_state_without_writing_config(
         {"OrgUnit": {"Id": 456, "Name": "Unmapped", "Code": "U"}},
     ]
 
-    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path), patch.object(
-        LighthouseClient,
-        "get_course_enrollments",
-        return_value=enrollments,
+    with (
+        patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path),
+        patch.object(
+            LighthouseClient,
+            "get_course_enrollments",
+            return_value=enrollments,
+        ),
     ):
         result = CliRunner().invoke(cli, ["courses", "--json"])
 
@@ -872,10 +888,13 @@ def test_courses_expose_explicit_semester_state_without_writing_config(
     ]
     assert config_path.read_text(encoding="utf-8") == original
 
-    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path), patch.object(
-        LighthouseClient,
-        "get_course_enrollments",
-        return_value=enrollments,
+    with (
+        patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path),
+        patch.object(
+            LighthouseClient,
+            "get_course_enrollments",
+            return_value=enrollments,
+        ),
     ):
         human = CliRunner().invoke(cli, ["courses"])
     assert human.exit_code == 0
@@ -929,7 +948,10 @@ def test_courses_project_malformed_enrollment_labels_for_human_and_json() -> Non
     ]
     assert human.exit_code == 0
     assert sentinel not in structured.stdout + structured.stderr + human.stdout + human.stderr
-    assert "CODE_CONTROL_SENTINEL" not in structured.stdout + structured.stderr + human.stdout + human.stderr
+    assert (
+        "CODE_CONTROL_SENTINEL"
+        not in structured.stdout + structured.stderr + human.stdout + human.stderr
+    )
     assert "\x1b" not in structured.stdout + structured.stderr + human.stdout + human.stderr
 
 
@@ -960,11 +982,17 @@ def test_help_explains_write_scope_and_json_controls() -> None:
         (["courses", "--json"], "lighthouse_cli.commands.LighthouseClient", "courses"),
         (["download", "--json"], "lighthouse_cli.commands.LighthouseClient", "courses"),
         (["sync", "--json"], "lighthouse_cli.commands.LighthouseClient", "courses"),
-        (["config", "courses", "--add", "123", "--json"], "lighthouse_cli.course_config.LighthouseClient", "courses"),
+        (
+            ["config", "courses", "--add", "123", "--json"],
+            "lighthouse_cli.course_config.LighthouseClient",
+            "courses",
+        ),
     ],
 )
 def test_leaf_constructor_failure_is_one_json_document(
-    argv: list[str], patch_target: str, payload_key: str,
+    argv: list[str],
+    patch_target: str,
+    payload_key: str,
 ) -> None:
     with patch(patch_target, side_effect=RuntimeError("constructor failed")):
         result = CliRunner().invoke(cli, argv)
@@ -973,17 +1001,28 @@ def test_leaf_constructor_failure_is_one_json_document(
     payload = json.loads(result.stdout)
     assert payload[payload_key] == []
     assert payload["error"] == "Command failed."
-    assert result.stdout.count("\"error\"") == 1
+    assert result.stdout.count('"error"') == 1
     assert "Error: Command failed." in result.stderr
 
 
 @pytest.mark.parametrize("command", ["download", "sync"])
 def test_omitted_course_without_trustworthy_config_fails_closed_as_json(
-    command: str, tmp_path: Path,
+    command: str,
+    tmp_path: Path,
 ) -> None:
-    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", tmp_path / "missing.json"), \
-        patch.object(LighthouseClient, "get_semesters", side_effect=AssertionError("scope must fail before API")), \
-        patch.object(LighthouseClient, "get_course_enrollments", side_effect=AssertionError("scope must fail before API")):
+    with (
+        patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", tmp_path / "missing.json"),
+        patch.object(
+            LighthouseClient,
+            "get_semesters",
+            side_effect=AssertionError("scope must fail before API"),
+        ),
+        patch.object(
+            LighthouseClient,
+            "get_course_enrollments",
+            side_effect=AssertionError("scope must fail before API"),
+        ),
+    ):
         result = CliRunner().invoke(cli, [command, "--json", "-o", str(tmp_path / "out")])
 
     assert result.exit_code == 1
@@ -1000,12 +1039,14 @@ def test_attachment_validation_failure_is_one_json_document() -> None:
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["error"] == "--attachment requires --assignment"
-    assert result.stdout.count("\"error\"") == 1
+    assert result.stdout.count('"error"') == 1
 
 
 @pytest.mark.parametrize("command", ["download", "sync"])
 def test_single_course_engine_failure_is_one_json_document(command: str, tmp_path: Path) -> None:
-    with patch("lighthouse_cli.commands.run_course", side_effect=RuntimeError("opaque upstream detail")):
+    with patch(
+        "lighthouse_cli.commands.run_course", side_effect=RuntimeError("opaque upstream detail")
+    ):
         result = CliRunner().invoke(
             cli,
             [command, "123", "--json", "-o", str(tmp_path / command)],
@@ -1015,7 +1056,7 @@ def test_single_course_engine_failure_is_one_json_document(command: str, tmp_pat
     payload = json.loads(result.stdout)
     assert payload["course_id"] == 123
     assert payload["error"] == "Command failed."
-    assert result.stdout.count("\"error\"") == 1
+    assert result.stdout.count('"error"') == 1
 
 
 def test_dry_run_preserves_local_path_validation_errors_as_json(tmp_path: Path) -> None:
@@ -1025,20 +1066,28 @@ def test_dry_run_preserves_local_path_validation_errors_as_json(tmp_path: Path) 
     outside.mkdir()
     (output_root / "Course-123").symlink_to(outside, target_is_directory=True)
     toc = {
-        "Modules": [{
-            "ModuleId": 1,
-            "Title": "Module",
-            "Modules": [],
-            "Topics": [{
-                "TopicId": 7,
-                "Title": "notes.pdf",
-                "TypeIdentifier": "File",
-                "LastModifiedDate": "2026-01-01T00:00:00Z",
-            }],
-        }],
+        "Modules": [
+            {
+                "ModuleId": 1,
+                "Title": "Module",
+                "Modules": [],
+                "Topics": [
+                    {
+                        "TopicId": 7,
+                        "Title": "notes.pdf",
+                        "TypeIdentifier": "File",
+                        "LastModifiedDate": "2026-01-01T00:00:00Z",
+                    }
+                ],
+            }
+        ],
     }
-    with patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-        patch.object(LighthouseClient, "get_courses", return_value=[{"OrgUnitId": 123, "Name": "Course"}]):
+    with (
+        patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+        patch.object(
+            LighthouseClient, "get_courses", return_value=[{"OrgUnitId": 123, "Name": "Course"}]
+        ),
+    ):
         result = CliRunner().invoke(
             cli,
             ["download", "123", "--dry-run", "--json", "-o", str(output_root)],
@@ -1057,7 +1106,10 @@ def test_dry_run_preserves_local_path_validation_errors_as_json(tmp_path: Path) 
 )
 @pytest.mark.parametrize("json_output", [False, True])
 def test_symlinked_output_root_is_rejected_before_client_or_body_work(
-    command: str, mode_args: list[str], json_output: bool, tmp_path: Path,
+    command: str,
+    mode_args: list[str],
+    json_output: bool,
+    tmp_path: Path,
 ) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1067,7 +1119,10 @@ def test_symlinked_output_root_is_rejected_before_client_or_body_work(
     if json_output:
         args.append("--json")
 
-    with patch("lighthouse_cli.commands.LighthouseClient", side_effect=AssertionError("client must not initialize")):
+    with patch(
+        "lighthouse_cli.commands.LighthouseClient",
+        side_effect=AssertionError("client must not initialize"),
+    ):
         result = CliRunner().invoke(cli, args)
 
     assert result.exit_code == 1
@@ -1119,11 +1174,14 @@ def test_single_sync_empty_toc_preserves_orphaned_entries_and_exit_code(
         encoding="utf-8",
     )
 
-    with patch.object(
-        LighthouseClient,
-        "get_enrolled_courses",
-        return_value=[{"OrgUnitId": 44347, "Name": "Course"}],
-    ), patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}):
+    with (
+        patch.object(
+            LighthouseClient,
+            "get_enrolled_courses",
+            return_value=[{"OrgUnitId": 44347, "Name": "Course"}],
+        ),
+        patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}),
+    ):
         structured = CliRunner().invoke(
             cli,
             ["sync", "44347", "--json", "-o", str(output_root)],
@@ -1182,18 +1240,26 @@ def test_multi_course_errors_drop_server_provided_filename_and_title(
         ]
     }
 
-    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path), \
-        patch.object(LighthouseClient, "get_semesters", return_value=[{"OrgUnitId": 100, "Name": "Sem I"}]), \
+    with (
+        patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path),
+        patch.object(
+            LighthouseClient, "get_semesters", return_value=[{"OrgUnitId": 100, "Name": "Sem I"}]
+        ),
         patch.object(
             LighthouseClient,
             "get_course_enrollments",
             return_value=[{"OrgUnit": {"Id": 111, "Name": "Course"}}],
-        ), patch.object(
+        ),
+        patch.object(
             LighthouseClient,
             "get_enrolled_courses",
             return_value=[{"OrgUnitId": 111, "Name": "Course"}],
-        ), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-        patch.object(LighthouseClient, "download_topic_file", side_effect=RuntimeError("download failed")):
+        ),
+        patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+        patch.object(
+            LighthouseClient, "download_topic_file", side_effect=RuntimeError("download failed")
+        ),
+    ):
         result = CliRunner().invoke(
             cli,
             ["download", "--semester", "100", "--json", "-o", str(tmp_path / "out")],
@@ -1201,9 +1267,7 @@ def test_multi_course_errors_drop_server_provided_filename_and_title(
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
-    assert payload["courses"][0]["errors"] == [
-        {"topic_id": "7", "error": "Command failed."}
-    ]
+    assert payload["courses"][0]["errors"] == [{"topic_id": "7", "error": "Command failed."}]
     assert sentinel not in result.stdout + result.stderr
 
 
@@ -1216,8 +1280,10 @@ def test_semesters_runtime_failure_is_one_json_document() -> None:
 
 
 def test_courses_runtime_failure_is_one_json_document() -> None:
-    with patch.object(LighthouseClient, "get_enrolled_courses", side_effect=RuntimeError("opaque")), \
-        patch.object(LighthouseClient, "get_courses", side_effect=RuntimeError("opaque fallback")):
+    with (
+        patch.object(LighthouseClient, "get_enrolled_courses", side_effect=RuntimeError("opaque")),
+        patch.object(LighthouseClient, "get_courses", side_effect=RuntimeError("opaque fallback")),
+    ):
         result = CliRunner().invoke(cli, ["courses", "--json"])
 
     assert result.exit_code == 1
@@ -1244,17 +1310,17 @@ def test_config_add_normalizes_positive_ids_and_keeps_first_duplicate(
         {"OrgUnit": {"Id": "7", "Name": "First", "Code": "A"}},
         {"OrgUnit": {"Id": 7, "Name": "Duplicate", "Code": "B"}},
     ]
-    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path), \
-        patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
+    with (
+        patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path),
+        patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
+    ):
         result = CliRunner().invoke(
             cli,
             ["config", "courses", "--add", "7", "--semester", "Sem V", "--json"],
         )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == [
-        {"id": "7", "name": "First", "semester": "Sem V"}
-    ]
+    assert json.loads(result.stdout) == [{"id": "7", "name": "First", "semester": "Sem V"}]
 
 
 def test_courses_skips_bad_ids_and_normalizes_boolean_like_active_values() -> None:
@@ -1298,15 +1364,13 @@ def test_recovery_hint_discards_arbitrary_credential_arguments() -> None:
     ("raw", "expected"),
     [
         (
-            "Course 'course-name-with-private-context' not found. "
-            "Run: lighthouse courses",
+            "Course 'course-name-with-private-context' not found. Run: lighthouse courses",
             "Course not found. Run: lighthouse courses",
         ),
         (
             "No tracked courses mapped to semester 'Sem V'.\n"
             "Run: lighthouse config courses --list to see your mappings.",
-            "No tracked courses mapped to the requested semester. "
-            "Run: lighthouse config courses",
+            "No tracked courses mapped to the requested semester. Run: lighthouse config courses",
         ),
         (
             "Dropbox folder 999 not found. Run: lighthouse assignments",
@@ -1328,10 +1392,8 @@ def test_recovery_hint_discards_arbitrary_credential_arguments() -> None:
             "Permission denied to submit. Check your enrollment and submission rights.",
         ),
         (
-            "Refusing to submit without --yes in non-interactive mode. "
-            "Use --yes flag to confirm.",
-            "Refusing to submit without --yes in non-interactive mode. "
-            "Use --yes flag to confirm.",
+            "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
+            "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
         ),
         (
             "Could not read file: [Errno 13] Permission denied: "
@@ -1352,7 +1414,8 @@ def test_recovery_hint_discards_arbitrary_credential_arguments() -> None:
     ],
 )
 def test_format_user_error_uses_fixed_templates_for_known_local_errors(
-    raw: str, expected: str,
+    raw: str,
+    expected: str,
 ) -> None:
     message = format_user_error(raw)
 
@@ -1389,7 +1452,7 @@ def test_format_user_error_redacts_nested_cookie_password_and_api_key_values() -
 def test_format_user_error_keeps_typed_submission_rate_limit_actionable() -> None:
     error = NetworkError(
         "Submission request was rate limited; no retry was attempted. "
-        "response body: {\"token\": \"TOKEN_SENTINEL\"}"
+        'response body: {"token": "TOKEN_SENTINEL"}'
     )
 
     assert format_user_error(error) == "Rate limited. No retry was attempted."

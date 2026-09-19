@@ -22,7 +22,22 @@ playwright install chromium   # only needed for the username bootstrap
 pytest -q                     # full suite must stay green before a PR
 ```
 
-There is no separate build step. Lint with `ruff` if available.
+There is no separate build step. The repo enforces a full quality gate in CI
+(`.github/workflows/ci.yml`) and pre-commit (`.pre-commit-config.yaml`);
+before a PR run:
+
+```bash
+ruff format --check . && ruff check .   # format + lint
+mypy                                    # strict type check
+lint-imports                            # layered architecture contracts
+deptry .                                # dependency hygiene
+pytest -q                               # full suite must stay green
+```
+
+Dependency versions are pinned in `requirements.txt` (runtime) and
+`requirements-dev.txt` (dev superset), both regenerated from `pyproject.toml`
+with `uv pip compile`. See the `contribution-toolchain` skill in
+`.agents/skills/` for the full walkthrough and CI mapping.
 
 ## Architecture (current)
 

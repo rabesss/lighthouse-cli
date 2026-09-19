@@ -10,18 +10,21 @@ import re
 import sys
 from pathlib import Path
 from stat import S_ISREG
+from typing import Any
 
 from .api import LighthouseClient
+from .display import (
+    format_user_error,
+    safe_display_text,
+)
+from .display import (
+    output_json as _output_json,
+)
 from .manifest import (
     MANIFEST_FILENAME,
     Manifest,
     compute_file_sha256,
     normalize_sha256,
-)
-from .display import (
-    format_user_error,
-    output_json as _output_json,
-    safe_display_text,
 )
 from .utils import (
     MAX_ATOMIC_TARGET_NAME_BYTES,
@@ -146,11 +149,7 @@ def safe_attachment_filename(
     sanitized_input = _sanitize_filename(value) if isinstance(value, str) else ""
     safe_candidate = safe_display_text(value, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
     if not isinstance(value, str) or not safe_candidate:
-        return (
-            safe_fallback + _safe_filename_suffix(sanitized_input)
-            if fallback
-            else ""
-        )
+        return safe_fallback + _safe_filename_suffix(sanitized_input) if fallback else ""
 
     candidate = value
     sanitized = _sanitize_filename(candidate)
@@ -196,10 +195,7 @@ def disambiguate_filename(
         counter += 1
 
 
-
-
-
-def _assignment_dir(dest: Path, folder: dict) -> Path:
+def _assignment_dir(dest: Path, folder: dict[str, Any]) -> Path:
     """Return a non-symlinked directory for one assignment folder."""
     course_root = _course_boundary(dest)
     folder_id = _positive_int(folder.get("Id"))
@@ -213,7 +209,9 @@ def _assignment_dir(dest: Path, folder: dict) -> Path:
     if assignments_root.exists() and not assignments_root.is_dir():
         raise ValueError("Assignments path is not a directory")
     if _has_symlink_component(folder_dir, course_root):
-        raise ValueError("Assignment folder is a symlink or resolves outside the Assignments directory")
+        raise ValueError(
+            "Assignment folder is a symlink or resolves outside the Assignments directory"
+        )
     if folder_dir.exists() and not folder_dir.is_dir():
         raise ValueError("Assignment folder path is not a directory")
     return folder_dir
@@ -254,8 +252,8 @@ def _has_symlink_component(path: Path, root: Path) -> bool:
 def folder_with_attachments(
     client: LighthouseClient,
     org_id: int,
-    folder: dict,
-) -> tuple[dict, object]:
+    folder: dict[str, Any],
+) -> tuple[dict[str, Any], object]:
     """Reuse list attachments, fetching folder detail only when omitted."""
     if "Attachments" in folder:
         return folder, folder.get("Attachments")
@@ -294,7 +292,7 @@ def _attachment_error(
 
 def _manifest_attachment_path(
     dest: Path,
-    entry: dict | None,
+    entry: dict[str, Any] | None,
     *,
     expected_parent: Path | None = None,
 ) -> Path | None:
@@ -304,7 +302,7 @@ def _manifest_attachment_path(
     raw_path = entry.get("path")
     if (not isinstance(raw_path, str) or not raw_path) and expected_parent is not None:
         legacy_filename = entry.get("filename")
-        if not _safe_manifest_component(legacy_filename):
+        if not isinstance(legacy_filename, str) or not _safe_manifest_component(legacy_filename):
             return None
         try:
             course_root = _course_boundary(dest)
@@ -371,10 +369,10 @@ def _safe_manifest_component(component: object) -> bool:
 
 def _matching_local_attachment(
     dest: Path,
-    entry: dict | None,
+    entry: dict[str, Any] | None,
     expected_size: object,
     *,
-    expected_folder: dict | None = None,
+    expected_folder: dict[str, Any] | None = None,
 ) -> Path | None:
     """Return a verified local attachment path, or ``None``.
 
@@ -450,12 +448,12 @@ def _claim_assignment_entry(
     dest: Path,
     manifest: Manifest,
     att_key: str,
-    folder: dict,
+    folder: dict[str, Any],
     owners: dict[Path, str | None],
     claimed_paths: set[Path],
     *,
     allow_contested_claim: bool,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Claim one safe prior path without letting manifest aliases overwrite."""
     entry = manifest.get(att_key)
     if not isinstance(entry, dict):
@@ -474,10 +472,7 @@ def _claim_assignment_entry(
     owner = owners.get(path_key)
     can_claim = owner == att_key or (
         allow_contested_claim
-        and (
-            (path_key in owners and owner is None)
-            or path_key not in owners
-        )
+        and ((path_key in owners and owner is None) or path_key not in owners)
         and path_key not in claimed_paths
     )
     if not can_claim:
@@ -488,9 +483,9 @@ def _claim_assignment_entry(
 
 def _write_entry_for_claim(
     dest: Path,
-    entry: dict | None,
-    folder: dict,
-) -> dict | None:
+    entry: dict[str, Any] | None,
+    folder: dict[str, Any],
+) -> dict[str, Any] | None:
     """Reuse a legacy inferred path only when no local file would be replaced."""
     if not isinstance(entry, dict) or entry.get("path"):
         return entry
@@ -510,20 +505,20 @@ def _write_entry_for_claim(
 def _download_and_record(
     client: LighthouseClient,
     org_id: int,
-    folder: dict,
+    folder: dict[str, Any],
     att_id: int,
     dest: Path,
     manifest: Manifest,
     *,
-    existing_entry: dict | None | object = _USE_MANIFEST_ENTRY,
+    existing_entry: dict[str, Any] | None | object = _USE_MANIFEST_ENTRY,
     claimed_paths: set[Path] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
     folder_id = _positive_int(folder.get("Id"))
-    att_id = _positive_int(att_id)
-    if folder_id is None or att_id is None:
+    att_key_id = _positive_int(att_id)
+    if folder_id is None or att_key_id is None:
         raise ValueError(_INVALID_IDENTIFIER)
-    att_key = assignment_key(folder_id, att_id)
+    att_key = assignment_key(folder_id, att_key_id)
     if existing_entry is _USE_MANIFEST_ENTRY:
         existing = manifest.get(att_key)
     else:
@@ -581,6 +576,7 @@ def _download_and_record(
         "path": relative_path,
         "size_kb": round(len(content) / 1024, 1),
     }
+
 
 def download_single_attachment(
     client: LighthouseClient,
@@ -650,11 +646,16 @@ def download_single_attachment(
 
     filepath = dest / entry["path"]
     if json_output:
-        _output_json({
-            "course_id": org_id, "folder_id": folder_id,
-            "file_id": attachment_id, "path": str(filepath),
-            "size_kb": entry["size_kb"], "filename": entry["filename"],
-        })
+        _output_json(
+            {
+                "course_id": org_id,
+                "folder_id": folder_id,
+                "file_id": attachment_id,
+                "path": str(filepath),
+                "size_kb": entry["size_kb"],
+                "filename": entry["filename"],
+            }
+        )
     else:
         print(f"Downloaded: {filepath} ({entry['size_kb']} KB)")
     return 0
@@ -666,9 +667,9 @@ def download_for_course(
     dest: Path,
     manifest: Manifest,
     folder_ids: list[int] | None = None,
-    folder_snapshot: list[dict] | tuple[dict, ...] | None = None,
+    folder_snapshot: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     path_manifest: Manifest | None = None,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Download all assignment attachments for a course.
 
     ``folder_snapshot`` is an optional folder list already fetched and
@@ -677,6 +678,7 @@ def download_for_course(
 
     Returns (downloaded_entries, errors).
     """
+    all_folders: list[dict[str, Any]] | tuple[dict[str, Any], ...]
     if folder_snapshot is None:
         try:
             all_folders = client.get_dropbox_folders(org_id)
@@ -685,7 +687,8 @@ def download_for_course(
     else:
         all_folders = folder_snapshot
 
-    downloaded_entries, errors = [], []
+    downloaded_entries: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
 
     if not isinstance(all_folders, (list, tuple)):
         return [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]
@@ -696,16 +699,20 @@ def download_for_course(
         for requested_id in folder_ids:
             normalized_id = _positive_int(requested_id)
             if normalized_id is None:
-                return [], [{
-                    "error": _ASSIGNMENT_NOT_FOUND,
-                    "type": "assignment_not_found",
-                }]
+                return [], [
+                    {
+                        "error": _ASSIGNMENT_NOT_FOUND,
+                        "type": "assignment_not_found",
+                    }
+                ]
             selected_ids.add(normalized_id)
         if not selected_ids:
-            return [], [{
-                "error": _ASSIGNMENT_NOT_FOUND,
-                "type": "assignment_not_found",
-            }]
+            return [], [
+                {
+                    "error": _ASSIGNMENT_NOT_FOUND,
+                    "type": "assignment_not_found",
+                }
+            ]
     matched_ids: set[int] = set()
     seen_folder_ids: set[int] = set()
     ownership_manifest = path_manifest if path_manifest is not None else manifest
@@ -718,7 +725,9 @@ def download_for_course(
             continue
         folder_id = _positive_int(folder.get("Id"))
         if folder_id is None:
-            errors.append({"error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
+            errors.append(
+                {"error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"}
+            )
             continue
         if folder_id in seen_folder_ids:
             continue
@@ -729,43 +738,57 @@ def download_for_course(
         try:
             folder, attachments = folder_with_attachments(client, org_id, folder)
         except _AssignmentDataError as e:
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(e),
-                "type": "assignment_data",
-            })
+            errors.append(
+                {
+                    "folder_id": folder_id,
+                    "error": format_user_error(e),
+                    "type": "assignment_data",
+                }
+            )
             continue
         except Exception as e:
             errors.append({"folder_id": folder_id, "error": format_user_error(e)})
             continue
 
         if _positive_int(folder.get("Id")) is None:
-            errors.append({"folder_id": folder_id, "error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
+            errors.append(
+                {
+                    "folder_id": folder_id,
+                    "error": format_user_error(_INVALID_IDENTIFIER),
+                    "type": "assignment_data",
+                }
+            )
             continue
 
         if not isinstance(attachments, (list, tuple)):
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(_INVALID_ATTACHMENTS),
-                "type": "assignment_data",
-            })
+            errors.append(
+                {
+                    "folder_id": folder_id,
+                    "error": format_user_error(_INVALID_ATTACHMENTS),
+                    "type": "assignment_data",
+                }
+            )
             continue
         seen_folder_ids.add(folder_id)
         for att in attachments:
             if not isinstance(att, dict):
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_ATTACHMENTS),
-                    "type": "assignment_data",
-                })
+                errors.append(
+                    {
+                        "folder_id": folder_id,
+                        "error": format_user_error(_INVALID_ATTACHMENTS),
+                        "type": "assignment_data",
+                    }
+                )
                 continue
             att_id = _positive_int(att.get("Id"))
             if att_id is None:
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_IDENTIFIER),
-                    "type": "assignment_data",
-                })
+                errors.append(
+                    {
+                        "folder_id": folder_id,
+                        "error": format_user_error(_INVALID_IDENTIFIER),
+                        "type": "assignment_data",
+                    }
+                )
                 continue
             if att.get("Type", "File") != "File" or not att_id:
                 continue
@@ -789,9 +812,7 @@ def download_for_course(
             )
             if matched_path is not None:
                 if isinstance(skip_entry, dict):
-                    skip_entry["path"] = str(
-                        matched_path.relative_to(_course_boundary(dest))
-                    )
+                    skip_entry["path"] = str(matched_path.relative_to(_course_boundary(dest)))
                 continue
             write_entry = _write_entry_for_claim(dest, existing, folder)
 
@@ -810,22 +831,26 @@ def download_for_course(
                 )
             except _AssignmentDataError as e:
                 safe_error = format_user_error(e)
-                errors.append({
-                    "folder_id": folder_id,
-                    "file_id": att_id,
-                    "error": safe_error,
-                    "type": "assignment_data",
-                })
+                errors.append(
+                    {
+                        "folder_id": folder_id,
+                        "file_id": att_id,
+                        "error": safe_error,
+                        "type": "assignment_data",
+                    }
+                )
             except Exception as e:
                 safe_error = format_user_error(e)
                 errors.append({"folder_id": folder_id, "file_id": att_id, "error": safe_error})
                 print(f"  FAILED attachment {att_id}: {safe_error}", file=sys.stderr)
 
     if selected_ids is not None and selected_ids - matched_ids:
-        errors.append({
-            "error": _ASSIGNMENT_NOT_FOUND,
-            "type": "assignment_not_found",
-        })
+        errors.append(
+            {
+                "error": _ASSIGNMENT_NOT_FOUND,
+                "type": "assignment_not_found",
+            }
+        )
     return downloaded_entries, errors
 
 
@@ -834,7 +859,7 @@ def sync_for_course(
     org_id: int,
     dest: Path,
     manifest: Manifest,
-) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Sync assignment attachments for a course (detect new/updated).
 
     Returns (downloaded_entries, skipped_entries, updated_entries, errors).
@@ -844,10 +869,18 @@ def sync_for_course(
     except Exception as e:
         return [], [], [], [{"error": format_user_error(e), "type": "assignment_list"}]
 
-    downloaded_entries, skipped_entries, updated_entries, errors = [], [], [], []
+    downloaded_entries: list[dict[str, Any]] = []
+    skipped_entries: list[dict[str, Any]] = []
+    updated_entries: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
 
     if not isinstance(all_folders, (list, tuple)):
-        return [], [], [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]
+        return (
+            [],
+            [],
+            [],
+            [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}],
+        )
     folders = all_folders
     seen_folder_ids: set[int] = set()
     prior_path_owners = _assignment_path_owners(dest, manifest)
@@ -858,7 +891,9 @@ def sync_for_course(
             continue
         folder_id = _positive_int(folder.get("Id"))
         if folder_id is None:
-            errors.append({"error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
+            errors.append(
+                {"error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"}
+            )
             continue
         if folder_id in seen_folder_ids:
             continue
@@ -866,43 +901,57 @@ def sync_for_course(
         try:
             folder, attachments = folder_with_attachments(client, org_id, folder)
         except _AssignmentDataError as e:
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(e),
-                "type": "assignment_data",
-            })
+            errors.append(
+                {
+                    "folder_id": folder_id,
+                    "error": format_user_error(e),
+                    "type": "assignment_data",
+                }
+            )
             continue
         except Exception as e:
             errors.append({"folder_id": folder_id, "error": format_user_error(e)})
             continue
 
         if _positive_int(folder.get("Id")) is None:
-            errors.append({"folder_id": folder_id, "error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
+            errors.append(
+                {
+                    "folder_id": folder_id,
+                    "error": format_user_error(_INVALID_IDENTIFIER),
+                    "type": "assignment_data",
+                }
+            )
             continue
 
         if not isinstance(attachments, (list, tuple)):
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(_INVALID_ATTACHMENTS),
-                "type": "assignment_data",
-            })
+            errors.append(
+                {
+                    "folder_id": folder_id,
+                    "error": format_user_error(_INVALID_ATTACHMENTS),
+                    "type": "assignment_data",
+                }
+            )
             continue
         seen_folder_ids.add(folder_id)
         for att in attachments:
             if not isinstance(att, dict):
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_ATTACHMENTS),
-                    "type": "assignment_data",
-                })
+                errors.append(
+                    {
+                        "folder_id": folder_id,
+                        "error": format_user_error(_INVALID_ATTACHMENTS),
+                        "type": "assignment_data",
+                    }
+                )
                 continue
             att_id = _positive_int(att.get("Id"))
             if att_id is None:
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_IDENTIFIER),
-                    "type": "assignment_data",
-                })
+                errors.append(
+                    {
+                        "folder_id": folder_id,
+                        "error": format_user_error(_INVALID_IDENTIFIER),
+                        "type": "assignment_data",
+                    }
+                )
                 continue
             if att.get("Type", "File") != "File" or not att_id:
                 continue
@@ -927,23 +976,18 @@ def sync_for_course(
             )
             if matched_path is not None:
                 if isinstance(existing, dict):
-                    existing["path"] = str(
-                        matched_path.relative_to(_course_boundary(dest))
-                    )
+                    existing["path"] = str(matched_path.relative_to(_course_boundary(dest)))
                     skipped_entry = {
-                        "file_id": att_id, "folder_id": folder_id,
+                        "file_id": att_id,
+                        "folder_id": folder_id,
                         "filename": matched_path.name,
                     }
-                    skipped_entry["path"] = str(
-                        matched_path.relative_to(_course_boundary(dest))
-                    )
+                    skipped_entry["path"] = str(matched_path.relative_to(_course_boundary(dest)))
                     skipped_entries.append(skipped_entry)
                     continue
             write_entry = _write_entry_for_claim(dest, existing, folder)
             target_list = (
-                updated_entries
-                if isinstance(manifest_entry, dict)
-                else downloaded_entries
+                updated_entries if isinstance(manifest_entry, dict) else downloaded_entries
             )
 
             try:
@@ -960,13 +1004,17 @@ def sync_for_course(
                     )
                 )
             except _AssignmentDataError as e:
-                errors.append({
-                    "folder_id": folder_id,
-                    "file_id": att_id,
-                    "error": format_user_error(e),
-                    "type": "assignment_data",
-                })
+                errors.append(
+                    {
+                        "folder_id": folder_id,
+                        "file_id": att_id,
+                        "error": format_user_error(e),
+                        "type": "assignment_data",
+                    }
+                )
             except Exception as e:
-                errors.append({"folder_id": folder_id, "file_id": att_id, "error": format_user_error(e)})
+                errors.append(
+                    {"folder_id": folder_id, "file_id": att_id, "error": format_user_error(e)}
+                )
 
     return downloaded_entries, skipped_entries, updated_entries, errors

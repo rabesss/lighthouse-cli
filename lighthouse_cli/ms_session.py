@@ -94,7 +94,7 @@ def _export_session_cookies(session: requests.Session) -> list[dict[str, str]]:
     return [
         {
             "name": c.name,
-            "value": c.value,
+            "value": c.value or "",
             "domain": c.domain or "",
             "path": c.path or "/",
         }

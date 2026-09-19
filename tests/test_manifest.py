@@ -9,21 +9,21 @@ from pathlib import Path
 import pytest
 
 from lighthouse_cli.manifest import (
+    MANIFEST_FILENAME,
     MAX_MANIFEST_SIZE,
+    REQUIRED_ENTRY_KEYS,
     Manifest,
     ManifestCorruptError,
     ManifestError,
-    REQUIRED_ENTRY_KEYS,
     compute_file_sha256,
     compute_sha256,
     normalize_sha256,
-    MANIFEST_FILENAME,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def temp_course_dir(tmp_path: Path) -> Path:
@@ -43,14 +43,13 @@ def manifest_path(temp_course_dir: Path) -> Path:
 # compute_sha256
 # ---------------------------------------------------------------------------
 
+
 class TestComputeSHA256:
     def test_compute_file_sha256_streams_file_contents(self, tmp_path: Path) -> None:
         path = tmp_path / "payload.bin"
         path.write_bytes(b"chunked payload")
 
-        assert compute_file_sha256(path, chunk_size=3) == compute_sha256(
-            b"chunked payload"
-        )
+        assert compute_file_sha256(path, chunk_size=3) == compute_sha256(b"chunked payload")
 
     def test_sha256_from_bytes(self):
         """SHA-256 is computed from raw file bytes, not filename."""
@@ -82,6 +81,7 @@ class TestComputeSHA256:
 # ---------------------------------------------------------------------------
 # Manifest schema
 # ---------------------------------------------------------------------------
+
 
 class TestManifestSchema:
     def test_manifest_empty_default(self):
@@ -135,7 +135,7 @@ class TestManifestSchema:
         entry = {
             "sha256": 12345,  # should be string
             "filename": "Lecture 1.pdf",
-            "size": "1024",   # should be number
+            "size": "1024",  # should be number
             "downloaded_at": "2026-05-10T10:00:00Z",
             "last_modified": "2026-01-01T00:00:00Z",
         }
@@ -190,13 +190,20 @@ class TestManifestSchema:
     @pytest.mark.parametrize("size", ["seven", -1, True])
     def test_manifest_load_rejects_malformed_sizes(self, manifest_path: Path, size):
         """Untrusted sizes are rejected before sync arithmetic can see them."""
-        manifest_path.write_text(json.dumps({"100": {
-            "sha256": "",
-            "filename": "file.pdf",
-            "size": size,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }}), encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "100": {
+                        "sha256": "",
+                        "filename": "file.pdf",
+                        "size": size,
+                        "downloaded_at": "2026-05-10T10:00:00Z",
+                        "last_modified": "2026-01-01T00:00:00Z",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         with pytest.raises(ManifestCorruptError, match="size"):
             Manifest.load(manifest_path)
@@ -210,9 +217,7 @@ class TestManifestSchema:
         payload = (
             '{"100":{"sha256":"","filename":"file.pdf","size":1,'
             '"downloaded_at":"2026-01-01T00:00:00Z","last_modified":"",'
-            '"note":'
-            + literal
-            + "}}"
+            '"note":' + literal + "}}"
         )
         manifest_path.write_text(payload, encoding="utf-8")
 
@@ -265,26 +270,40 @@ class TestManifestSchema:
             Manifest({"100": entry}).save(manifest_path)
 
     def test_manifest_load_normalizes_uppercase_sha256(self, manifest_path: Path):
-        manifest_path.write_text(json.dumps({"100": {
-            "sha256": "A" * 64,
-            "filename": "file.pdf",
-            "size": 1,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }}), encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "100": {
+                        "sha256": "A" * 64,
+                        "filename": "file.pdf",
+                        "size": 1,
+                        "downloaded_at": "2026-05-10T10:00:00Z",
+                        "last_modified": "2026-01-01T00:00:00Z",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         loaded = Manifest.load(manifest_path)
 
         assert loaded.get("100")["sha256"] == "a" * 64
 
     def test_manifest_load_rejects_huge_integer_size(self, manifest_path: Path):
-        manifest_path.write_text(json.dumps({"100": {
-            "sha256": "a" * 64,
-            "filename": "file.pdf",
-            "size": MAX_MANIFEST_SIZE + 1,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }}), encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "100": {
+                        "sha256": "a" * 64,
+                        "filename": "file.pdf",
+                        "size": MAX_MANIFEST_SIZE + 1,
+                        "downloaded_at": "2026-05-10T10:00:00Z",
+                        "last_modified": "2026-01-01T00:00:00Z",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         with pytest.raises(ManifestCorruptError, match="size"):
             Manifest.load(manifest_path)
@@ -306,16 +325,21 @@ class TestManifestSchema:
 # Atomic write
 # ---------------------------------------------------------------------------
 
+
 class TestManifestAtomicWrite:
     def test_atomic_write_leaves_no_temp_file(self, manifest_path: Path):
         """After save(), no .json.tmp file remains."""
-        m = Manifest({"12345": {
-            "sha256": "a" * 64,
-            "filename": "test.pdf",
-            "size": 100,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }})
+        m = Manifest(
+            {
+                "12345": {
+                    "sha256": "a" * 64,
+                    "filename": "test.pdf",
+                    "size": 100,
+                    "downloaded_at": "2026-05-10T10:00:00Z",
+                    "last_modified": "2026-01-01T00:00:00Z",
+                }
+            }
+        )
         m.save(manifest_path)
 
         # No temp files
@@ -324,13 +348,17 @@ class TestManifestAtomicWrite:
 
     def test_atomic_write_creates_manifest(self, manifest_path: Path):
         """save() creates the manifest file."""
-        m = Manifest({"12345": {
-            "sha256": "a" * 64,
-            "filename": "test.pdf",
-            "size": 100,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }})
+        m = Manifest(
+            {
+                "12345": {
+                    "sha256": "a" * 64,
+                    "filename": "test.pdf",
+                    "size": 100,
+                    "downloaded_at": "2026-05-10T10:00:00Z",
+                    "last_modified": "2026-01-01T00:00:00Z",
+                }
+            }
+        )
         m.save(manifest_path)
         assert manifest_path.exists()
         assert manifest_path.is_file()
@@ -338,18 +366,22 @@ class TestManifestAtomicWrite:
     def test_atomic_write_no_partial_on_failure(self, manifest_path: Path):
         """Simulated crash after writing temp file leaves old manifest intact."""
         # Pre-write an old manifest
-        old_entries = {"99999": {
-            "sha256": "a" * 64,
-            "filename": "old.pdf",
-            "size": 99,
-            "downloaded_at": "2026-01-01T10:00:00Z",
-            "last_modified": "2025-01-01T00:00:00Z",
-        }}
+        old_entries = {
+            "99999": {
+                "sha256": "a" * 64,
+                "filename": "old.pdf",
+                "size": 99,
+                "downloaded_at": "2026-01-01T10:00:00Z",
+                "last_modified": "2025-01-01T00:00:00Z",
+            }
+        }
         Manifest(old_entries).save(manifest_path)
 
         # Simulate a stale temp artifact left by an interrupted write.
         tmp = manifest_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"incomplete": True}), encoding="utf-8")  # Write tmp but don't replace
+        tmp.write_text(
+            json.dumps({"incomplete": True}), encoding="utf-8"
+        )  # Write tmp but don't replace
 
         # The committed manifest remains authoritative; a stale temp artifact
         # is ignored and must never replace it.
@@ -359,13 +391,17 @@ class TestManifestAtomicWrite:
 
     def test_atomic_write_is_valid_json_after_save(self, manifest_path: Path):
         """The written manifest is always valid JSON (no truncation)."""
-        m = Manifest({"12345": {
-            "sha256": "a" * 64,
-            "filename": "test.pdf",
-            "size": 100,
-            "downloaded_at": "2026-05-10T10:00:00Z",
-            "last_modified": "2026-01-01T00:00:00Z",
-        }})
+        m = Manifest(
+            {
+                "12345": {
+                    "sha256": "a" * 64,
+                    "filename": "test.pdf",
+                    "size": 100,
+                    "downloaded_at": "2026-05-10T10:00:00Z",
+                    "last_modified": "2026-01-01T00:00:00Z",
+                }
+            }
+        )
         m.save(manifest_path)
 
         # Should parse without error
@@ -376,6 +412,7 @@ class TestManifestAtomicWrite:
 # ---------------------------------------------------------------------------
 # add_entry
 # ---------------------------------------------------------------------------
+
 
 class TestManifestAddEntry:
     def test_add_entry_computes_sha256_from_bytes(self):
@@ -456,6 +493,7 @@ class TestManifestAddEntry:
 # ---------------------------------------------------------------------------
 # Binary integrity
 # ---------------------------------------------------------------------------
+
 
 class TestBinaryIntegrity:
     def test_binary_file_preserved_exactly(self, tmp_path: Path):

@@ -23,6 +23,7 @@ from lighthouse_cli.ms_auth import MicrosoftSSOClient, MicrosoftSSOError
 # Constants: roles and exact values
 # ---------------------------------------------------------------------------
 
+
 class TestSessionIdentityConstants:
     def test_setting_host_is_canonical_origin(self) -> None:
         """The setting host is the bare canonical hostname."""
@@ -42,6 +43,7 @@ class TestSessionIdentityConstants:
 # Write path: cookies are set on the exact setting host
 # ---------------------------------------------------------------------------
 
+
 class TestCookieWritePath:
     def test_apply_cookies_uses_exact_setting_host(self) -> None:
         client = LighthouseClient()
@@ -55,6 +57,7 @@ class TestCookieWritePath:
 # ---------------------------------------------------------------------------
 # Extraction: accepts exactly the configured domain variants
 # ---------------------------------------------------------------------------
+
 
 def _jar_with_cookies_on_domain(domain: str) -> MicrosoftSSOClient:
     client = MicrosoftSSOClient()
@@ -108,9 +111,7 @@ class TestBrowserJarDomainMatching:
             ("", False),
         ],
     )
-    def test_domain_predicate_dot_boundary_semantics(
-        self, domain: str, accepted: bool
-    ) -> None:
+    def test_domain_predicate_dot_boundary_semantics(self, domain: str, accepted: bool) -> None:
         from lighthouse_cli.config import cookie_domain_accepted
 
         assert cookie_domain_accepted(domain) is accepted
@@ -143,9 +144,10 @@ class TestBrowserJarDomainMatching:
 # missing_cookie_names
 # ---------------------------------------------------------------------------
 
+
 class TestMissingCookieNames:
     def test_complete_cookies_yield_empty_list(self) -> None:
-        full = {name: "value" for name in COOKIE_NAMES}
+        full = dict.fromkeys(COOKIE_NAMES, "value")
         assert missing_cookie_names(full) == []
 
     def test_blank_values_are_reported(self) -> None:
@@ -160,31 +162,31 @@ class TestMissingCookieNames:
 
 def test_ensure_config_dir_tolerates_chmod_failure(tmp_path, monkeypatch):
     """chmod-hostile filesystems (network mounts) must not break auth."""
-    from pathlib import Path as _P
+    from pathlib import Path as _Path
 
     import lighthouse_cli.config as cfg
 
     target = tmp_path / "cfg"
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
-    monkeypatch.setattr(_P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("read-only")))
+    monkeypatch.setattr(
+        _Path, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("read-only"))
+    )
     out = cfg.ensure_config_dir()
     assert out == target and out.is_dir()
 
 
-def test_ensure_config_dir_created_restrictive_under_permissive_umask(
-    tmp_path, monkeypatch
-):
+def test_ensure_config_dir_created_restrictive_under_permissive_umask(tmp_path, monkeypatch):
     """Creation-time mode 0700 keeps the secrets dir restrictive even where
     the follow-up chmod is suppressed (fail closed, not open)."""
     import os
-    from pathlib import Path as _P
+    from pathlib import Path as _Path
 
     import lighthouse_cli.config as cfg
 
     target = tmp_path / "cfg-mode"
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
     monkeypatch.setattr(
-        _P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("blocked"))
+        _Path, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("blocked"))
     )
     old_umask = os.umask(0o022)
     try:
@@ -193,6 +195,7 @@ def test_ensure_config_dir_created_restrictive_under_permissive_umask(
         os.umask(old_umask)
     assert out == target and out.is_dir()
     assert (out.stat().st_mode & 0o777) == 0o700
+
 
 def test_mixed_scope_cookie_names_are_merged_per_name() -> None:
     """Host-only values win only for their own names; other domain cookies survive."""

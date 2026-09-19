@@ -11,16 +11,28 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlparse
 
 from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
-from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
-from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short, utc_now_iso as _utc_now_iso
-from .course_config import load as _load_course_config, semester_state as _semester_state
-from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .assignments import download_single_attachment as _download_single_attachment
+from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
+from .course_config import load as _load_course_config
+from .course_config import semester_state as _semester_state
+from .display import error as _error
+from .display import fmt_date as _fmt_date
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
+from .display import print_table as _print_table
+from .display import short as _short
+from .display import utc_now_iso as _utc_now_iso
 from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
+from .show import (  # noqa: F401 — re-export
+    cmd_announcements,
+    cmd_assignments,
+    cmd_calendar,
+    cmd_grades,
+    cmd_quizzes,
+)
 from .submit import cmd_submit  # noqa: F401 — re-export
-from .show import cmd_grades, cmd_announcements, cmd_calendar, cmd_assignments, cmd_quizzes  # noqa: F401 — re-export
+from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .utils import _course_identifier, get_enrolled_course_catalog
-
 
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
 _ASSIGNMENT_LIST_INVALID = "Assignment folders have an invalid response shape."
@@ -44,9 +56,7 @@ _CONTENT_SECRET_KEY_PATTERN = (
     r"session(?:[\s_-]?(?:val|value|token|id))?|"
     r"d2l(?:secure)?session(?:val|value|token)?"
 )
-_CONTENT_SECRET_QUERY_KEY_RE = re.compile(
-    rf"(?ix)^(?:{_CONTENT_SECRET_KEY_PATTERN})$"
-)
+_CONTENT_SECRET_QUERY_KEY_RE = re.compile(rf"(?ix)^(?:{_CONTENT_SECRET_KEY_PATTERN})$")
 _CONTENT_SECRET_COMPONENT_RE = re.compile(
     rf"(?ix)(?:^|[?&#;/])\s*(?:{_CONTENT_SECRET_KEY_PATTERN})\s*[:=]"
 )
@@ -186,8 +196,7 @@ def _normalise_content_modules(modules: Any) -> list[dict[str, Any]]:
     # ``target`` always points at a list in the newly-created projection, so
     # untrusted objects never become part of the JSON result by reference.
     stack: list[tuple[str, Any, list[dict[str, Any]], int]] = [
-        ("module", module, projected, 0)
-        for module in reversed(modules)
+        ("module", module, projected, 0) for module in reversed(modules)
     ]
     seen_modules: set[int] = set()
     node_count = 0
@@ -327,26 +336,41 @@ def _course_list_error_payload() -> dict[str, Any]:
     return {"courses": []}
 
 
-def _output_multi_course_json(sem_id: int, sem_name: str, courses_results: list[dict], also_errors: list[str]) -> None:
-    _output_json({
-        "semester": {
-            "id": sem_id,
-            "name": _safe_server_text(sem_name, fallback="Unknown Semester"),
-        },
-        "synced_at": _utc_now_iso(),
-        "summary": {"courses_checked": len(courses_results),
-                    **{k: sum(len(c.get(k, [])) for c in courses_results) for k in (
-                        "downloaded", "skipped", "updated", "duplicates", "errors",
-                        "assignments_downloaded", "assignment_errors",
-                    )}},
-        "courses": courses_results,
-        "also_errors": [format_user_error(error) for error in also_errors],
-    })
+def _output_multi_course_json(
+    sem_id: int, sem_name: str, courses_results: list[dict[str, Any]], also_errors: list[str]
+) -> None:
+    _output_json(
+        {
+            "semester": {
+                "id": sem_id,
+                "name": _safe_server_text(sem_name, fallback="Unknown Semester"),
+            },
+            "synced_at": _utc_now_iso(),
+            "summary": {
+                "courses_checked": len(courses_results),
+                **{
+                    k: sum(len(c.get(k, [])) for c in courses_results)
+                    for k in (
+                        "downloaded",
+                        "skipped",
+                        "updated",
+                        "duplicates",
+                        "errors",
+                        "assignments_downloaded",
+                        "assignment_errors",
+                    )
+                },
+            },
+            "courses": courses_results,
+            "also_errors": [format_user_error(error) for error in also_errors],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Rendering funnels (human | --json) over sync_engine results
 # ---------------------------------------------------------------------------
+
 
 def _print_warnings(result: dict[str, Any]) -> None:
     """Emit recorded engine warnings to stderr (never stdout, even under --json)."""
@@ -427,12 +451,7 @@ def _safe_orphan_entry(entry: Any) -> dict[str, Any]:
     """Project a manifest orphan without exposing its filename or path."""
     record = entry if isinstance(entry, dict) else {}
     size = record.get("size")
-    if (
-        isinstance(size, bool)
-        or not isinstance(size, int)
-        or size < 0
-        or size > MAX_MANIFEST_SIZE
-    ):
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > MAX_MANIFEST_SIZE:
         size = 0
     return {
         "topic_id": _safe_orphan_topic_id(record.get("topic_id")),
@@ -520,16 +539,20 @@ def _render_assignment_selector_error(
 ) -> int:
     """Render a safe assignment preflight error without creating a course dir."""
     safe_entries = _safe_error_entries([error])
-    safe_message = safe_entries[0].get("error", "Command failed.") if safe_entries else "Command failed."
+    safe_message = (
+        safe_entries[0].get("error", "Command failed.") if safe_entries else "Command failed."
+    )
     print(f"Error: {safe_message}", file=sys.stderr)
     if json_output:
-        _output_json({
-            "course_id": org_id,
-            "downloaded": [],
-            "errors": [],
-            "assignments_downloaded": [],
-            "assignment_errors": safe_entries,
-        })
+        _output_json(
+            {
+                "course_id": org_id,
+                "downloaded": [],
+                "errors": [],
+                "assignments_downloaded": [],
+                "assignment_errors": safe_entries,
+            }
+        )
     return 1
 
 
@@ -570,7 +593,7 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
         return data
 
     assignments = result["assignments"]
-    data: dict[str, Any] = {
+    data = {
         "course_id": result["org_id"],
         "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
         "folder": str(result["dest"]),
@@ -584,8 +607,12 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
             errors=[_single_error(e) for e in result["errors"]],
         )
         if include_assignments:
-            data.update(assignments_downloaded=assignments["downloaded"], assignments_skipped=assignments["skipped"],
-                        assignments_updated=assignments["updated"], assignment_errors=_safe_error_entries(assignments["errors"]))
+            data.update(
+                assignments_downloaded=assignments["downloaded"],
+                assignments_skipped=assignments["skipped"],
+                assignments_updated=assignments["updated"],
+                assignment_errors=_safe_error_entries(assignments["errors"]),
+            )
     else:
         data.update(
             manifest=str(result["manifest_path"]),
@@ -593,7 +620,10 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
             errors=[_single_error(e) for e in result["errors"]],
         )
         if include_assignments:
-            data.update(assignments_downloaded=assignments["downloaded"], assignment_errors=_safe_error_entries(assignments["errors"]))
+            data.update(
+                assignments_downloaded=assignments["downloaded"],
+                assignment_errors=_safe_error_entries(assignments["errors"]),
+            )
     return data
 
 
@@ -615,10 +645,17 @@ def _multi_course_json(result: dict[str, Any], *, sem_name: str, action: str) ->
     course["duplicates"] = result["duplicates"]
     course["errors"] = _safe_error_entries(result["errors"])
     if action == "sync":
-        course.update(assignments_downloaded=assignments["downloaded"], assignments_skipped=assignments["skipped"],
-                      assignments_updated=assignments["updated"], assignment_errors=_safe_error_entries(assignments["errors"]))
+        course.update(
+            assignments_downloaded=assignments["downloaded"],
+            assignments_skipped=assignments["skipped"],
+            assignments_updated=assignments["updated"],
+            assignment_errors=_safe_error_entries(assignments["errors"]),
+        )
     else:
-        course.update(assignments_downloaded=assignments["downloaded"], assignment_errors=_safe_error_entries(assignments["errors"]))
+        course.update(
+            assignments_downloaded=assignments["downloaded"],
+            assignment_errors=_safe_error_entries(assignments["errors"]),
+        )
     return course
 
 
@@ -654,11 +691,13 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
     """Render one engine result as human-readable text. Returns per-course exit code."""
     if result["mode"] is Mode.PLAN:
         print(f"Would download {result['topic_count']} files to {result['dest']}/\n")
-        print("\n".join(
-            f"  [{t.get('topic_id')}] {_safe_server_text(t.get('title'), fallback='Untitled')}"
-            for t in result["planned"]
-            if isinstance(t, dict)
-        ))
+        print(
+            "\n".join(
+                f"  [{t.get('topic_id')}] {_safe_server_text(t.get('title'), fallback='Untitled')}"
+                for t in result["planned"]
+                if isinstance(t, dict)
+            )
+        )
         for error in result["errors"]:
             if "error" in error:
                 print(f"  FAILED: {format_user_error(str(error['error']))}", file=sys.stderr)
@@ -683,10 +722,19 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
             parts.append(f"{len(assignments['downloaded'])} assignment new")
         if assignments["updated"]:
             parts.append(f"{len(assignments['updated'])} assignment updated")
-        parts.extend([f"{len(result['updated'])} updated", f"{len(result['skipped'])} skipped", f"{len(result['orphaned'])} orphaned", f"{len(result['errors'])} errors"])
+        parts.extend(
+            [
+                f"{len(result['updated'])} updated",
+                f"{len(result['skipped'])} skipped",
+                f"{len(result['orphaned'])} orphaned",
+                f"{len(result['errors'])} errors",
+            ]
+        )
         if assignments["errors"]:
             parts.append(f"{len(assignments['errors'])} assignment errors")
-        print(f"Synced {_safe_course_name(result.get('course_name'), result.get('org_id'))}: {', '.join(parts)}")
+        print(
+            f"Synced {_safe_course_name(result.get('course_name'), result.get('org_id'))}: {', '.join(parts)}"
+        )
         return failed
 
     for i, entry in enumerate(result["downloaded"], 1):
@@ -697,7 +745,10 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
         print(f"  [{i}/{result['topic_count']}] {path} ({size / 1024:.0f} KB)")
     for error in result["errors"]:
         if "topic_id" in error:
-            print(f"  FAILED topic {error['topic_id']}: {format_user_error(str(error['error']))}", file=sys.stderr)
+            print(
+                f"  FAILED topic {error['topic_id']}: {format_user_error(str(error['error']))}",
+                file=sys.stderr,
+            )
     if assignments["downloaded"]:
         print(f"\nAssignments: {len(assignments['downloaded'])} attachment(s) downloaded")
     for assignment_error in assignments["errors"]:
@@ -706,7 +757,9 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
                 f"  FAILED assignment: {format_user_error(str(assignment_error['error']))}",
                 file=sys.stderr,
             )
-    print(f"\nDone: {len(result['downloaded'])}/{result['topic_count']} files downloaded to {result['dest']}")
+    print(
+        f"\nDone: {len(result['downloaded'])}/{result['topic_count']} files downloaded to {result['dest']}"
+    )
     if assignments["errors"]:
         print(f"  {len(assignments['errors'])} assignment error(s)")
     return failed
@@ -745,7 +798,9 @@ def _run_and_render_single(
 
     _print_warnings(result)
     if json_output:
-        _output_json(_single_course_json(result, action=action, include_assignments=include_assignments))
+        _output_json(
+            _single_course_json(result, action=action, include_assignments=include_assignments)
+        )
     else:
         _render_course_human(result, action=action, include_assignments=include_assignments)
     return 1 if (result["errors"] or result["assignments"]["errors"]) else 0
@@ -770,7 +825,16 @@ def _run_and_render_multi(
     rc = 0
     for cid in course_ids:
         try:
-            results.append(run_course(client, cid, root, mode=mode, types=types, include_assignments=include_assignments))
+            results.append(
+                run_course(
+                    client,
+                    cid,
+                    root,
+                    mode=mode,
+                    types=types,
+                    include_assignments=include_assignments,
+                )
+            )
         except Exception as e:
             # In JSON mode this per-course failure is represented in the one
             # aggregate document below; printing a JSON error here would
@@ -797,11 +861,17 @@ def _run_and_render_multi(
             if result["mode"] is Mode.PLAN:
                 plan_course = {
                     "course_id": result["org_id"],
-                    "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
+                    "course_name": _safe_course_name(
+                        result.get("course_name"), result.get("org_id")
+                    ),
                     "semester": _safe_server_text(sem_name, fallback="Unknown Semester"),
-                    "root": str(result["dest"]), "manifest_total": 0,
-                    "planned": result["planned"], "downloaded": [], "skipped": [],
-                    "updated": [], "duplicates": [],
+                    "root": str(result["dest"]),
+                    "manifest_total": 0,
+                    "planned": result["planned"],
+                    "downloaded": [],
+                    "skipped": [],
+                    "updated": [],
+                    "duplicates": [],
                     "errors": _safe_error_entries(result["errors"]),
                 }
                 courses.append(plan_course)
@@ -818,10 +888,15 @@ def _run_and_render_multi(
     print(f"{'Syncing' if action == 'sync' else 'Downloading'} courses from {sem_name}...\n")
     for result in results:
         _print_warnings(result)
-        if _render_course_human(result, action=action, include_assignments=include_assignments) != 0:
+        if (
+            _render_course_human(result, action=action, include_assignments=include_assignments)
+            != 0
+        ):
             rc = 1
     if also_errors:
-        print("\n".join(f"  Error: {format_user_error(err)}" for err in also_errors), file=sys.stderr)
+        print(
+            "\n".join(f"  Error: {format_user_error(err)}" for err in also_errors), file=sys.stderr
+        )
     if action == "download":
         print("\nDownload complete.")
     return rc
@@ -830,6 +905,7 @@ def _run_and_render_multi(
 # ---------------------------------------------------------------------------
 # download / sync commands
 # ---------------------------------------------------------------------------
+
 
 def cmd_download(
     course_id: str | None = None,
@@ -883,7 +959,11 @@ def cmd_download(
             payload=_single_error_payload(course_id, action="download"),
         )
 
-    payload = _single_error_payload(course_id, action="download") if course_id is not None else _scope_error_payload()
+    payload = (
+        _single_error_payload(course_id, action="download")
+        if course_id is not None
+        else _scope_error_payload()
+    )
     try:
         root = validate_output_root(
             Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR,
@@ -917,16 +997,28 @@ def cmd_download(
         assignment_folders = None
         if assignment_id is not None and attachment_id is None:
             assignment_folders, assignment_error = _assignment_selector_snapshot(
-                client, org_id, assignment_id,
+                client,
+                org_id,
+                assignment_id,
             )
             if assignment_error is not None:
                 return _render_assignment_selector_error(
-                    org_id, assignment_error, json_output=json_output,
+                    org_id,
+                    assignment_error,
+                    json_output=json_output,
                 )
         if assignment_id is not None and attachment_id is not None:
-            return _download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
+            return _download_single_attachment(
+                client, org_id, assignment_id, attachment_id, root, json_output
+            )
         return _run_and_render_single(
-            client, org_id, root, mode, "download", types, json_output,
+            client,
+            org_id,
+            root,
+            mode,
+            "download",
+            types,
+            json_output,
             include_assignments=include_assignments or assignment_id is not None,
             assignment_id=assignment_id,
             assignment_folders=assignment_folders,
@@ -943,8 +1035,17 @@ def cmd_download(
         return scope
     course_ids, sem_name, sem_id, also_errors = scope
     return _run_and_render_multi(
-        client, course_ids, root, mode, "download", types,
-        sem_id, sem_name, also_errors, json_output, include_assignments,
+        client,
+        course_ids,
+        root,
+        mode,
+        "download",
+        types,
+        sem_id,
+        sem_name,
+        also_errors,
+        json_output,
+        include_assignments,
     )
 
 
@@ -959,7 +1060,11 @@ def cmd_sync(
     include_assignments: bool = False,
 ) -> int:
     """Incremental sync: skip unchanged files using manifest. Same scope options as download."""
-    payload = _single_error_payload(course_id, action="sync") if course_id is not None else _scope_error_payload()
+    payload = (
+        _single_error_payload(course_id, action="sync")
+        if course_id is not None
+        else _scope_error_payload()
+    )
     try:
         root = validate_output_root(
             Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR,
@@ -993,8 +1098,16 @@ def cmd_sync(
                 json_output=json_output,
                 payload=_single_error_payload(course_id, action="sync"),
             )
-        return _run_and_render_single(client, org_id, root, mode, "sync", types, json_output,
-                                      include_assignments=include_assignments)
+        return _run_and_render_single(
+            client,
+            org_id,
+            root,
+            mode,
+            "sync",
+            types,
+            json_output,
+            include_assignments=include_assignments,
+        )
 
     scope = _resolve_course_scope(
         client,
@@ -1007,8 +1120,17 @@ def cmd_sync(
         return scope
     course_ids, sem_name, sem_id, also_errors = scope
     return _run_and_render_multi(
-        client, course_ids, root, mode, "sync", types,
-        sem_id, sem_name, also_errors, json_output, include_assignments,
+        client,
+        course_ids,
+        root,
+        mode,
+        "sync",
+        types,
+        sem_id,
+        sem_name,
+        also_errors,
+        json_output,
+        include_assignments,
     )
 
 
@@ -1016,12 +1138,13 @@ def cmd_sync(
 # Scope resolution (multi-course)
 # ---------------------------------------------------------------------------
 
+
 def _resolve_semester(
     client: LighthouseClient,
     semester_filter: str | None,
     semester_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve semester filter to a semester dict, or None if not found. Matches by OrgUnitId (numeric) or name substring."""
+    """Resolve semester filter to a semester dict[str, Any], or None if not found. Matches by OrgUnitId (numeric) or name substring."""
     if semester_records is None:
         semester_records = client.get_semesters()
     if not isinstance(semester_records, (list, tuple)):
@@ -1060,23 +1183,21 @@ def _resolve_semester(
     if matches := [s for s in semesters if lower_filter in s["Name"].lower()]:
         return max(matches, key=lambda s: _positive_id(s.get("OrgUnitId")) or 0)
 
+    return None
+
 
 def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     """Resolve an --also course identifier (name or numeric ID) to an OrgUnitId."""
     normalized_identifier = identifier.strip()
     if not normalized_identifier:
-        raise CourseNotFoundError(
-            "Course identifier cannot be empty. Run: lighthouse courses"
-        )
+        raise CourseNotFoundError("Course identifier cannot be empty. Run: lighthouse courses")
     courses = get_enrolled_course_catalog(client)
     courses = [course for course in courses if isinstance(course, dict)]
     # Try numeric
     try:
         cid = int(normalized_identifier)
         if not any(_positive_id(c.get("OrgUnitId")) == cid for c in courses):
-            raise CourseNotFoundError(
-                f"Course '{identifier}' not found. Run: lighthouse courses"
-            )
+            raise CourseNotFoundError(f"Course '{identifier}' not found. Run: lighthouse courses")
         return cid
     except ValueError:
         pass
@@ -1084,25 +1205,26 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     # Try name substring
     needle = normalized_identifier.lower()
     matches = [
-        c for c in courses
-        if isinstance(c.get("Name"), str) and needle in c["Name"].lower()
+        c
+        for c in courses
+        if isinstance(c.get("Name"), str)
+        and needle in c["Name"].lower()
         and _positive_id(c.get("OrgUnitId")) is not None
     ]
     if len(matches) == 1:
         return _positive_id(matches[0]["OrgUnitId"]) or 0
     if len(matches) > 1:
         raise CourseNotFoundError(
-            "Ambiguous match '" + identifier + "'. Multiple courses found:\n"
+            "Ambiguous match '"
+            + identifier
+            + "'. Multiple courses found:\n"
             + "\n".join(
-                f"  {_positive_id(c.get('OrgUnitId'))} – "
-                f"{_safe_server_text(c.get('Name'))}"
+                f"  {_positive_id(c.get('OrgUnitId'))} – {_safe_server_text(c.get('Name'))}"
                 for c in matches
             )
             + "\n\nUse the numeric OrgUnitId for an exact match."
         )
-    raise CourseNotFoundError(
-        f"Course '{identifier}' not found. Run: lighthouse courses"
-    )
+    raise CourseNotFoundError(f"Course '{identifier}' not found. Run: lighthouse courses")
 
 
 def _filter_courses_by_semester(
@@ -1139,14 +1261,11 @@ def _filter_courses_by_semester(
         # matches a config label of "Sem II".
         target_lower = None
 
-    sem_name = (
-        _safe_server_text(semester.get("Name"))
-        if isinstance(semester, dict)
-        else ""
-    )
+    sem_name = _safe_server_text(semester.get("Name")) if isinstance(semester, dict) else ""
     sem_segments = [s.strip() for s in sem_name.lower().split("|")] if target_lower is None else []
     return [
-        oid for e in enrollments
+        oid
+        for e in enrollments
         if isinstance(e, dict)
         and isinstance(e.get("OrgUnit"), dict)
         and (oid := _positive_id(e["OrgUnit"].get("Id"))) is not None
@@ -1205,7 +1324,9 @@ def _resolve_course_scope(
         return _error(e, json_output=json_output, payload=_scope_error_payload())
 
     if not isinstance(semesters, (list, tuple)) or not semesters:
-        return _error("No semesters found.", json_output=json_output, payload=_scope_error_payload())
+        return _error(
+            "No semesters found.", json_output=json_output, payload=_scope_error_payload()
+        )
     if not isinstance(enrollments, (list, tuple)):
         return _error(
             "Invalid course enrollment response.",
@@ -1218,14 +1339,22 @@ def _resolve_course_scope(
     if (sem := _resolve_semester(client, semester_filter, list(semesters))) is None:
         return _error(
             f"No semester matching '{semester_filter}'. Run: lighthouse semesters"
-            if semester_filter else "No semesters found.",
+            if semester_filter
+            else "No semesters found.",
             json_output=json_output,
             payload=_scope_error_payload(),
         )
 
-    semester_course_ids = sorted(set(_filter_courses_by_semester(
-        list(enrollments), sem, semester_filter=semester_filter, config=trusted_config,
-    )))
+    semester_course_ids = sorted(
+        set(
+            _filter_courses_by_semester(
+                list(enrollments),
+                sem,
+                semester_filter=semester_filter,
+                config=trusted_config,
+            )
+        )
+    )
 
     also_errors, also_ids = [], []
     for ident in also_courses:
@@ -1264,6 +1393,7 @@ def _resolve_course_scope(
 # ---------------------------------------------------------------------------
 # Read-only commands
 # ---------------------------------------------------------------------------
+
 
 def cmd_auth_status(json_output: bool = False) -> int:
     """Check if stored cookies are valid."""
@@ -1370,7 +1500,7 @@ def cmd_courses(
             json_output=json_output,
             payload=_course_list_error_payload(),
         )
-    courses = []
+    courses: list[dict[str, Any]] = []
     for enrolled_course in enrolled_courses:
         if not isinstance(enrolled_course, dict):
             continue
@@ -1383,13 +1513,15 @@ def cmd_courses(
         # Keep the historical empty-string ``semester`` field for callers that
         # already consume it.  The explicit fields make it impossible for a
         # consumer to mistake an unmapped course for an inferred semester.
-        courses.append({
-            "OrgUnitId": org_id,
-            "Name": _safe_server_text(enrolled_course.get("Name")),
-            "Code": _safe_server_text(enrolled_course.get("Code")),
-            "IsActive": _coerce_boolish(enrolled_course.get("IsActive", True), default=True),
-            **_semester_state(configured),
-        })
+        courses.append(
+            {
+                "OrgUnitId": org_id,
+                "Name": _safe_server_text(enrolled_course.get("Name")),
+                "Code": _safe_server_text(enrolled_course.get("Code")),
+                "IsActive": _coerce_boolish(enrolled_course.get("IsActive", True), default=True),
+                **_semester_state(configured),
+            }
+        )
 
     if (tracked_only or semester) and not config:
         return _error(
@@ -1400,10 +1532,13 @@ def cmd_courses(
     if tracked_only:
         courses = [c for c in courses if str(c.get("OrgUnitId", "")) in config]
     if semester:
-        if not (courses := [
-            c for c in courses
-            if c.get("semester", "").lower().strip() == semester.lower().strip()
-        ]):
+        if not (
+            courses := [
+                c
+                for c in courses
+                if c.get("semester", "").lower().strip() == semester.lower().strip()
+            ]
+        ):
             return _error(
                 f"No tracked courses mapped to semester '{semester}'.\n"
                 "Run: lighthouse config courses --list to see your mappings.",
@@ -1415,11 +1550,21 @@ def cmd_courses(
         _output_json(courses)
         return 0
 
-    _print_table(["ID", "Name", "Semester", "Active"], [
-        [str(c.get("OrgUnitId", "")), _short(c.get("Name", ""), 40), c.get("semester", "").strip() or "Unmapped", "Y" if c.get("IsActive") else "N"]
-        for c in courses
-    ], title=f"Courses ({len(courses)})")
+    _print_table(
+        ["ID", "Name", "Semester", "Active"],
+        [
+            [
+                str(c.get("OrgUnitId", "")),
+                _short(c.get("Name", ""), 40),
+                c.get("semester", "").strip() or "Unmapped",
+                "Y" if c.get("IsActive") else "N",
+            ]
+            for c in courses
+        ],
+        title=f"Courses ({len(courses)})",
+    )
     return 0
+
 
 def cmd_content(course_id: str, json_output: bool = False) -> int:
     """Show content tree for a course."""
@@ -1500,8 +1645,7 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
     start_depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 0
     start_depth = max(0, min(start_depth, _CONTENT_MAX_DEPTH))
     stack: list[tuple[str, Any, int]] = [
-        ("module", module, start_depth)
-        for module in reversed(modules)
+        ("module", module, start_depth) for module in reversed(modules)
     ]
     seen_modules: set[int] = set()
     truncated = False
@@ -1509,13 +1653,15 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
     def append_truncation(marker_depth: int) -> None:
         nonlocal truncated
         if not truncated and len(items) < _CONTENT_MAX_NODES:
-            items.append({
-                "depth": marker_depth,
-                "type": "truncated",
-                "id": None,
-                "title": _CONTENT_TRUNCATED_TITLE,
-                "url": None,
-            })
+            items.append(
+                {
+                    "depth": marker_depth,
+                    "type": "truncated",
+                    "id": None,
+                    "title": _CONTENT_TRUNCATED_TITLE,
+                    "url": None,
+                }
+            )
             truncated = True
 
     while stack:
@@ -1533,16 +1679,19 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
                 append_truncation(current_depth)
                 stack.clear()
                 continue
-            items.append({
-                "depth": current_depth,
-                "type": "topic",
-                "id": _safe_content_id(current.get("TopicId")),
-                "title": _safe_server_text(current.get("Title")),
-                "url": _safe_content_url(current.get("Url")),
-                "topic_type": _safe_server_text(
-                    current.get("TypeIdentifier"), max_len=64,
-                ),
-            })
+            items.append(
+                {
+                    "depth": current_depth,
+                    "type": "topic",
+                    "id": _safe_content_id(current.get("TopicId")),
+                    "title": _safe_server_text(current.get("Title")),
+                    "url": _safe_content_url(current.get("Url")),
+                    "topic_type": _safe_server_text(
+                        current.get("TypeIdentifier"),
+                        max_len=64,
+                    ),
+                }
+            )
             continue
         if not isinstance(current, dict):
             continue
@@ -1555,13 +1704,15 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
             stack.clear()
             continue
 
-        items.append({
-            "depth": current_depth,
-            "type": "module",
-            "id": _safe_content_id(current.get("ModuleId")),
-            "title": _safe_server_text(current.get("Title")),
-            "url": None,
-        })
+        items.append(
+            {
+                "depth": current_depth,
+                "type": "module",
+                "id": _safe_content_id(current.get("ModuleId")),
+                "title": _safe_server_text(current.get("Title")),
+                "url": None,
+            }
+        )
 
         topics = current.get("Topics", [])
         if isinstance(topics, list):
@@ -1644,6 +1795,7 @@ def _safe_quiz_json_scalar(value: Any) -> int | float | str | None:
 def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     """Project quiz JSON onto bounded scalar fields and safe RichText."""
     from .quiz_rules import navigation_rules
+
     payload: dict[str, Any] = {
         "QuizId": _safe_content_id(quiz.get("QuizId")),
         "Name": _safe_server_text(quiz.get("Name"), fallback="Quiz") or "Quiz",
@@ -1729,7 +1881,14 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
     instr_text = _safe_quiz_rich_text(quiz.get("Instructions", {}))
 
     print(f"\n📝 {quiz_name}\n   ID: {quiz_identifier if quiz_identifier is not None else '?'}")
-    for label, key in [("Active", "IsActive"), ("Shuffle Questions", "Shuffle"), ("Prevent Moving Back", "PreventMovingBackwards"), ("Single Session", "IsSingleSession"), ("Allow Hints", "AllowHints"), ("Auto-export to Grades", "AutoExportToGrades")]:
+    for label, key in [
+        ("Active", "IsActive"),
+        ("Shuffle Questions", "Shuffle"),
+        ("Prevent Moving Back", "PreventMovingBackwards"),
+        ("Single Session", "IsSingleSession"),
+        ("Allow Hints", "AllowHints"),
+        ("Auto-export to Grades", "AutoExportToGrades"),
+    ]:
         print(f"   {label}: {'Yes' if _coerce_boolish(quiz.get(key)) else 'No'}")
     for label, key in [("Start", "StartDate"), ("End", "EndDate"), ("Due", "DueDate")]:
         print(f"   {label}: {_fmt_date(_safe_quiz_date(quiz.get(key)))}")
@@ -1743,6 +1902,7 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
     )
     print(f"   Attempts: {attempts_text}")
     from .quiz_rules import navigation_rules
+
     rules = navigation_rules(quiz)
     print(f"   Question Layout: {rules['layout']}")
     if rules["prevent_moving_backwards"] is True:

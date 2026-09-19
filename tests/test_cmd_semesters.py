@@ -12,16 +12,19 @@ from __future__ import annotations
 
 import json
 from unittest.mock import patch
+
 from click.testing import CliRunner
 
-from lighthouse_cli.cli import cli
 from lighthouse_cli.api import LighthouseClient
+from lighthouse_cli.cli import cli
 
 
 class TestCmdSemesters:
     """Tests for `lighthouse semesters` command."""
 
-    def test_semesters_lists_all_semesters(self, cli_runner: CliRunner, sample_semesters: list) -> None:
+    def test_semesters_lists_all_semesters(
+        self, cli_runner: CliRunner, sample_semesters: list
+    ) -> None:
         """When API returns semesters, command lists them in a table."""
         with patch.object(LighthouseClient, "get_semesters", return_value=sample_semesters):
             result = cli_runner.invoke(cli, ["semesters", "--json"])
@@ -57,7 +60,9 @@ class TestCmdSemesters:
         """When API raises SessionExpiredError, command exits with code 1."""
         from lighthouse_cli.api import SessionExpiredError
 
-        with patch.object(LighthouseClient, "get_semesters", side_effect=SessionExpiredError("Session expired")):
+        with patch.object(
+            LighthouseClient, "get_semesters", side_effect=SessionExpiredError("Session expired")
+        ):
             result = cli_runner.invoke(cli, ["semesters"])
 
         assert result.exit_code == 1

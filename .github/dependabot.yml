@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Burn-in: let new upstream releases settle for a week before proposing them,
+    # which filters most yanked/patch-on-patch churn (see min-release-age intent).
+    minimum-update-age: "7 days"
+    groups:
+      dev-toolchain:
+        dependency-type: "development"
+      runtime-dependencies:
+        dependency-type: "production"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    minimum-update-age: "7 days"

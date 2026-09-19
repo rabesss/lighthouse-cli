@@ -21,7 +21,6 @@ from lighthouse_cli.ms_errors import (
 )
 from lighthouse_cli.ms_session import _mask_phone_hint
 
-
 _PROOF_METHOD_LABELS = {
     MFA_AUTH_SMS: "Text code (SMS or WhatsApp)",
     MFA_AUTH_APP_OTP: "Microsoft Authenticator code",

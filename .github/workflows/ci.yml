@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint / types / architecture / deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install pinned dev toolchain
+        run: pip install -r requirements-dev.txt
+      - name: Format check
+        run: ruff format --check .
+      - name: Lint
+        run: ruff check .
+      - name: Type check (strict)
+        run: mypy
+      - name: Architecture layers
+        run: lint-imports
+      - name: Unused / undeclared dependency scan
+        run: deptry .
+      - name: Complexity ratchet
+        # Known hotspots (ms_auth SSO state machine) are excluded; the gate
+        # still fails if averages regress or new worst-case blocks appear.
+        run: xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli
+
+  security:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Git history secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Working tree secret scan (audited baseline)
+        run: |
+          pip install detect-secrets==1.5.0
+          detect-secrets scan --baseline .secrets.baseline
+
+  tests:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.10"
+            install: pip install -r requirements-dev.txt && pip install -e . --no-deps
+          - python-version: "3.13"
+            install: pip install -e '.[dev]'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: ${{ matrix.install }}
+      - name: Test suite
+        run: pytest -q --durations=10 --cov --cov-report=term --cov-report=xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: coverage.xml
+
+  policies:
+    name: repository policy tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      # Policy tests are stdlib-only file assertions; they need just pytest.
+      - run: pip install pytest pytest-mock
+      - run: pytest tests/test_repo_policies.py -q

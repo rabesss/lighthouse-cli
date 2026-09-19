@@ -21,10 +21,10 @@ from typing import Any
 
 from .utils import _parse_finite_float, _reject_non_finite_json, atomic_write
 
-
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
 
 class ManifestError(Exception):
     """Base exception for manifest operations."""
@@ -111,6 +111,7 @@ def utc_now() -> str:
 # Manifest class
 # ---------------------------------------------------------------------------
 
+
 class Manifest:
     """Represents a .lighthouse.json manifest for a single course.
 
@@ -196,9 +197,7 @@ class Manifest:
         }
         for key, expected_type in type_map.items():
             if key in entry and not isinstance(entry[key], expected_type):
-                errors.append(
-                    f"Manifest entry: {key} must be a {expected_type}"
-                )
+                errors.append(f"Manifest entry: {key} must be a {expected_type}")
 
         if (
             "sha256" in entry
@@ -206,9 +205,7 @@ class Manifest:
             and entry["sha256"]
             and not is_valid_sha256(entry["sha256"])
         ):
-            errors.append(
-                "Manifest entry: sha256 must be a 64-character hexadecimal digest"
-            )
+            errors.append("Manifest entry: sha256 must be a 64-character hexadecimal digest")
 
         if "size" in entry:
             size = entry["size"]
@@ -219,9 +216,7 @@ class Manifest:
                 or size > MAX_MANIFEST_SIZE
             )
             if invalid_size:
-                errors.append(
-                    "Manifest entry: size must be a finite non-negative number"
-                )
+                errors.append("Manifest entry: size must be a finite non-negative number")
 
         if "filename" in entry and isinstance(entry["filename"], str) and not entry["filename"]:
             errors.append("Manifest entry: filename must not be empty")
@@ -284,8 +279,10 @@ class Manifest:
         Computes SHA-256 from the exact file bytes.
         """
         entry = {
-            "sha256": compute_sha256(content), "filename": filename,
-            "size": len(content), "downloaded_at": utc_now(),
+            "sha256": compute_sha256(content),
+            "filename": filename,
+            "size": len(content),
+            "downloaded_at": utc_now(),
             "last_modified": last_modified,
         }
         self.entries[str(topic_id)] = entry

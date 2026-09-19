@@ -46,11 +46,21 @@ class TestDownloadManifestIntegration:
             ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "009_BME_2125"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"PDF content here", "Lecture%201.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "009_BME_2125"}
+                ],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient,
+                "download_topic_file",
+                return_value=(b"PDF content here", "Lecture%201.pdf"),
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--json"],
@@ -83,19 +93,37 @@ class TestDownloadManifestIntegration:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 1, "Title": "f", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"}
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 1,
+                            "Title": "f",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "009_BME_2125"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "009_BME_2125"}
+                ],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--json"],
@@ -104,7 +132,9 @@ class TestDownloadManifestIntegration:
             assert result.exit_code == 0
             # Course folder should be named after sanitized course name + org_id
             course_dir = output_dir / "Signals & Systems-44347"
-            assert course_dir.exists(), f"Expected {course_dir}. Contents: {list(output_dir.iterdir())}"
+            assert course_dir.exists(), (
+                f"Expected {course_dir}. Contents: {list(output_dir.iterdir())}"
+            )
 
     def test_download_sanitizes_course_name_special_chars(self, cli_runner, tmp_path):
         """Course name with forbidden chars is sanitized in folder name."""
@@ -112,19 +142,37 @@ class TestDownloadManifestIntegration:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 1, "Title": "f", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"}
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 1,
+                            "Title": "f",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 99999, "Name": 'Intro: CS *2025* / Section<1>', "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 99999, "Name": "Intro: CS *2025* / Section<1>", "Code": "X"}
+                ],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "99999", "-o", str(output_dir), "--json"],
@@ -134,7 +182,9 @@ class TestDownloadManifestIntegration:
             # Should create "Intro_ CS _2025_ _ Section_1_-99999"
             expected_folder = "Intro_ CS _2025_ _ Section_1_-99999"
             course_dir = output_dir / expected_folder
-            assert course_dir.exists(), f"Expected {course_dir}. Contents: {list(output_dir.iterdir())}"
+            assert course_dir.exists(), (
+                f"Expected {course_dir}. Contents: {list(output_dir.iterdir())}"
+            )
 
     def test_manifest_atomic_write_no_corruption(self, cli_runner, tmp_path):
         """Manifest is written atomically — no partial/corrupt JSON on success."""
@@ -148,23 +198,41 @@ class TestDownloadManifestIntegration:
                     "Title": "Mod",
                     "Modules": [],
                     "Topics": [
-                        {"TopicId": 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                         "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                        {"TopicId": 11, "Title": "g.pdf", "TypeIdentifier": "File",
-                         "Url": "", "LastModifiedDate": "2026-01-02T00:00:00Z"},
+                        {
+                            "TopicId": 10,
+                            "Title": "f.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                        {
+                            "TopicId": 11,
+                            "Title": "g.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-02T00:00:00Z",
+                        },
                     ],
                 }
             ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Signals", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=[
-                 (b"content1", "f.pdf"),
-                 (b"content2", "g.pdf"),
-             ]):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Signals", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient,
+                "download_topic_file",
+                side_effect=[
+                    (b"content1", "f.pdf"),
+                    (b"content2", "g.pdf"),
+                ],
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir)],
@@ -188,22 +256,35 @@ class TestDownloadManifestIntegration:
 
         toc_date = "2026-06-15T09:30:00Z"
         toc = {
-            "Modules": [{
-                "ModuleId": 1,
-                "Title": "Mod",
-                "Modules": [],
-                "Topics": [
-                    {"TopicId": 100, "Title": "file.pdf", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": toc_date},
-                ],
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 100,
+                            "Title": "file.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": toc_date,
+                        },
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"pdf content", "file.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient, "download_topic_file", return_value=(b"pdf content", "file.pdf")
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--json"],
@@ -226,19 +307,37 @@ class TestSanitizationIntegration:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 1, "Title": "L1", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"}
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 1,
+                            "Title": "L1",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "L1%20Intro%20File.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient,
+                "download_topic_file",
+                return_value=(b"content", "L1%20Intro%20File.pdf"),
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir)],
@@ -267,19 +366,35 @@ class TestSanitizationIntegration:
         manifest_path.write_text("not valid json")
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 1, "Title": "f", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"}
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 1,
+                            "Title": "f",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--force"],
@@ -300,22 +415,49 @@ class TestHTMLTopicDownload:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 100, "Title": "Lecture.pdf", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                    {"TopicId": 101, "Title": "Notes.html", "TypeIdentifier": "HTML",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 100,
+                            "Title": "Lecture.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                        {
+                            "TopicId": 101,
+                            "Title": "Notes.html",
+                            "TypeIdentifier": "HTML",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"PDF content", "Lecture.pdf")), \
-             patch.object(LighthouseClient, "get_topic_html", return_value=(b"<html>test</html>", "Notes.html")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient,
+                "download_topic_file",
+                return_value=(b"PDF content", "Lecture.pdf"),
+            ),
+            patch.object(
+                LighthouseClient,
+                "get_topic_html",
+                return_value=(b"<html>test</html>", "Notes.html"),
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--types", "file,html", "--json"],
@@ -323,7 +465,9 @@ class TestHTMLTopicDownload:
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
             data = json.loads(result.output)
-            assert len(data["downloaded"]) == 2, f"Expected 2 downloads, got {len(data['downloaded'])}"
+            assert len(data["downloaded"]) == 2, (
+                f"Expected 2 downloads, got {len(data['downloaded'])}"
+            )
 
     def test_html_topic_saved_as_html_file(self, cli_runner, tmp_path):
         """HTML topics are saved as .html files with body content (VAL-SYNC-034)."""
@@ -331,19 +475,37 @@ class TestHTMLTopicDownload:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 200, "Title": "Overview", "TypeIdentifier": "HTML",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 200,
+                            "Title": "Overview",
+                            "TypeIdentifier": "HTML",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "get_topic_html", return_value=(b"<html><body>Hello</body></html>", "Overview.html")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient,
+                "get_topic_html",
+                return_value=(b"<html><body>Hello</body></html>", "Overview.html"),
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
@@ -361,19 +523,35 @@ class TestHTMLTopicDownload:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 300, "Title": "f.pdf", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 300,
+                            "Title": "f.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
         }
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--types", "file,video"],
@@ -392,21 +570,37 @@ class TestFallbackFilename:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 999, "Title": "Untitled", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 999,
+                            "Title": "Untitled",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
         }
 
         # Simulate no Content-Disposition by returning empty filename from _extract_filename
         # The download_topic_file uses _extract_filename which returns "" when no filename=
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"binary data", "topic_999")):
-
+        with (
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[{"OrgUnitId": 44347, "Name": "Test", "Code": "X"}],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
+            patch.object(
+                LighthouseClient, "download_topic_file", return_value=(b"binary data", "topic_999")
+            ),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--json"],
@@ -436,21 +630,41 @@ class TestNoCourseIdDownloadsLatestSemester:
         ]
 
         toc_course_a = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 1,
+                    "Title": "Mod",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 10,
+                            "Title": "f.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
         }
 
         toc_course_b = {
-            "Modules": [{
-                "ModuleId": 2, "Title": "Mod2", "Modules": [], "Topics": [
-                    {"TopicId": 20, "Title": "g.pdf", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
+            "Modules": [
+                {
+                    "ModuleId": 2,
+                    "Title": "Mod2",
+                    "Modules": [],
+                    "Topics": [
+                        {
+                            "TopicId": 20,
+                            "Title": "g.pdf",
+                            "TypeIdentifier": "File",
+                            "Url": "",
+                            "LastModifiedDate": "2026-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
         }
 
         def get_content_toc(cid):
@@ -473,21 +687,26 @@ class TestNoCourseIdDownloadsLatestSemester:
             ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "tracked_courses": {
+                        "111": {"name": "Course A", "semester": "Sem I"},
+                        "222": {"name": "Course B", "semester": "Sem II"},
+                    }
+                }
+            )
+        )
 
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", side_effect=get_courses), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file), \
-             patch.object(LighthouseClient, "get_topic_html", side_effect=get_topic_html):
-
+        with (
+            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
+            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
+            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
+            patch.object(LighthouseClient, "get_courses", side_effect=get_courses),
+            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
+            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
+            patch.object(LighthouseClient, "get_topic_html", side_effect=get_topic_html),
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "-o", str(output_dir), "--dry-run"],
@@ -515,14 +734,21 @@ class TestDownloadAssignmentValidation:
         self, cli_runner, tmp_path, option, value
     ):
         output_dir = tmp_path / "downloads"
-        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
-             patch("lighthouse_cli.commands._download_single_attachment") as attachment, \
-             patch("lighthouse_cli.commands._run_and_render_single") as run:
+        with (
+            patch("lighthouse_cli.commands.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.commands._download_single_attachment") as attachment,
+            patch("lighthouse_cli.commands._run_and_render_single") as run,
+        ):
             result = cli_runner.invoke(
                 cli,
                 [
-                    "download", "44347", option, value,
-                    "--json", "-o", str(output_dir),
+                    "download",
+                    "44347",
+                    option,
+                    value,
+                    "--json",
+                    "-o",
+                    str(output_dir),
                 ],
             )
 
@@ -541,9 +767,11 @@ class TestDownloadAssignmentValidation:
         self, tmp_path, capsys, assignment_id, attachment_id
     ):
         output_dir = tmp_path / "downloads"
-        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
-             patch("lighthouse_cli.commands._download_single_attachment") as attachment, \
-             patch("lighthouse_cli.commands._run_and_render_single") as run:
+        with (
+            patch("lighthouse_cli.commands.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.commands._download_single_attachment") as attachment,
+            patch("lighthouse_cli.commands._run_and_render_single") as run,
+        ):
             result = cmd_download(
                 course_id="44347",
                 output_dir=str(output_dir),
@@ -573,8 +801,10 @@ class TestDownloadAssignmentValidation:
         self, cli_runner, tmp_path, args, message
     ):
         output_dir = tmp_path / "downloads"
-        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
-             patch("lighthouse_cli.commands._download_single_attachment") as attachment:
+        with (
+            patch("lighthouse_cli.commands.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.commands._download_single_attachment") as attachment,
+        ):
             result = cli_runner.invoke(cli, ["download", *args, "-o", str(output_dir)])
 
         assert result.exit_code == 1, result.output
@@ -583,17 +813,25 @@ class TestDownloadAssignmentValidation:
         attachment.assert_not_called()
         assert not output_dir.exists()
 
-    def test_specific_attachment_dry_run_is_rejected_without_writes(
-        self, cli_runner, tmp_path
-    ):
+    def test_specific_attachment_dry_run_is_rejected_without_writes(self, cli_runner, tmp_path):
         output_dir = tmp_path / "downloads"
-        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
-             patch("lighthouse_cli.commands._download_single_attachment") as attachment:
+        with (
+            patch("lighthouse_cli.commands.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.commands._download_single_attachment") as attachment,
+        ):
             result = cli_runner.invoke(
                 cli,
                 [
-                    "download", "44347", "--assignment", "101", "--attachment", "1",
-                    "--dry-run", "--json", "-o", str(output_dir),
+                    "download",
+                    "44347",
+                    "--assignment",
+                    "101",
+                    "--attachment",
+                    "1",
+                    "--dry-run",
+                    "--json",
+                    "-o",
+                    str(output_dir),
                 ],
             )
 
@@ -609,8 +847,14 @@ class TestDownloadAssignmentValidation:
             result = cli_runner.invoke(
                 cli,
                 [
-                    "download", "44347", "--assignment", "101", "--dry-run",
-                    "--json", "-o", str(output_dir),
+                    "download",
+                    "44347",
+                    "--assignment",
+                    "101",
+                    "--dry-run",
+                    "--json",
+                    "-o",
+                    str(output_dir),
                 ],
             )
 
@@ -621,9 +865,11 @@ class TestDownloadAssignmentValidation:
 
     def test_assignment_only_enables_folder_scoped_download(self):
         """A valid --assignment without --attachment must not be silently ignored."""
-        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
-             patch("lighthouse_cli.commands.resolve_course_id", return_value=44347), \
-             patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run:
+        with (
+            patch("lighthouse_cli.commands.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.commands.resolve_course_id", return_value=44347),
+            patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run,
+        ):
             client_cls.return_value.get_dropbox_folders.return_value = [{"Id": 101}]
             result = cmd_download(course_id="44347", assignment_id=101)
 
@@ -634,9 +880,11 @@ class TestDownloadAssignmentValidation:
 
     def test_download_dry_run_constructs_read_only_client(self, cli_runner, tmp_path):
         output_dir = tmp_path / "downloads"
-        with patch("lighthouse_cli.commands.LighthouseClient") as client_cls, \
-             patch("lighthouse_cli.commands.resolve_course_id", return_value=44347), \
-             patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run:
+        with (
+            patch("lighthouse_cli.commands.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.commands.resolve_course_id", return_value=44347),
+            patch("lighthouse_cli.commands._run_and_render_single", return_value=0) as run,
+        ):
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "--dry-run", "-o", str(output_dir)],

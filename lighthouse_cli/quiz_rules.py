@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 PAGING_LABELS = {
     0: "All questions on one page",
     1: "One question per page",
@@ -29,10 +28,12 @@ def navigation_rules(quiz: dict[str, Any]) -> dict[str, Any]:
         prevent_back = None
     return {
         "paging_type_id": paging,
-        "layout": PAGING_LABELS.get(paging, "Unknown or classic paging"),
+        "layout": (
+            "Unknown or classic paging"
+            if paging is None
+            else PAGING_LABELS.get(paging, "Unknown or classic paging")
+        ),
         "prevent_moving_backwards": prevent_back,
         "save_before_advancing": True,
-        "can_revisit_previous_pages": (
-            None if prevent_back is None else not prevent_back
-        ),
+        "can_revisit_previous_pages": (None if prevent_back is None else not prevent_back),
     }

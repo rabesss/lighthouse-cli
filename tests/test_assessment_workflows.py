@@ -12,7 +12,13 @@ import requests
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredError
-from lighthouse_cli.assessment_api import AssessmentAPI, AssessmentWriteUnknownError, assignment_payload, project, quiz_payload
+from lighthouse_cli.assessment_api import (
+    AssessmentAPI,
+    AssessmentWriteUnknownError,
+    assignment_payload,
+    project,
+    quiz_payload,
+)
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.connection import connection_for
@@ -41,13 +47,18 @@ def test_unknown_rules_do_not_grant_navigation(paging, back):
 
 def test_trial_urls_cookies_and_pagination_are_origin_scoped():
     client = LighthouseClient(site="trial")
-    assert client.canonical_url("/22985/quizzes/") == "https://hetrynow.brightspace.com/d2l/api/le/1.93/22985/quizzes/"
-    assert client.canonical_url("?page=2", base_url="/22985/quizzes/").endswith("/22985/quizzes/?page=2")
+    assert (
+        client.canonical_url("/22985/quizzes/")
+        == "https://hetrynow.brightspace.com/d2l/api/le/1.93/22985/quizzes/"
+    )
+    assert client.canonical_url("?page=2", base_url="/22985/quizzes/").endswith(
+        "/22985/quizzes/?page=2"
+    )
     with pytest.raises(NetworkError):
         client.get("https://lighthouse.manipal.edu/d2l/api/versions/")
     with pytest.raises(NetworkError):
         client.get("https://hetrynow.brightspace.com.evil.invalid/d2l/api/versions/")
-    client._apply_cookies_to_session({key: "test" for key in COOKIE_NAMES})
+    client._apply_cookies_to_session(dict.fromkeys(COOKIE_NAMES, "test"))
     assert {cookie.domain for cookie in client._session.cookies} == {"hetrynow.brightspace.com"}
     assert client._read_only_auth
 
@@ -64,7 +75,22 @@ def test_trial_does_not_read_production_session():
 
 def test_dry_run_does_not_construct_client_or_write():
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
-        result = CliRunner().invoke(cli, ["instructor", "--site", "trial", "quiz-create", "22985", "--name", "Practice", "--layout", "one-way", "--dry-run", "--json"])
+        result = CliRunner().invoke(
+            cli,
+            [
+                "instructor",
+                "--site",
+                "trial",
+                "quiz-create",
+                "22985",
+                "--name",
+                "Practice",
+                "--layout",
+                "one-way",
+                "--dry-run",
+                "--json",
+            ],
+        )
     assert result.exit_code == 0
     assert json.loads(result.stdout)["data"]["PagingTypeId"] == 1
     client.assert_not_called()
@@ -72,7 +98,9 @@ def test_dry_run_does_not_construct_client_or_write():
 
 def test_write_requires_confirmation_before_session_access():
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
-        result = CliRunner().invoke(cli, ["instructor", "quiz-create", "12", "--name", "Practice", "--json"])
+        result = CliRunner().invoke(
+            cli, ["instructor", "quiz-create", "12", "--name", "Practice", "--json"]
+        )
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"cancelled": True}
     client.assert_not_called()
@@ -82,10 +110,12 @@ def test_write_network_failure_is_not_replayed_and_is_not_reported_success():
     client = LighthouseClient()
     client._csrf_token = "synthetic-csrf"
     client._loaded = True
-    client._cookies = {key: "test" for key in COOKIE_NAMES}
+    client._cookies = dict.fromkeys(COOKIE_NAMES, "test")
     client._session.request = Mock(side_effect=requests.ConnectionError("cookie=NEVER_PRINT"))
     with patch("lighthouse_cli.assessment_commands.LighthouseClient", return_value=client):
-        result = CliRunner().invoke(cli, ["instructor", "assignment-create", "12", "--name", "Practice", "--yes", "--json"])
+        result = CliRunner().invoke(
+            cli, ["instructor", "assignment-create", "12", "--name", "Practice", "--yes", "--json"]
+        )
     assert result.exit_code == 1
     assert "unknown" in json.loads(result.stdout)["error"]
     assert "NEVER_PRINT" not in result.output
@@ -93,12 +123,22 @@ def test_write_network_failure_is_not_replayed_and_is_not_reported_success():
 
 
 def test_learner_history_uses_my_submissions_and_retains_feedback():
-    response = [{"Entity": {"EntityId": 7, "EntityType": "User"}, "Status": 3, "Feedback": {"Score": 4, "IsGraded": True}, "Submissions": [{"Id": 9, "Files": [{"FileId": 8, "FileName": "answer.txt"}]}], "Password": "NEVER_PRINT"}]
+    response = [
+        {
+            "Entity": {"EntityId": 7, "EntityType": "User"},
+            "Status": 3,
+            "Feedback": {"Score": 4, "IsGraded": True},
+            "Submissions": [{"Id": 9, "Files": [{"FileId": 8, "FileName": "answer.txt"}]}],
+            "Password": "NEVER_PRINT",
+        }
+    ]
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
         client.return_value.get_json.return_value = response
         result = CliRunner().invoke(cli, ["student", "assignment-history", "12", "34", "--json"])
     assert result.exit_code == 0
-    client.return_value.get_json.assert_called_once_with("/12/dropbox/folders/34/submissions/mysubmissions/")
+    client.return_value.get_json.assert_called_once_with(
+        "/12/dropbox/folders/34/submissions/mysubmissions/"
+    )
     data = json.loads(result.stdout)["data"][0]
     assert data["Status"] == 3
     assert data["Entity"] == {"EntityId": 7, "EntityType": "User"}
@@ -109,13 +149,25 @@ def test_learner_history_uses_my_submissions_and_retains_feedback():
 
 def test_teacher_questions_follow_pagination():
     client = LighthouseClient()
-    client.get_json = Mock(side_effect=[{"Objects": [{"QuestionId": 1}], "Next": "?page=2"}, {"Objects": [{"QuestionId": 2}], "Next": None}])
+    client.get_json = Mock(
+        side_effect=[
+            {"Objects": [{"QuestionId": 1}], "Next": "?page=2"},
+            {"Objects": [{"QuestionId": 2}], "Next": None},
+        ]
+    )
     assert AssessmentAPI(client, 12).questions(34) == [{"QuestionId": 1}, {"QuestionId": 2}]
     assert client.get_json.call_count == 2
 
 
 def test_projection_never_exposes_unknown_or_secret_fields():
-    result = project({"Name": "cookie=NEVER_PRINT", "Password": "NEVER_PRINT", "QuestionInfo": {"Token": "NEVER_PRINT", "Answers": [{"Text": "Four", "Weight": 100}]}, "Score": 10**1000})
+    result = project(
+        {
+            "Name": "cookie=NEVER_PRINT",
+            "Password": "NEVER_PRINT",
+            "QuestionInfo": {"Token": "NEVER_PRINT", "Answers": [{"Text": "Four", "Weight": 100}]},
+            "Score": 10**1000,
+        }
+    )
     assert "NEVER_PRINT" not in json.dumps(result)
     assert result["QuestionInfo"]["Answers"][0]["Weight"] == 100
     assert result["Score"] is None
@@ -127,21 +179,35 @@ def test_projection_has_resource_limits():
 
 
 def test_session_import_is_sealed_origin_bound_and_separate():
-    document = {"origin": "https://hetrynow.brightspace.com", "cookies": {key: "SYNTHETIC_SESSION" for key in COOKIE_NAMES}}
-    result = CliRunner().invoke(cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document))
+    document = {
+        "origin": "https://hetrynow.brightspace.com",
+        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+    }
+    result = CliRunner().invoke(
+        cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document)
+    )
     assert result.exit_code == 0
     assert "SYNTHETIC_SESSION" not in result.output
     store = CredentialStore(config_dir=connection_for("trial").cookie_dir)
     assert "SYNTHETIC_SESSION" not in store.cookie_file.read_text()
     assert not CredentialStore().cookie_file.exists()
     assert LighthouseClient(site="trial").cookies == document["cookies"]
-    store.write_artifact(store.cookie_file, metadata={}, secret={"origin": "https://lighthouse.manipal.edu", "cookies": document["cookies"]})
+    store.write_artifact(
+        store.cookie_file,
+        metadata={},
+        secret={"origin": "https://lighthouse.manipal.edu", "cookies": document["cookies"]},
+    )
     assert LighthouseClient(site="trial").cookies == {}
 
 
 def test_session_import_rejects_wrong_origin_without_writes():
-    document = {"origin": "https://wrong.invalid", "cookies": {key: "SYNTHETIC_SESSION" for key in COOKIE_NAMES}}
-    result = CliRunner().invoke(cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document))
+    document = {
+        "origin": "https://wrong.invalid",
+        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+    }
+    result = CliRunner().invoke(
+        cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document)
+    )
     assert result.exit_code == 1
     assert "SYNTHETIC_SESSION" not in result.output
     assert not CredentialStore(config_dir=connection_for("trial").cookie_dir).cookie_file.exists()
@@ -149,10 +215,14 @@ def test_session_import_rejects_wrong_origin_without_writes():
 
 def test_trial_artifact_cannot_be_used_from_production_cookie_path():
     store = CredentialStore()
-    store.write_artifact(store.cookie_file, metadata={}, secret={
-        "origin": "https://hetrynow.brightspace.com",
-        "cookies": {key: "SYNTHETIC_SESSION" for key in COOKIE_NAMES},
-    })
+    store.write_artifact(
+        store.cookie_file,
+        metadata={},
+        secret={
+            "origin": "https://hetrynow.brightspace.com",
+            "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+        },
+    )
     assert LighthouseClient(read_only_auth=True).cookies == {}
 
 
@@ -167,7 +237,9 @@ def test_assignment_defaults_are_hidden_and_ungraded(submission_type, expected):
 
 def test_bad_create_input_has_json_error_and_no_side_effects():
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
-        result = CliRunner().invoke(cli, ["instructor", "quiz-create", "12", "--name", "", "--dry-run", "--json"])
+        result = CliRunner().invoke(
+            cli, ["instructor", "quiz-create", "12", "--name", "", "--dry-run", "--json"]
+        )
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]
     client.assert_not_called()
@@ -188,7 +260,11 @@ def test_role_group_unknown_command_preserves_json_contract():
 @pytest.mark.parametrize("role", ["student", "instructor"])
 def test_discussion_post_routes_preserve_hierarchy_and_message(role):
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
-        client.return_value.get_json.return_value = {"PostId": 4, "Message": {"Text": "Sample post"}, "PostingUserDisplayName": "Sample Student"}
+        client.return_value.get_json.return_value = {
+            "PostId": 4,
+            "Message": {"Text": "Sample post"},
+            "PostingUserDisplayName": "Sample Student",
+        }
         result = CliRunner().invoke(cli, [role, "post", "1", "2", "3", "4", "--json"])
     assert result.exit_code == 0
     client.return_value.get_json.assert_called_once_with("/1/discussions/forums/2/topics/3/posts/4")
@@ -269,15 +345,23 @@ def test_section_reader_uses_lp_api_not_le():
         client.return_value._paginate_list.return_value = [{"SectionId": 3, "Name": "Section A"}]
         result = CliRunner().invoke(cli, ["student", "my-sections", "12", "--json"])
     assert result.exit_code == 0
-    client.return_value._paginate_list.assert_called_once_with("/d2l/api/lp/1.47/12/sections/mysections/")
+    client.return_value._paginate_list.assert_called_once_with(
+        "/d2l/api/lp/1.47/12/sections/mysections/"
+    )
     assert json.loads(result.stdout)["data"][0]["SectionId"] == 3
 
 
 def test_cli_import_does_not_load_auth_http_or_assessment_implementations():
-    result = subprocess.run([
-        sys.executable, "-B", "-c",
-        "import sys; import lighthouse_cli.cli; "
-        "assert not {'requests', 'bs4', 'lighthouse_cli.ms_auth', "
-        "'lighthouse_cli.assessment_commands'} & sys.modules.keys()",
-    ], capture_output=True, timeout=10)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "import sys; import lighthouse_cli.cli; "
+            "assert not {'requests', 'bs4', 'lighthouse_cli.ms_auth', "
+            "'lighthouse_cli.assessment_commands'} & sys.modules.keys()",
+        ],
+        capture_output=True,
+        timeout=10,
+    )
     assert result.returncode == 0

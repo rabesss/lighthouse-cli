@@ -28,19 +28,25 @@ droid-wiki/
 CONTEXT.md
 HANDOFF.md
 
-# Agent/tool local state (not part of the project)
+# Agent/tool local state (not part of the project) — but committed skills are project assets
 .gemini/skills/
 .github/skills/
-.agents/
+.agents/*
+!.agents/skills/
 .claude/
 .kiro/
 .omc/
 skills-lock.json
 .omo/
 
-# Local credentials (never commit)
-.env.lighthouse
-credentials.lighthouse.env
+# Local credentials (never commit); the tracked example stays visible
+/.env*
+/credentials*.env
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
 
 # Personal / generated artifacts (reviews, screenshots, notes)
 local-artifacts/

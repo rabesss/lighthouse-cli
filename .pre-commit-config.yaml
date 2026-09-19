@@ -1,0 +1,27 @@
+# See https://pre-commit.com for more information
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+        exclude: ^\.secrets\.baseline$
+      - id: trailing-whitespace
+        exclude: ^\.secrets\.baseline$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in sync with the ruff floor in pyproject.toml [project.optional-dependencies].dev
+    rev: v0.15.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
