@@ -59,8 +59,8 @@ def _parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
     pins: dict[str, str] = {}
     unpinned: list[str] = []
     for raw in text.splitlines():
-        if not raw.strip() or raw.startswith((" ", "\t", "#")):
-            continue  # blank, uv "# via" annotation, or comment
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue  # blank, comment, or uv's indented "# via" annotation
         match = _REQUIREMENT_LINE.match(raw)
         if match:
             pins[_normalize(match.group(1))] = match.group(3)
@@ -147,13 +147,14 @@ class TestDependencyPolicies:
             "# header\n"
             "click==8.5.0\n"
             "    # via lighthouse-cli\n"
+            "    indented>=1.0\n"
             "Typing_Extensions==4.15.0 ; python_version < '3.11'\n"
             "requests>=2.31\n"
             "rich\n"
             "\n"
         )
         assert pins == {"click": "8.5.0", "typing-extensions": "4.15.0"}
-        assert unpinned == ["requests>=2.31", "rich"]
+        assert unpinned == ["indented>=1.0", "requests>=2.31", "rich"]
 
     def test_runtime_mismatch_compares_versions_not_names(self) -> None:
         mismatches = _runtime_pin_mismatches(
@@ -260,11 +261,22 @@ class TestSecretScanningPolicies:
     def test_gitleaks_allowlist_stays_rule_and_path_scoped(self) -> None:
         config = (ROOT / ".gitleaks.toml").read_text()
         assert "useDefault = true" in config
-        # A top-level [[allowlists]] ignores `condition = "AND"` and would
-        # allow every finding in the baseline file.
-        assert not re.search(r"^\[\[allowlists\]\]", config, flags=re.MULTILINE)
-        assert "[[rules.allowlists]]" in config
-        assert 'condition = "AND"' in config
+        lines = [line.strip() for line in config.splitlines()]
+        # A top-level [[allowlists]] (TOML allows indenting it) ignores
+        # `condition = "AND"` and would allow every finding in its paths.
+        assert "[[allowlists]]" not in lines
+        # Exactly one allowlist, scoped to generic-api-key, the baseline file,
+        # and the hashed_secret line shape; widening any of them must fail.
+        assert lines.count("[[rules.allowlists]]") == 1
+        assert lines.count("[[rules]]") == 1
+        for expected in (
+            'id = "generic-api-key"',
+            'condition = "AND"',
+            'regexTarget = "line"',
+            r"paths = ['''^\.secrets\.baseline$''']",
+            r"""regexes = ['''^\s*"hashed_secret": "[0-9a-f]{40}",?$''']""",
+        ):
+            assert expected in lines, f".gitleaks.toml lost: {expected}"
 
 
 class TestRepositoryHygiene:

@@ -17,8 +17,8 @@ lighthouse auth login --json      # fresh Microsoft SSO flow
 ```
 
 - If MFA is server-sent (SMS/WhatsApp): `auth login` returns a pending
-  checkpoint; finish with `lighthouse auth verify --json` and the code you
-  received. A literal `--totp` only works for offline `PhoneAppOTP`
+  checkpoint; finish with `lighthouse auth verify <CODE> --json`, passing
+  the code you received as the positional argument. A literal `--totp` only works for offline `PhoneAppOTP`
   (`--mfa-method app`).
 - If a signed-in desktop browser exists: `lighthouse auth refresh` re-extracts
   cookies over CDP (requires the `cdp` extra and a browser started with a
