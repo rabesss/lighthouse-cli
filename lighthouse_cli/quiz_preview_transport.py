@@ -295,6 +295,10 @@ def advance_current_preview(
     homepage, _ = client.get_raw("/d2l/home", max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
     protection = form_protection_from_homepage(homepage)
     current = read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+    # advance_fields requires a Next control, so the page + 1 readback below
+    # always exists. Never request a page beyond the quiz's last page: on the
+    # trial tenant (2026-09-23) that permanently breaks the preview attempt
+    # (every later read redirects to /d2l/error/500).
     fields = current.advance_fields(protection)
     url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({
         "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,

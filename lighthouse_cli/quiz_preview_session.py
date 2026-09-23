@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 from .api import LighthouseClient, _require_positive_endpoint_id
 from .connection import connection_for
@@ -38,12 +39,25 @@ _UNCERTAIN = (PreviewStartUnknownError, PreviewSaveUnknownError, PreviewAdvanceU
 # checkpoint, and the clock-skew allowance when matching a new attempt's
 # server start time against the local start intent.
 _MAX_BASELINE = 10_000
+_MAX_ATTEMPT_PAGES = 50
+_LISTING_INVALID = "The quiz attempt listing could not be verified."
+_NO_REMOTE_ATTEMPT = "operator_confirmed_no_remote_attempt"
 _START_SKEW = timedelta(minutes=10)
 _UNRESOLVED_START = (
     "A previous start may have created a remote preview. Run preview reconcile to resolve it "
     "before starting again."
 )
 _NOT_VERIFIED = "That attempt could not be verified for this start; the checkpoint was not changed."
+
+
+def _supported_layout(quiz: object) -> bool:
+    """Untimed all-at-once, or one question per page with no backtracking."""
+    return (isinstance(quiz, dict) and quiz.get("IsSingleSession") is False
+            and isinstance(quiz.get("SubmissionTimeLimit"), dict)
+            and quiz["SubmissionTimeLimit"].get("IsEnforced") is False
+            and type(quiz.get("PagingTypeId")) is int
+            and (quiz["PagingTypeId"] == 0
+                 or (quiz["PagingTypeId"] == 1 and quiz.get("PreventMovingBackwards") is True)))
 
 
 def _utc(value: object) -> datetime | None:
@@ -99,7 +113,8 @@ class PreviewWorkflow:
                 or state.get("operation") not in (None, "start", "answer", "next", "submit")):
             raise PreviewWorkflowError("The saved preview checkpoint is invalid.")
         baseline = state.get("baseline_attempt_ids")
-        if (state.get("unresolved_start") not in (None, True, False)
+        if (("unresolved_start" in state and type(state["unresolved_start"]) is not bool)
+                or state.get("disposition") not in (None, _NO_REMOTE_ATTEMPT)
                 or (baseline is not None and (
                     not isinstance(baseline, list) or len(baseline) > _MAX_BASELINE
                     or any(type(item) is not int or item <= 0 for item in baseline)))
@@ -138,18 +153,49 @@ class PreviewWorkflow:
             raise PreviewWorkflowError("The remote attempt identity could not be verified.")
         return record
 
+    def _attempt_listing(self, client: LighthouseClient) -> list[Any]:
+        """Page through this quiz's attempts route only (read-only, bounded).
+
+        ``Next`` links are followed only when they stay on the exact attempts
+        path with a bookmark, so a malformed link can never reach another
+        (possibly state-changing) route.
+        """
+        url = client.canonical_url(f"/{self.course_id}/quizzes/{self.quiz_id}/attempts/")
+        expected = urlparse(url)
+        seen: set[str] = set()
+        items: list[Any] = []
+        for _ in range(_MAX_ATTEMPT_PAGES):
+            if url in seen:
+                raise PreviewWorkflowError(_LISTING_INVALID)
+            seen.add(url)
+            data = client.get_json(url)
+            if isinstance(data, list):
+                return items + data
+            if not isinstance(data, dict) or not isinstance(data.get("Objects"), list):
+                raise PreviewWorkflowError(_LISTING_INVALID)
+            items.extend(data["Objects"])
+            if len(items) > _MAX_BASELINE:
+                raise PreviewWorkflowError("Too many attempts to reconcile safely.")
+            following = data.get("Next")
+            if following is None or following == "":
+                return items
+            if not isinstance(following, str):
+                raise PreviewWorkflowError(_LISTING_INVALID)
+            url = client.canonical_url(following, base_url=url)
+            parsed = urlparse(url)
+            if ((parsed.scheme, parsed.netloc, parsed.path) != (expected.scheme, expected.netloc, expected.path)
+                    or set(parse_qs(parsed.query, keep_blank_values=True)) != {"bookmark"}):
+                raise PreviewWorkflowError(_LISTING_INVALID)
+        raise PreviewWorkflowError("Too many attempt pages to reconcile safely.")
+
     def _own_attempts(self, client: LighthouseClient, actor_id: int) -> list[dict[str, Any]]:
-        """This account's attempts on this quiz, from the bounded paginated listing."""
-        items = client._paginate_list(f"/{self.course_id}/quizzes/{self.quiz_id}/attempts/")
-        if len(items) > _MAX_BASELINE:
-            raise PreviewWorkflowError("Too many attempts to reconcile safely.")
+        """This account's attempts on this quiz, from the restricted listing."""
         own: list[dict[str, Any]] = []
-        for item in items:
+        for item in self._attempt_listing(client):
             if (not isinstance(item, dict) or type(item.get("AttemptId")) is not int or item["AttemptId"] <= 0
-                    or type(item.get("UserId")) is not int or "Completed" not in item):
-                raise PreviewWorkflowError("The quiz attempt listing could not be verified.")
-            if item.get("QuizId", self.quiz_id) != self.quiz_id:
-                raise PreviewWorkflowError("The quiz attempt listing could not be verified.")
+                    or type(item.get("UserId")) is not int or "Completed" not in item
+                    or item.get("QuizId", self.quiz_id) != self.quiz_id):
+                raise PreviewWorkflowError(_LISTING_INVALID)
             if item["UserId"] == actor_id:
                 own.append(item)
         return own
@@ -171,16 +217,30 @@ class PreviewWorkflow:
             started = _utc(item.get("Started"))
             if intent is not None and (started is None or started < intent - _START_SKEW):
                 continue
-            candidates.append({"attempt_id": item["AttemptId"], "started": item.get("Started")})
+            # Never echo server text: only a parsed, normalized timestamp.
+            candidates.append({
+                "attempt_id": item["AttemptId"],
+                "started": started.astimezone(timezone.utc).isoformat() if started else None,
+            })
         return sorted(candidates, key=lambda c: c["attempt_id"])
 
     def _resolve_start(
         self, client: LighthouseClient, state: dict[str, Any], *, attempt_id: int,
     ) -> dict[str, Any]:
         """Verify one attempt read-only, then bind it; never save on failure."""
+        bound = state.get("attempt_id") == attempt_id
         try:
             record = self._remote_attempt(client, actor_id=state["actor_id"], attempt_id=attempt_id)
             resolved = {**state, "attempt_id": attempt_id, "unresolved_start": False}
+            if not bound:
+                # An unbound candidate must prove it is this quiz's in-progress
+                # preview before it can replace the uncertain start: completed
+                # records skip the preview page check, and only the supported
+                # layouts make the server-reported page authoritative.
+                if record.get("Completed") is not None:
+                    raise PreviewWorkflowError(_NOT_VERIFIED)
+                if not _supported_layout(client.get_quiz_detail(self.course_id, self.quiz_id)):
+                    raise PreviewWorkflowError(_NOT_VERIFIED)
             if record.get("Completed") is not None:
                 receipt = verify_receipt(
                     client, course_id=self.course_id, quiz_id=self.quiz_id,
@@ -191,7 +251,7 @@ class PreviewWorkflow:
                 self._save(resolved)
                 return {**receipt, "reconciled": True}
             identity = {"course_id": self.course_id, "quiz_id": self.quiz_id, "attempt_id": attempt_id}
-            if state.get("attempt_id") == attempt_id and type(state.get("page")) is int:
+            if bound and type(state.get("page")) is int:
                 # The start callback's page is authoritative: keep that cursor.
                 current = read_current_preview(client, **identity, page=state["page"])
             else:
@@ -221,17 +281,27 @@ class PreviewWorkflow:
 
     @staticmethod
     def _unresolved_start(state: dict[str, Any]) -> bool:
-        return state.get("unresolved_start") is True or (
-            state.get("status") == "uncertain" and state.get("operation") == "start"
-        )
+        if state.get("status") == "uncertain" and state.get("operation") == "start":
+            return True
+        if "unresolved_start" in state:
+            return state["unresolved_start"] is True
+        # Checkpoints written before this marker existed: an abandoned
+        # preview that never bound an attempt may hide an unknown start.
+        return (state.get("status") == "abandoned" and state.get("attempt_id") is None
+                and "baseline_attempt_ids" not in state)
 
-    def reconcile(self, attempt_id: int | None = None) -> dict[str, Any]:
+    def reconcile(self, attempt_id: int | None = None, confirm_no_remote_attempt: bool = False) -> dict[str, Any]:
         """Resolve an unresolved start with read-only checks; never write remotely.
 
         With a bound attempt, verify and resume it (a different --attempt-id is
         refused). Without one, list candidate attempts; binding requires an
-        explicit --attempt-id that is one of those verified candidates.
+        explicit --attempt-id that is one of those verified candidates. If the
+        operator has confirmed in the browser that no preview was created,
+        ``confirm_no_remote_attempt`` records that disposition, but only while
+        the checkpoint is unbound and no candidate is listed.
         """
+        if confirm_no_remote_attempt and attempt_id is not None:
+            raise PreviewWorkflowError("Choose either --attempt-id or --confirm-no-remote-attempt.")
         with self._locked():
             state = self._load()
             if state is None or not self._unresolved_start(state):
@@ -242,12 +312,26 @@ class PreviewWorkflow:
                     raise PreviewWorkflowError("The saved preview belongs to a different signed-in account.")
                 bound = state.get("attempt_id")
                 if type(bound) is int:
+                    if confirm_no_remote_attempt:
+                        raise PreviewWorkflowError(
+                            "This start is bound to a known attempt; reconcile it instead."
+                        )
                     if attempt_id is not None and attempt_id != bound:
                         raise PreviewWorkflowError(
                             "This start is already bound to a different attempt; the checkpoint was not changed."
                         )
                     return self._resolve_start(client, state, attempt_id=bound)
                 candidates = self._start_candidates(client, state)
+                if confirm_no_remote_attempt:
+                    if candidates:
+                        raise PreviewWorkflowError(
+                            "Candidate attempts exist; bind one with --attempt-id instead."
+                        )
+                    state.update(status="abandoned", operation=None, unresolved_start=False,
+                                 disposition=_NO_REMOTE_ATTEMPT)
+                    self._save(state)
+                    return {"mode": "preview", "status": "abandoned", "course_id": self.course_id,
+                            "quiz_id": self.quiz_id, "reconciled": True, "disposition": _NO_REMOTE_ATTEMPT}
                 if attempt_id is None:
                     return {
                         "mode": "preview", "status": state["status"], "course_id": self.course_id,
@@ -309,13 +393,7 @@ class PreviewWorkflow:
                             return receipt
                         raise PreviewWorkflowError("This preview has already been submitted; no answer or navigation request was sent.")
                 if operation == "start":
-                    quiz = client.get_quiz_detail(self.course_id, self.quiz_id)
-                    if (not isinstance(quiz, dict) or quiz.get("IsSingleSession") is not False
-                            or not isinstance(quiz.get("SubmissionTimeLimit"), dict)
-                            or quiz["SubmissionTimeLimit"].get("IsEnforced") is not False
-                            or not (type(quiz.get("PagingTypeId")) is int and (
-                                quiz["PagingTypeId"] == 0 or
-                                (quiz["PagingTypeId"] == 1 and quiz.get("PreventMovingBackwards") is True)))):
+                    if not _supported_layout(client.get_quiz_detail(self.course_id, self.quiz_id)):
                         raise PreviewWorkflowError("This prototype supports untimed all-at-once or one-question/no-backtracking previews without single-session locking.")
                     try:
                         baseline = sorted(item["AttemptId"] for item in self._own_attempts(client, actor))

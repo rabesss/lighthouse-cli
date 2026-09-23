@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 from click.testing import CliRunner
 
-from lighthouse_cli.api import NetworkError
+from lighthouse_cli.api import LighthouseClient, NetworkError
 from lighthouse_cli.cli import cli
 from lighthouse_cli.quiz_attempt_page import (
     REFUSE_NOT_ON_PAGE,
@@ -43,16 +43,20 @@ def _attempt(attempt_id: int, *, quiz_id: int = 20, actor_id: int = 7, completed
 def remote():
     client = Mock()
     client.base_url = "https://hetrynow.brightspace.com"
-    state = {"actor": 7, "completed": None, "attempts": [], "records": {}}
+    state = {"actor": 7, "completed": None, "attempts": [], "records": {}, "listing": None}
+    client.canonical_url.side_effect = LighthouseClient(site="trial").canonical_url
     def read(path, **kwargs):
         if path.endswith("users/whoami"):
             return {"Identifier": state["actor"]}
+        if "/attempts/" in path and (path.endswith("/attempts/") or "bookmark=" in path):
+            if state["listing"] is not None:
+                return state["listing"](path)
+            return {"Objects": list(state["attempts"]), "Next": None}
         attempt_id = int(path.rstrip("/").rsplit("/", 1)[1])
         return state["records"].get(
             attempt_id, {"AttemptId": attempt_id, "QuizId": 20, "UserId": 7, "Completed": state["completed"]},
         )
     client.get_json.side_effect = read
-    client._paginate_list.side_effect = lambda path: list(state["attempts"])
     client.get_quiz_detail.return_value = {"PagingTypeId": 1, "PreventMovingBackwards": True,
                                          "IsSingleSession": False, "SubmissionTimeLimit": {"IsEnforced": False}}
     with patch("lighthouse_cli.quiz_preview_session.LighthouseClient", return_value=client):
@@ -108,9 +112,16 @@ def test_start_seals_account_bound_baseline_before_dispatch(remote):
     assert seen["start_intent_at"]
 
 
+def listing_calls(client):
+    return [c for c in client.get_json.call_args_list if "/attempts/" in c.args[0]
+            and (c.args[0].endswith("/attempts/") or "bookmark=" in c.args[0])]
+
+
 def test_start_is_refused_before_dispatch_when_listing_fails(remote):
-    client, _ = remote
-    client._paginate_list.side_effect = NetworkError("listing failed")
+    _, state = remote
+    def fail(path):
+        raise NetworkError("listing failed")
+    state["listing"] = fail
     workflow = PreviewWorkflow("trial", 10, 20)
     with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
         with pytest.raises(PreviewWorkflowError, match="nothing was started"):
@@ -157,7 +168,7 @@ def test_unknown_start_without_identity_never_binds_from_listing(remote):
     state["attempts"] = []
     unknown_start(workflow)
     state["attempts"] = [_attempt(31)]
-    assert client._paginate_list.call_count == 1  # the pre-start baseline only
+    assert len(listing_calls(client)) == 1  # the pre-start baseline only
     assert workflow.status()["attempt_id"] is None
     assert workflow.status()["status"] == "uncertain"
 
@@ -274,6 +285,141 @@ def test_reconcile_keeps_a_bound_identity_and_cursor(remote):
     assert workflow.status()["status"] == "active"
 
 
+def test_reconcile_keeps_a_bound_cursor_beyond_page_one(remote):
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow, identity=(31, 2))
+    with patch("lighthouse_cli.quiz_preview_session.read_current_preview",
+               return_value=page(2, attempt_id=31)) as strict, \
+            patch("lighthouse_cli.quiz_preview_session.read_server_current_preview") as server:
+        assert workflow.reconcile()["page"] == 2
+    assert strict.call_args.kwargs["page"] == 2
+    server.assert_not_called()
+    assert (workflow.status()["status"], workflow.status()["page"]) == ("active", 2)
+
+
+def test_reconcile_refuses_an_unbound_candidate_whose_record_is_completed(remote):
+    _, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow)
+    before = saved(workflow)
+    state["attempts"] = [_attempt(31)]  # listed as incomplete...
+    state["records"][31] = _attempt(31, completed="2999-01-01T00:05:00Z")  # ...detail says completed
+    with patch("lighthouse_cli.quiz_preview_session.verify_receipt") as verify:
+        with pytest.raises(PreviewWorkflowError, match="not changed"):
+            workflow.reconcile(31)
+    verify.assert_not_called()
+    assert saved(workflow) == before
+    assert workflow.status()["unresolved_start"] is True
+
+
+def test_reconcile_refuses_an_unbound_candidate_on_an_unsupported_layout(remote):
+    client, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow)
+    before = saved(workflow)
+    state["attempts"] = [_attempt(31)]
+    client.get_quiz_detail.return_value = {"PagingTypeId": 1, "PreventMovingBackwards": False,
+                                           "IsSingleSession": False, "SubmissionTimeLimit": {"IsEnforced": False}}
+    with patch("lighthouse_cli.quiz_preview_session.read_server_current_preview") as read:
+        with pytest.raises(PreviewWorkflowError, match="not changed"):
+            workflow.reconcile(31)
+    read.assert_not_called()
+    assert saved(workflow) == before
+
+
+@pytest.mark.parametrize("make_next", [
+    lambda first: "/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1",
+    lambda first: first.replace("/quizzes/20/", "/quizzes/99/") + "?bookmark=x",
+    lambda first: first + "?bookmark=x&extra=1",
+    lambda first: first + "?page=2",
+    lambda first: first.replace("https://hetrynow.brightspace.com", "https://evil.test") + "?bookmark=x",
+])
+def test_attempt_paging_never_leaves_the_attempts_route(remote, make_next):
+    client, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow)
+    requested = []
+    def listing(path):
+        requested.append(path)
+        return {"Objects": [], "Next": make_next(path)}
+    state["listing"] = listing
+    with pytest.raises((PreviewWorkflowError, NetworkError)):
+        workflow.reconcile()
+    assert len(requested) == 1  # the bad link was never requested
+    assert all("quiz_start" not in c.args[0] for c in client.get_json.call_args_list)
+
+
+def test_attempt_paging_follows_bookmarks_on_the_same_route(remote):
+    _, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow)
+    def listing(path):
+        if "bookmark=" in path:
+            return {"Objects": [_attempt(32)], "Next": None}
+        return {"Objects": [_attempt(31)], "Next": path + "?bookmark=abc"}
+    state["listing"] = listing
+    assert [c["attempt_id"] for c in workflow.reconcile()["candidates"]] == [31, 32]
+
+
+def test_candidate_output_never_echoes_server_text(remote):
+    _, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow.store.write_artifact(workflow.path, metadata={}, secret={
+        "version": 1, "origin": workflow.connection.origin, "mode": "preview", "actor_id": 7,
+        "course_id": 10, "quiz_id": 20, "status": "uncertain", "operation": "start",
+        "attempt_id": None, "page": None,
+    })
+    state["attempts"] = [
+        {**_attempt(31), "Started": '<a href="https://x.test/?token=SENTINEL">t</a>'},
+        {**_attempt(32), "Started": "2026-09-23T11:50:31.650Z"},
+    ]
+    result = workflow.reconcile()
+    assert "SENTINEL" not in json.dumps(result)
+    assert [c["started"] for c in result["candidates"]] == [None, "2026-09-23T11:50:31.650000+00:00"]
+
+
+def test_legacy_abandoned_start_without_identity_stays_guarded(remote):
+    _, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow.store.write_artifact(workflow.path, metadata={}, secret={
+        "version": 1, "origin": workflow.connection.origin, "mode": "preview", "actor_id": 7,
+        "course_id": 10, "quiz_id": 20, "status": "abandoned", "operation": None,
+        "attempt_id": None, "page": None,
+    })
+    assert workflow.status()["unresolved_start"] is True
+    with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
+        with pytest.raises(PreviewWorkflowError, match="reconcile"):
+            workflow.run("start")
+    start.assert_not_called()
+    state["attempts"] = [_attempt(31)]
+    assert [c["attempt_id"] for c in workflow.reconcile()["candidates"]] == [31]
+
+
+def test_confirmed_no_remote_attempt_releases_the_guard_only_without_candidates(remote):
+    _, state = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow)
+    state["attempts"] = [_attempt(31)]
+    with pytest.raises(PreviewWorkflowError, match="Candidate attempts exist"):
+        workflow.reconcile(confirm_no_remote_attempt=True)
+    assert workflow.status()["unresolved_start"] is True
+    state["attempts"] = []
+    result = workflow.reconcile(confirm_no_remote_attempt=True)
+    assert result["disposition"] == "operator_confirmed_no_remote_attempt"
+    assert workflow.status()["unresolved_start"] is False
+    start_local(workflow)
+
+
+def test_confirmed_no_remote_attempt_is_refused_for_a_bound_start(remote):
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow, identity=(31, 1))
+    with pytest.raises(PreviewWorkflowError, match="bound to a known attempt"):
+        workflow.reconcile(confirm_no_remote_attempt=True)
+    with pytest.raises(PreviewWorkflowError, match="either"):
+        workflow.reconcile(31, confirm_no_remote_attempt=True)
+    assert workflow.status()["unresolved_start"] is True
+
+
 def test_reconcile_of_a_completed_bound_attempt_verifies_the_receipt(remote):
     _, state = remote
     workflow = PreviewWorkflow("trial", 10, 20)
@@ -313,11 +459,13 @@ def test_reconcile_unverified_preview_page_leaves_the_checkpoint_unchanged(remot
 
 
 def test_reconcile_listing_failure_leaves_the_checkpoint_unchanged(remote):
-    client, _ = remote
+    _, state = remote
     workflow = PreviewWorkflow("trial", 10, 20)
     unknown_start(workflow)
     before = saved(workflow)
-    client._paginate_list.side_effect = NetworkError("Permission denied (HTTP 403).")
+    def forbidden(path):
+        raise NetworkError("Permission denied (HTTP 403).")
+    state["listing"] = forbidden
     with pytest.raises(NetworkError):
         workflow.reconcile(31)
     assert saved(workflow) == before
@@ -363,6 +511,8 @@ def test_legacy_checkpoint_without_baseline_requires_explicit_selection(remote):
 
 @pytest.mark.parametrize("extra", [
     {"unresolved_start": "yes"},
+    {"unresolved_start": 1},
+    {"disposition": "whatever"},
     {"baseline_attempt_ids": [0]},
     {"baseline_attempt_ids": "5"},
     {"start_intent_at": "yesterday"},
@@ -494,7 +644,7 @@ def test_cli_reconcile_is_read_only_and_keeps_json_on_stdout():
     assert result.exit_code == 0
     assert json.loads(result.stdout)["candidates"] == []
     assert result.stderr == ""
-    workflow.return_value.reconcile.assert_called_once_with(attempt_id=None)
+    workflow.return_value.reconcile.assert_called_once_with(attempt_id=None, confirm_no_remote_attempt=False)
     workflow.return_value.run.assert_not_called()
 
 

@@ -97,11 +97,19 @@ def page(course_id: int, quiz_id: int, json_output: bool) -> None:
 @preview.command("reconcile", cls=JsonOutputCommand)
 @click.argument("course_id", type=_ID)
 @click.argument("quiz_id", type=_ID)
-@click.option("--attempt-id", type=_ID, help="Bind a verified incomplete remote attempt explicitly.")
+@click.option("--attempt-id", type=_ID, help="Bind a listed candidate attempt explicitly.")
+@click.option("--confirm-no-remote-attempt", is_flag=True,
+              help="Record that the browser shows no preview was created (only when none is listed).")
 @click.option("--json", "json_output", is_flag=True)
-def reconcile(course_id: int, quiz_id: int, attempt_id: int | None, json_output: bool) -> None:
-    """Recover an uncertain start using read-only attempt identity checks."""
-    _execute("reconcile", course_id, quiz_id, json_output, attempt_id=attempt_id)
+def reconcile(course_id: int, quiz_id: int, attempt_id: int | None, confirm_no_remote_attempt: bool,
+              json_output: bool) -> None:
+    """Resolve an uncertain start with read-only checks; never writes remotely.
+
+    Without options, lists candidate attempts. A start already bound to an
+    attempt is verified and resumed.
+    """
+    _execute("reconcile", course_id, quiz_id, json_output, attempt_id=attempt_id,
+             confirm_no_remote_attempt=confirm_no_remote_attempt)
 
 
 @preview.command("status", cls=JsonOutputCommand)
