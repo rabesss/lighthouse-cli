@@ -67,7 +67,7 @@ keyring==25.7.0
     # via lighthouse-cli (pyproject.toml)
 librt==0.15.0
     # via mypy
-mando==0.7.1
+mando==0.8.2
     # via radon
 markdown-it-py==4.2.0
     # via rich
@@ -171,7 +171,7 @@ urllib3==2.8.0
     #   types-requests
 virtualenv==21.7.16
     # via pre-commit
-websockets==15.0.1
+websockets==16.1.1
     # via lighthouse-cli (pyproject.toml)
 xenon==0.9.3
     # via lighthouse-cli (pyproject.toml)
