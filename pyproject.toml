@@ -25,7 +25,6 @@ dev = [
     # Upper bounds stop a lockfile regeneration from silently crossing a
     # breaking release; 0.x tools are bounded at the next minor.
     "pytest>=9.0,<10",
-    "pytest-mock>=3.12,<4",
     "pytest-cov>=7.0,<8",
     "ruff>=0.16.8,<0.17",
     "mypy>=2.0,<3",
@@ -131,7 +130,6 @@ exclude = ["tests", ".venv", "docs", "scripts"]
 # Dev/test/CI tooling: declared for contributors and CI, never imported at runtime.
 DEP002 = [
     "pytest",
-    "pytest-mock",
     "pytest-cov",
     "ruff",
     "mypy",
