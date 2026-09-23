@@ -29,7 +29,6 @@ CONTEXT.md
 HANDOFF.md
 
 # Agent/tool local state (not part of the project) — but committed skills are project assets
-.gemini/skills/
 .github/skills/
 .agents/*
 !.agents/skills/
