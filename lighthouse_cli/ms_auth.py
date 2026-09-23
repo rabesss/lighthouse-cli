@@ -36,7 +36,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
@@ -60,14 +60,8 @@ from lighthouse_cli.ms_errors import (
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
     MFA_AUTH_SMS,
-    MFA_METHOD_APP as MFA_METHOD_APP,
-    MFA_METHOD_AUTH_IDS as MFA_METHOD_AUTH_IDS,
     MFA_METHOD_AUTO,
-    MFA_METHOD_CALL as MFA_METHOD_CALL,
-    MFA_METHOD_CHOOSE as MFA_METHOD_CHOOSE,
     MFA_METHOD_INSTRUCTIONS,
-    MFA_METHOD_PUSH as MFA_METHOD_PUSH,
-    MFA_METHOD_SMS as MFA_METHOD_SMS,
     MS_ERROR_CODES,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
@@ -77,17 +71,39 @@ from lighthouse_cli.ms_errors import (
     safe_diagnostic_text,
     safe_upstream_text,
 )
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_APP as MFA_METHOD_APP,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_AUTH_IDS as MFA_METHOD_AUTH_IDS,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_CALL as MFA_METHOD_CALL,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_CHOOSE as MFA_METHOD_CHOOSE,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_PUSH as MFA_METHOD_PUSH,
+)
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_SMS as MFA_METHOD_SMS,
+)
 from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
     UserProof,
+    _parse_user_proofs,
+    _select_user_proof,
     format_user_proof,
     safe_proof_destination,
-    _parse_user_proofs,
+)
+from lighthouse_cli.ms_mfa import (
     _prompt_user_proof_choice as _prompt_user_proof_choice,
-    _select_user_proof,
 )
 from lighthouse_cli.ms_parse import (
     _extract_balanced_json_object as _extract_balanced_json_object,
+)
+from lighthouse_cli.ms_parse import (
     _extract_config_json,
     _extract_error_code_and_msg,
 )
@@ -99,6 +115,11 @@ from lighthouse_cli.ms_session import (
     _safe_absolute_url,
     _tenant_id_from_ms_url,
 )
+
+if TYPE_CHECKING:
+    # The parameter type of BrowserContext.add_cookies; Playwright does not
+    # re-export it from playwright.sync_api.
+    from playwright._impl._api_structures import SetCookieParam
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
@@ -274,6 +295,20 @@ class Transition(NamedTuple):
 # ---------------------------------------------------------------------------
 # Pure transition functions (no I/O — trivially snapshot-testable)
 # ---------------------------------------------------------------------------
+
+
+def _browser_cookies(session: requests.Session) -> list[SetCookieParam]:
+    """Session cookies in Playwright's shape, normalized like ``_export_session_cookies``.
+
+    A missing value becomes ``""`` (Playwright requires a string). Cookies
+    without a domain are skipped: Playwright needs a domain or URL to scope
+    them and would reject the whole batch otherwise.
+    """
+    return [
+        {"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"]}
+        for c in _export_session_cookies(session)
+        if c["domain"]
+    ]
 
 
 def extract_saml_response(html: str) -> str | None:
@@ -1538,15 +1573,13 @@ class MicrosoftSSOClient:
             label="Microsoft login",
         )
 
-        user_agent = self._session.headers.get("User-Agent", "")
-        export_cookies: list[dict[str, Any]] = []
-        for cookie in self._session.cookies:
-            export_cookies.append({
-                "name": cookie.name,
-                "value": cookie.value,
-                "domain": cookie.domain,
-                "path": cookie.path or "/",
-            })
+        raw_user_agent = self._session.headers.get("User-Agent", "")
+        user_agent = (
+            raw_user_agent
+            if isinstance(raw_user_agent, str)
+            else raw_user_agent.decode("utf-8", "replace")
+        )
+        export_cookies = _browser_cookies(self._session)
 
         try:
             manager = sync_playwright()
@@ -1597,7 +1630,7 @@ class MicrosoftSSOClient:
                     step="prepare username",
                     label="Microsoft page",
                 )
-                pw_cookies = context.cookies()
+                pw_cookies: list[dict[str, Any]] = [{**cookie} for cookie in context.cookies()]
             except MicrosoftSSOError:
                 raise
             except Exception as exc:

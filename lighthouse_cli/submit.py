@@ -12,9 +12,10 @@ from .api import (
     SubmissionOutcomeUnknownError,
     resolve_course_id,
 )
-from .display import format_user_error, output_json as _output_json, safe_display_text, utc_now_iso as _utc_now_iso
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
+from .display import utc_now_iso as _utc_now_iso
 from .utils import get_course_name as _get_course_name
-
 
 _MAX_DISPLAY_NAME_LENGTH = 256
 _MAX_SUBMISSION_ID = (1 << 63) - 1

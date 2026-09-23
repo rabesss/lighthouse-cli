@@ -145,7 +145,7 @@ class TestBrowserJarDomainMatching:
 
 class TestMissingCookieNames:
     def test_complete_cookies_yield_empty_list(self) -> None:
-        full = {name: "value" for name in COOKIE_NAMES}
+        full = dict.fromkeys(COOKIE_NAMES, "value")
         assert missing_cookie_names(full) == []
 
     def test_blank_values_are_reported(self) -> None:
@@ -160,13 +160,15 @@ class TestMissingCookieNames:
 
 def test_ensure_config_dir_tolerates_chmod_failure(tmp_path, monkeypatch):
     """chmod-hostile filesystems (network mounts) must not break auth."""
-    from pathlib import Path as _P
+    from pathlib import Path as _Path
 
     import lighthouse_cli.config as cfg
 
     target = tmp_path / "cfg"
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
-    monkeypatch.setattr(_P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("read-only")))
+    monkeypatch.setattr(
+        _Path, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("read-only"))
+    )
     out = cfg.ensure_config_dir()
     assert out == target and out.is_dir()
 
@@ -177,14 +179,14 @@ def test_ensure_config_dir_created_restrictive_under_permissive_umask(
     """Creation-time mode 0700 keeps the secrets dir restrictive even where
     the follow-up chmod is suppressed (fail closed, not open)."""
     import os
-    from pathlib import Path as _P
+    from pathlib import Path as _Path
 
     import lighthouse_cli.config as cfg
 
     target = tmp_path / "cfg-mode"
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(target))
     monkeypatch.setattr(
-        _P, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("blocked"))
+        _Path, "chmod", lambda self, mode: (_ for _ in ()).throw(OSError("blocked"))
     )
     old_umask = os.umask(0o022)
     try:

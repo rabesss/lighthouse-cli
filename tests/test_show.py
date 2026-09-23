@@ -712,7 +712,8 @@ def test_assignment_view_rejects_malformed_ids_without_echoing_them(
         {"Id": "../evil", "Name": "traversal", "Attachments": []},
         {"Id": sentinel, "Name": "secret", "Attachments": []},
     ]
-    client.get_dropbox_folders.return_value = malformed_folders + [
+    client.get_dropbox_folders.return_value = [
+        *malformed_folders,
         {
             "Id": "101",
             "Name": "Valid folder",

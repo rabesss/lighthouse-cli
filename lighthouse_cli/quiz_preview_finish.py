@@ -7,8 +7,8 @@ as data, and never execute the response. A separate receipt GET is required.
 from __future__ import annotations
 
 import json
-import re
 import math
+import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -53,7 +53,12 @@ def verify_receipt(client: LighthouseClient, *, course_id: int, quiz_id: int, at
         if timestamp.tzinfo is None:
             raise PreviewSubmitUnknownError()
         score = detail.get("Score")
-        if type(score) not in {int, float} or not abs(score) < 1e12 or not math.isfinite(score):
+        if (
+            not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not abs(score) < 1e12
+            or not math.isfinite(score)
+        ):
             score = None
         return {"mode": "preview", "course_id": course_id, "quiz_id": quiz_id,
                 "attempt_id": attempt_id, "submitted": True, "receipt_verified": True,

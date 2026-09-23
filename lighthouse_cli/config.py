@@ -14,6 +14,7 @@ import sys
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from lighthouse_cli.credential_store import (
     FORMAT_VERSION,
@@ -285,7 +286,7 @@ def get_cookie_age_days() -> float | None:
         return None
 
 
-def _cookies_from_legacy_doc(doc: dict) -> dict[str, str]:
+def _cookies_from_legacy_doc(doc: dict[str, Any]) -> dict[str, str]:
     """Extract cookies from a legacy plaintext document."""
     source = doc.get("cookies") if "cookies" in doc else doc
     if not isinstance(source, dict):
@@ -339,7 +340,8 @@ def _try_upgrade_plaintext_cookies(
 # MFA pending checkpoint (sealed via CredentialStore)
 # ---------------------------------------------------------------------------
 
-def save_mfa_pending(payload: dict) -> None:
+
+def save_mfa_pending(payload: dict[str, Any]) -> None:
     """Persist in-progress MFA state between ``auth login`` and ``auth verify``.
 
     Everything except the metadata allowlist (``created_at``, ``mfa_method``)
@@ -357,7 +359,7 @@ def save_mfa_pending(payload: dict) -> None:
     store.write_artifact(store.mfa_pending_file, metadata=metadata, secret=secret)
 
 
-def load_mfa_pending() -> dict | None:
+def load_mfa_pending() -> dict[str, Any] | None:
     """Load pending MFA state (metadata + sealed secret merged), or None.
 
     Compatibility policy:
@@ -427,7 +429,7 @@ def _discard_pending(path: Path, version: object) -> None:
         )
 
 
-def update_mfa_pending(updates: dict) -> None:
+def update_mfa_pending(updates: dict[str, Any]) -> None:
     """Merge fields into the existing pending MFA file (no-op if missing)."""
     data = load_mfa_pending()
     if not data:

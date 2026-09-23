@@ -14,13 +14,22 @@ import re
 import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from contextlib import suppress
-from typing import Any
+from typing import Any, TypeVar, cast
 from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import requests
 
-from .config import API_LE, BASE_URL, COOKIE_NAMES, d2l_cookies_from_entries, load_cookies, missing_cookie_names, save_cookies
+from .config import (
+    API_LE,
+    BASE_URL,
+    COOKIE_NAMES,
+    d2l_cookies_from_entries,
+    load_cookies,
+    missing_cookie_names,
+    save_cookies,
+)
 from .utils import _sanitize_filename, get_enrolled_course_catalog
 
 # CDP port for browser-harness
@@ -40,6 +49,10 @@ CDP_RESPONSE_TIMEOUT_SECONDS = 15
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
+
+T = TypeVar("T")
+
 
 class SessionExpiredError(Exception):
     """Raised when the server rejects our cookies (401 / redirect to login)."""
@@ -80,7 +93,7 @@ class ContentResponseShapeError(NetworkError):
         super().__init__(self._MESSAGE)
 
 
-class _BrowserHarnessFallback(NetworkError):
+class _BrowserHarnessFallbackError(NetworkError):
     """Signal that direct CDP extraction should try after helper failure."""
 
 
@@ -485,7 +498,7 @@ class LighthouseClient:
                     raise SessionExpiredError(
                         _session_expired_msg("auto-refresh already attempted"),
                         recovery=_SESSION_EXPIRED_RECOVERY,
-                    )
+                    ) from None
                 refresh_attempted = True
                 print("Session expired. Refreshing from browser...", file=sys.stderr)
                 try:
@@ -501,7 +514,7 @@ class LighthouseClient:
                     raise SessionExpiredError(
                         _session_expired_msg(f"CDP cookies missing: {missing}"),
                         recovery=_SESSION_EXPIRED_RECOVERY,
-                    )
+                    ) from None
 
                 save_cookies(new_cookies)
                 self._cookies = new_cookies
@@ -832,11 +845,11 @@ class LighthouseClient:
 
     # -- convenience API methods -------------------------------------------
 
-    def _cached(self, key: str, fn: Any) -> Any:
+    def _cached(self, key: str, fn: Callable[[], T]) -> T:
         """Simple instance-level memoization."""
         if key not in self._cache:
             self._cache[key] = fn()
-        return self._cache[key]
+        return cast(T, self._cache[key])
 
     def get_semesters(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mysemesters (cached)."""
@@ -849,7 +862,7 @@ class LighthouseClient:
     def get_content_toc(self, org_unit_id: int) -> dict[str, Any]:
         """GET content table-of-contents for a course."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
-        return self.get_json(f"/{course_id}/content/toc")
+        return cast(dict[str, Any], self.get_json(f"/{course_id}/content/toc"))
 
     def get_announcements(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET news/announcements for a course (handles pagination)."""
@@ -860,7 +873,7 @@ class LighthouseClient:
         """GET grade categories/objects for a course."""
         # Grade schema is not paginated — returns a plain array
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
-        return self.get_json(f"/{course_id}/grades/")
+        return cast(list[dict[str, Any]], self.get_json(f"/{course_id}/grades/"))
 
     def get_my_grades(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET my grade values for a course (handles pagination)."""
@@ -928,7 +941,7 @@ class LighthouseClient:
         """GET full details for a specific quiz."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
         quiz_identifier = _require_positive_endpoint_id(quiz_id, "quiz_id")
-        return self.get_json(f"/{course_id}/quizzes/{quiz_identifier}")
+        return cast(dict[str, Any], self.get_json(f"/{course_id}/quizzes/{quiz_identifier}"))
 
     def get_calendar(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET calendar events for a course (handles pagination)."""
@@ -1030,7 +1043,7 @@ class LighthouseClient:
         """GET full details for a specific dropbox folder, including attachments."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
         dropbox_id = _require_positive_endpoint_id(folder_id, "folder_id")
-        return self.get_json(f"/{course_id}/dropbox/folders/{dropbox_id}")
+        return cast(dict[str, Any], self.get_json(f"/{course_id}/dropbox/folders/{dropbox_id}"))
 
     def download_attachment(
         self, org_unit_id: int, folder_id: int, file_id: int
@@ -1225,9 +1238,11 @@ def resolve_course_id(client: LighthouseClient, identifier: str) -> int:
         )
     courses = get_enrolled_course_catalog(client)
     matches = [
-        c for c in courses
-        if isinstance(c, dict)
-        and needle in (c.get("Name") if isinstance(c.get("Name"), str) else "").casefold()
+        course
+        for course in courses
+        if isinstance(course, dict)
+        and isinstance(name := course.get("Name"), str)
+        and needle in name.casefold()
     ]
     if len(matches) == 1:
         return int(matches[0]["OrgUnitId"])
@@ -1261,7 +1276,7 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
         else os.getenv("LIGHTHOUSE_CDP_PORT", str(DEFAULT_CDP_PORT))
     )
     try:
-        port = int(configured_port)
+        port = int(str(configured_port))
     except (TypeError, ValueError):
         raise NetworkError("CDP port must be an integer from 1 to 65535.") from None
     if not 1 <= port <= 65535:
@@ -1270,7 +1285,7 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
     # Strategy 1: try browser-harness CLI if available
     try:
         return _refresh_via_browser_harness(port)
-    except (FileNotFoundError, _BrowserHarnessFallback):
+    except (FileNotFoundError, _BrowserHarnessFallbackError):
         pass
 
     # Strategy 2: direct CDP WebSocket via Python websockets library
@@ -1297,21 +1312,21 @@ def _refresh_via_browser_harness(port: int) -> dict[str, str]:
         # direct CDP path when browser-harness is not installed.
         raise
     except Exception:
-        raise _BrowserHarnessFallback(
+        raise _BrowserHarnessFallbackError(
             "Could not run the local browser cookie helper."
         ) from None
     if result.returncode != 0:
-        raise _BrowserHarnessFallback("The local browser cookie helper failed.")
+        raise _BrowserHarnessFallbackError("The local browser cookie helper failed.")
 
     try:
         entries = json.loads(result.stdout)
     except (TypeError, ValueError):
-        raise _BrowserHarnessFallback(
+        raise _BrowserHarnessFallbackError(
             "The local browser cookie helper returned invalid data."
         ) from None
     d2l_cookies = d2l_cookies_from_entries(entries)
     if not d2l_cookies:
-        raise _BrowserHarnessFallback(
+        raise _BrowserHarnessFallbackError(
             "No usable Lighthouse cookies were found in the browser."
         )
 
@@ -1355,7 +1370,7 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
             "Cannot extract cookies: neither browser-harness nor websockets library available. "
             f"Install with: pip install websockets\n"
             f"Or ensure Chrome is running with --remote-debugging-port={port}"
-        )
+        ) from None
     except NetworkError:
         raise
     except Exception:

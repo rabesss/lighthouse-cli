@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock
 import json
+from unittest.mock import Mock
 
 import pytest
 
 from lighthouse_cli.api import LighthouseClient
-from lighthouse_cli.request_protection import csrf_from_homepage
-from lighthouse_cli.request_protection import form_protection_from_homepage
+from lighthouse_cli.request_protection import csrf_from_homepage, form_protection_from_homepage
 
 
 def test_extracts_only_script_bootstrap_not_user_content():

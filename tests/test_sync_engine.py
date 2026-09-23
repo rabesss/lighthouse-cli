@@ -19,7 +19,8 @@ from click.testing import CliRunner
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _run_and_render_multi
-from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest, compute_sha256 as manifest_compute_sha256
+from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest
+from lighthouse_cli.manifest import compute_sha256 as manifest_compute_sha256
 from lighthouse_cli.sync_engine import (
     Mode,
     _safe_topic_filename,

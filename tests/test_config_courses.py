@@ -10,14 +10,15 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from lighthouse_cli.cli import cli
 from lighthouse_cli.api import LighthouseClient
+from lighthouse_cli.cli import cli
 from lighthouse_cli.course_config import (
     load as _load_course_config,
+)
+from lighthouse_cli.course_config import (
     save as _save_course_config,
 )
 from lighthouse_cli.credential_store import CredentialStoreError
-
 
 # ---------------------------------------------------------------------------
 # Config helper tests

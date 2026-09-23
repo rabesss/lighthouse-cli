@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from threading import Lock
-
 
 _TOKEN = re.compile(
     r"localStorage\s*\.\s*setItem\(\s*(['\"])XSRF\.Token\1\s*,\s*(['\"])([A-Za-z0-9._~+/=\-]{1,4096})\2\s*\)"

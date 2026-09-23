@@ -21,7 +21,6 @@ from typing import Any
 
 from .utils import _parse_finite_float, _reject_non_finite_json, atomic_write
 
-
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------

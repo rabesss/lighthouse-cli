@@ -15,9 +15,8 @@ from typing import Any
 
 import pytest
 
-from lighthouse_cli.auth import CredentialStore, CredentialStoreError
-from lighthouse_cli.credential_store import FORMAT_VERSION, is_sealed_document
 import lighthouse_cli.config as config_mod
+from lighthouse_cli.auth import CredentialStore, CredentialStoreError
 from lighthouse_cli.config import (
     clear_mfa_pending,
     load_cookies,
@@ -26,7 +25,7 @@ from lighthouse_cli.config import (
     save_mfa_pending,
     update_mfa_pending,
 )
-
+from lighthouse_cli.credential_store import FORMAT_VERSION, is_sealed_document
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

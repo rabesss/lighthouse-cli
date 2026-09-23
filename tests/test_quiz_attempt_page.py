@@ -8,10 +8,17 @@ from unittest.mock import Mock
 
 import pytest
 
-from lighthouse_cli.quiz_attempt_page import MAX_PAGE_BYTES, PreviewPageError, parse_preview_page
-from lighthouse_cli.request_protection import FormProtection
-from lighthouse_cli.quiz_preview_transport import PreviewAdvanceUnknownError, PreviewSaveUnknownError, PreviewStartUnknownError, advance_current_preview, save_current_preview_answer, start_preview
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+from lighthouse_cli.quiz_attempt_page import MAX_PAGE_BYTES, PreviewPageError, parse_preview_page
+from lighthouse_cli.quiz_preview_transport import (
+    PreviewAdvanceUnknownError,
+    PreviewSaveUnknownError,
+    PreviewStartUnknownError,
+    advance_current_preview,
+    save_current_preview_answer,
+    start_preview,
+)
+from lighthouse_cli.request_protection import FormProtection
 
 
 def question(number: int, page: int = 1, *, saved: str = "True", selected: bool = True) -> str:
@@ -62,6 +69,28 @@ def test_one_way_page_has_next_without_previous():
     final_page = parse(html(question(2, 2), page=2, extra='<button disabled>Next Page</button>'), page=2)
     assert not final_page.has_next_control
     assert not final_page.has_previous_control
+
+
+def test_id_less_radio_uses_its_own_row_not_a_stray_label():
+    # Without an id there is no label[for] to follow. Label lookup must not
+    # fall back to "first label lacking a for attribute" (BeautifulSoup's
+    # meaning of attrs={"for": None}), which would attach the wrong text.
+    body = question(1).replace(' id="q1a"', "").replace(' id="q1b"', "")
+    body = body.replace("<fieldset>", "<label>Stray instructions</label><fieldset>")
+    page = parse(html(body))
+    assert page.public_data()["questions"][0]["choices"] == [
+        {"choice_id": 401, "text": "True"},
+        {"choice_id": 402, "text": "False"},
+    ]
+
+
+def test_id_less_radio_outside_a_row_fails_closed():
+    # No id and no enclosing row: there is no trustworthy label, so the page
+    # is rejected rather than guessing from nearby text.
+    stray = '<label>Stray instructions</label><input type="radio" name="tAtom201_300" value="403">'
+    body = question(1).replace("<fieldset>", stray + "<fieldset>", 1)
+    with pytest.raises(PreviewPageError):
+        parse(html(body))
 
 
 @pytest.mark.parametrize("saved", ["False", "unknown", ""])

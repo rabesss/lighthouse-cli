@@ -15,7 +15,6 @@ from typing import Any
 
 import click
 
-
 # Keep this message deliberately generic.  Click's own UsageError includes the
 # invalid value and can therefore contain a URL, a pasted token, or another
 # piece of input that should not be copied into a machine-readable result.
@@ -34,6 +33,18 @@ def _has_json_option(args: list[str]) -> bool:
         if arg == "--json" or arg.startswith("--json="):
             return True
     return False
+
+
+class _JsonUsageError(click.UsageError):
+    """Sanitized usage error for ``--json`` invocations (repository exit code 1)."""
+
+    exit_code = 1
+
+
+def _safe_usage_error(ctx: click.Context, *, json_requested: bool) -> click.UsageError:
+    """Build a UsageError that never echoes the rejected input."""
+    error_type = _JsonUsageError if json_requested else click.UsageError
+    return error_type(JSON_USAGE_ERROR, ctx=ctx)
 
 
 class JsonOutputCommand(click.Command):
@@ -60,10 +71,7 @@ class JsonOutputCommand(click.Command):
             # Click's original UsageError includes the invalid value. Replace
             # it before rendering so a pasted password, token, or URL cannot
             # reach stderr.
-            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
-            if requested_json:
-                safe_error.exit_code = 1
-            raise safe_error from None
+            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
 
 class JsonOutputGroup(click.Group):
@@ -78,10 +86,7 @@ class JsonOutputGroup(click.Group):
         except click.UsageError:
             if requested_json and not ctx.resilient_parsing:
                 output_json({"error": JSON_USAGE_ERROR})
-            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
-            if requested_json:
-                safe_error.exit_code = 1
-            raise safe_error from None
+            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
     def invoke(self, ctx: click.Context) -> Any:
         try:
@@ -95,10 +100,7 @@ class JsonOutputGroup(click.Group):
             requested_json = bool(getattr(self, "_json_requested", False))
             if requested_json and not ctx.resilient_parsing:
                 output_json({"error": JSON_USAGE_ERROR})
-            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
-            if requested_json:
-                safe_error.exit_code = 1
-            raise safe_error from None
+            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +112,7 @@ _RICH_CACHE: tuple[Any, Any, Any] | None = None
 _RICH_CHECKED: bool = False
 
 
-def _try_rich():
+def _try_rich() -> tuple[Any, Any, Any] | None:
     """Import Rich types, returning ``(Table, Text, console)`` when available."""
     global _RICH_CACHE, _RICH_CHECKED
     if not _RICH_CHECKED:
@@ -620,12 +622,12 @@ def command_error(
 def print_table(columns: list[str], rows: list[list[str]], title: str = "") -> None:
     """Print a table using rich if available, else plain aligned text."""
     if rich := _try_rich():
-        Table, Text, console = rich
-        table = Table(title=Text(title), show_lines=False, pad_edge=False)
+        rich_table_cls, rich_text_cls, console = rich
+        table = rich_table_cls(title=rich_text_cls(title), show_lines=False, pad_edge=False)
         for col in columns:
-            table.add_column(Text(col), overflow="ellipsis")
+            table.add_column(rich_text_cls(col), overflow="ellipsis")
         for row in rows:
-            table.add_row(*(Text(cell) for cell in row))
+            table.add_row(*(rich_text_cls(cell) for cell in row))
         console.print(table)
         return
 

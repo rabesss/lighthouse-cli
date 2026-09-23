@@ -9,20 +9,22 @@ document on stdout; diagnostics remain on stderr.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from importlib import import_module
+from typing import Any, cast
+
 import click
 
 from . import __version__
-from collections.abc import Callable
-from importlib import import_module
-from typing import Any
-
 from .display import JsonOutputCommand, JsonOutputGroup
 
 
 def _lazy_command(module: str, name: str) -> Callable[..., int]:
     """Keep help/version independent of HTTP, crypto and browser dependencies."""
     def invoke(*args: Any, **kwargs: Any) -> int:
-        return getattr(import_module(module, package=__package__), name)(*args, **kwargs)
+        command = getattr(import_module(module, package=__package__), name)
+        return cast(int, command(*args, **kwargs))
+
     return invoke
 
 

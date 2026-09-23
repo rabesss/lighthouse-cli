@@ -334,7 +334,7 @@ class TestSubmitFile:
 
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(SessionExpiredError) as exc_info:
@@ -351,7 +351,7 @@ class TestSubmitFile:
         mock_session.request.return_value = mock_resp
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(NetworkError, match="unexpected redirect"):
@@ -383,7 +383,7 @@ class TestSubmitFile:
         mock_session.request.return_value = mock_resp
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(NetworkError, match="unexpected redirect"):
@@ -417,7 +417,7 @@ class TestSubmitFile:
         mock_session.request.return_value = mock_resp
         client = LighthouseClient()
         client._loaded = True
-        client._cookies = {name: "value" for name in COOKIE_NAMES}
+        client._cookies = dict.fromkeys(COOKIE_NAMES, "value")
         client._session = mock_session
 
         with pytest.raises(SessionExpiredError):

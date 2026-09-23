@@ -16,13 +16,12 @@ from lighthouse_cli.assignments import (
     _safe_course_name,
     download_for_course,
     download_single_attachment,
-    safe_attachment_filename,
     safe_assignment_folder_name,
+    safe_attachment_filename,
     sync_for_course,
 )
 from lighthouse_cli.cli import cli
-from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest
-from lighthouse_cli.manifest import compute_sha256
+from lighthouse_cli.manifest import MANIFEST_FILENAME, Manifest, compute_sha256
 from lighthouse_cli.sync_engine import _safe_course_name as sync_safe_course_name
 
 
@@ -1062,20 +1061,32 @@ class TestSyncWithoutIncludeAssignments:
         course_dir.mkdir(parents=True)
 
         # No dropbox API should be called without --include-assignments
-        with patch.object(LighthouseClient, "get_dropbox_folders", return_value=folders) as mockFolders, \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}):
-
-            result = cli_runner.invoke(cli, [
-                "sync", "44347",
-                "-o", str(temp_download_dir),
-            ])
+        with (
+            patch.object(
+                LighthouseClient, "get_dropbox_folders", return_value=folders
+            ) as mock_folders,
+            patch.object(
+                LighthouseClient,
+                "get_courses",
+                return_value=[
+                    {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
+                ],
+            ),
+            patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}),
+        ):
+            result = cli_runner.invoke(
+                cli,
+                [
+                    "sync",
+                    "44347",
+                    "-o",
+                    str(temp_download_dir),
+                ],
+            )
 
             assert result.exit_code == 0, f"exit={result.exit_code}"
             # dropbox API should NOT have been called
-            mockFolders.assert_not_called()
+            mock_folders.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1779,8 +1790,11 @@ class TestSyncDropboxAttachmentMetadata:
         client.get_dropbox_folders.return_value = [folder]
         client.download_attachment.return_value = (content, "x.pdf")
 
-        downloaded, skipped, updated, errors = sync_for_course(
-            client, 44347, course_dir, manifest,
+        _downloaded, skipped, updated, errors = sync_for_course(
+            client,
+            44347,
+            course_dir,
+            manifest,
         )
 
         assert errors == []

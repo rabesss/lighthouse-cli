@@ -9,8 +9,7 @@ from typing import Any
 import click
 
 from .display import JsonOutputCommand, format_user_error, output_json
-from .quiz_preview_session import PreviewWorkflow, PreviewWorkflowError, _UNCERTAIN
-
+from .quiz_preview_session import _UNCERTAIN, PreviewWorkflow, PreviewWorkflowError
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
 

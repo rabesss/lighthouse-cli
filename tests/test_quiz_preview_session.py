@@ -9,9 +9,13 @@ import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli.cli import cli
-from lighthouse_cli.quiz_preview_session import PreviewWorkflow, PreviewWorkflowError
-from lighthouse_cli.quiz_preview_transport import PreviewAdvanceUnknownError, PreviewSaveUnknownError, PreviewStartUnknownError
 from lighthouse_cli.quiz_attempt_page import parse_preview_page
+from lighthouse_cli.quiz_preview_session import PreviewWorkflow, PreviewWorkflowError
+from lighthouse_cli.quiz_preview_transport import (
+    PreviewAdvanceUnknownError,
+    PreviewSaveUnknownError,
+    PreviewStartUnknownError,
+)
 from tests.test_quiz_attempt_page import html, question
 
 

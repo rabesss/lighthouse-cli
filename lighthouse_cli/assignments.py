@@ -10,18 +10,21 @@ import re
 import sys
 from pathlib import Path
 from stat import S_ISREG
+from typing import Any
 
 from .api import LighthouseClient
+from .display import (
+    format_user_error,
+    safe_display_text,
+)
+from .display import (
+    output_json as _output_json,
+)
 from .manifest import (
     MANIFEST_FILENAME,
     Manifest,
     compute_file_sha256,
     normalize_sha256,
-)
-from .display import (
-    format_user_error,
-    output_json as _output_json,
-    safe_display_text,
 )
 from .utils import (
     MAX_ATOMIC_TARGET_NAME_BYTES,
@@ -196,10 +199,7 @@ def disambiguate_filename(
         counter += 1
 
 
-
-
-
-def _assignment_dir(dest: Path, folder: dict) -> Path:
+def _assignment_dir(dest: Path, folder: dict[str, Any]) -> Path:
     """Return a non-symlinked directory for one assignment folder."""
     course_root = _course_boundary(dest)
     folder_id = _positive_int(folder.get("Id"))
@@ -254,8 +254,8 @@ def _has_symlink_component(path: Path, root: Path) -> bool:
 def folder_with_attachments(
     client: LighthouseClient,
     org_id: int,
-    folder: dict,
-) -> tuple[dict, object]:
+    folder: dict[str, Any],
+) -> tuple[dict[str, Any], object]:
     """Reuse list attachments, fetching folder detail only when omitted."""
     if "Attachments" in folder:
         return folder, folder.get("Attachments")
@@ -294,7 +294,7 @@ def _attachment_error(
 
 def _manifest_attachment_path(
     dest: Path,
-    entry: dict | None,
+    entry: dict[str, Any] | None,
     *,
     expected_parent: Path | None = None,
 ) -> Path | None:
@@ -304,7 +304,7 @@ def _manifest_attachment_path(
     raw_path = entry.get("path")
     if (not isinstance(raw_path, str) or not raw_path) and expected_parent is not None:
         legacy_filename = entry.get("filename")
-        if not _safe_manifest_component(legacy_filename):
+        if not isinstance(legacy_filename, str) or not _safe_manifest_component(legacy_filename):
             return None
         try:
             course_root = _course_boundary(dest)
@@ -371,10 +371,10 @@ def _safe_manifest_component(component: object) -> bool:
 
 def _matching_local_attachment(
     dest: Path,
-    entry: dict | None,
+    entry: dict[str, Any] | None,
     expected_size: object,
     *,
-    expected_folder: dict | None = None,
+    expected_folder: dict[str, Any] | None = None,
 ) -> Path | None:
     """Return a verified local attachment path, or ``None``.
 
@@ -450,12 +450,12 @@ def _claim_assignment_entry(
     dest: Path,
     manifest: Manifest,
     att_key: str,
-    folder: dict,
+    folder: dict[str, Any],
     owners: dict[Path, str | None],
     claimed_paths: set[Path],
     *,
     allow_contested_claim: bool,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Claim one safe prior path without letting manifest aliases overwrite."""
     entry = manifest.get(att_key)
     if not isinstance(entry, dict):
@@ -488,9 +488,9 @@ def _claim_assignment_entry(
 
 def _write_entry_for_claim(
     dest: Path,
-    entry: dict | None,
-    folder: dict,
-) -> dict | None:
+    entry: dict[str, Any] | None,
+    folder: dict[str, Any],
+) -> dict[str, Any] | None:
     """Reuse a legacy inferred path only when no local file would be replaced."""
     if not isinstance(entry, dict) or entry.get("path"):
         return entry
@@ -510,20 +510,20 @@ def _write_entry_for_claim(
 def _download_and_record(
     client: LighthouseClient,
     org_id: int,
-    folder: dict,
+    folder: dict[str, Any],
     att_id: int,
     dest: Path,
     manifest: Manifest,
     *,
-    existing_entry: dict | None | object = _USE_MANIFEST_ENTRY,
+    existing_entry: dict[str, Any] | object | None = _USE_MANIFEST_ENTRY,
     claimed_paths: set[Path] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
     folder_id = _positive_int(folder.get("Id"))
-    att_id = _positive_int(att_id)
-    if folder_id is None or att_id is None:
+    att_key_id = _positive_int(att_id)
+    if folder_id is None or att_key_id is None:
         raise ValueError(_INVALID_IDENTIFIER)
-    att_key = assignment_key(folder_id, att_id)
+    att_key = assignment_key(folder_id, att_key_id)
     if existing_entry is _USE_MANIFEST_ENTRY:
         existing = manifest.get(att_key)
     else:
@@ -666,9 +666,9 @@ def download_for_course(
     dest: Path,
     manifest: Manifest,
     folder_ids: list[int] | None = None,
-    folder_snapshot: list[dict] | tuple[dict, ...] | None = None,
+    folder_snapshot: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     path_manifest: Manifest | None = None,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Download all assignment attachments for a course.
 
     ``folder_snapshot`` is an optional folder list already fetched and
@@ -677,6 +677,7 @@ def download_for_course(
 
     Returns (downloaded_entries, errors).
     """
+    all_folders: list[dict[str, Any]] | tuple[dict[str, Any], ...]
     if folder_snapshot is None:
         try:
             all_folders = client.get_dropbox_folders(org_id)
@@ -685,7 +686,8 @@ def download_for_course(
     else:
         all_folders = folder_snapshot
 
-    downloaded_entries, errors = [], []
+    downloaded_entries: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
 
     if not isinstance(all_folders, (list, tuple)):
         return [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]
@@ -834,7 +836,7 @@ def sync_for_course(
     org_id: int,
     dest: Path,
     manifest: Manifest,
-) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Sync assignment attachments for a course (detect new/updated).
 
     Returns (downloaded_entries, skipped_entries, updated_entries, errors).
@@ -844,7 +846,10 @@ def sync_for_course(
     except Exception as e:
         return [], [], [], [{"error": format_user_error(e), "type": "assignment_list"}]
 
-    downloaded_entries, skipped_entries, updated_entries, errors = [], [], [], []
+    downloaded_entries: list[dict[str, Any]] = []
+    skipped_entries: list[dict[str, Any]] = []
+    updated_entries: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
 
     if not isinstance(all_folders, (list, tuple)):
         return [], [], [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]

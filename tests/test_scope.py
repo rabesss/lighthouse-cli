@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from lighthouse_cli.api import LighthouseClient, CourseNotFoundError
+from lighthouse_cli.api import CourseNotFoundError, LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _resolve_also_course, _resolve_course_scope
 

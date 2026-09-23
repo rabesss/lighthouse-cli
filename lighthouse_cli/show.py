@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
-from typing import Any
+from typing import Any, cast
 
 from .api import LighthouseClient, SessionExpiredError, resolve_course_id
 from .assignments import (
@@ -18,9 +18,13 @@ from .assignments import (
     safe_assignment_folder_name,
     safe_attachment_filename,
 )
-from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short
+from .display import error as _error
+from .display import fmt_date as _fmt_date
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
+from .display import print_table as _print_table
+from .display import short as _short
 from .utils import _course_identifier, get_enrolled_course_catalog
-
 
 # ---------------------------------------------------------------------------
 # Shared helper for "one course or all courses" commands
@@ -137,7 +141,7 @@ def _for_course_or_all(
             payload, failed = _normalise_json_payload(result, resolved_id, collection_key)
             _output_json(payload)
             return 1 if failed else 0
-        return result
+        return cast(int, result)
 
     try:
         courses = get_enrolled_course_catalog(client)
@@ -241,9 +245,11 @@ def _course_sort_key(payload: dict[str, Any]) -> tuple[int, int | str]:
     """Sort numeric course IDs numerically and malformed IDs deterministically."""
     value = payload.get("course_id")
     try:
-        return 0, int(value)
+        if isinstance(value, (int, float, str)):
+            return 0, int(value)
     except (TypeError, ValueError):
-        return 1, "" if value is None else str(value)
+        pass
+    return 1, "" if value is None else str(value)
 
 
 def _course_error_payload(
@@ -630,7 +636,7 @@ def _show_course_grades(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display grades for a single course.
 
     Returns int (exit code) when json_output=False, or dict when json_output=True.
@@ -680,12 +686,12 @@ def _show_announcements(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display announcements for a single course."""
     def _fetch(org_unit_id: int) -> list[dict[str, Any]]:
         return _normalise_announcements(client.get_announcements(org_unit_id))
 
-    def _render(announcements, t):
+    def _render(announcements: list[dict[str, Any]], t: str) -> None:
         print(f"\n📢 {t}")
         for a in announcements:
             print(f"  [{_fmt_date(a.get('CreatedDate'))}] {a.get('Title', '')}")
@@ -722,16 +728,25 @@ def _show_calendar(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display calendar events for a single course."""
     def _fetch(org_unit_id: int) -> list[dict[str, Any]]:
         return _normalise_calendar_events(client.get_calendar(org_unit_id))
 
-    def _render(events, t):
-        _print_table(["Date", "Title", "Course"], [
-            [_fmt_date(e.get("StartDateTime")), _short(_display_text(e.get("Title", "")), 40), e.get("OrgUnitName", "")]
-            for e in events
-        ], title=f"Calendar – {t}")
+    def _render(events: list[dict[str, Any]], t: str) -> None:
+        _print_table(
+            ["Date", "Title", "Course"],
+            [
+                [
+                    _fmt_date(e.get("StartDateTime")),
+                    _short(_display_text(e.get("Title", "")), 40),
+                    e.get("OrgUnitName", ""),
+                ]
+                for e in events
+            ],
+            title=f"Calendar – {t}",
+        )
+
     return _show_with_error_handling(
         org_id,
         _fetch,
@@ -831,7 +846,7 @@ def _show_course_assignments(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display dropbox folders (assignments) for a single course.
 
     Returns int (exit code) when json_output=False, or dict when json_output=True.
@@ -852,7 +867,7 @@ def _show_course_assignments(
         )
 
     # Process folders into structured format
-    assignments = []
+    assignments: list[dict[str, Any]] = []
     seen_folder_ids: set[int] = set()
     for f in folders:
         if not isinstance(f, dict):
@@ -1004,16 +1019,26 @@ def _show_course_quizzes(
     org_id: int,
     json_output: bool,
     title: str | None = None,
-) -> int | dict:
+) -> int | dict[str, Any]:
     """Display quizzes for a single course."""
     def _fetch(org_unit_id: int) -> list[dict[str, Any]]:
         return _normalise_quizzes(client.get_quizzes(org_unit_id))
 
-    def _render(quizzes, t):
-        _print_table(["ID", "Name", "Start", "End"], [
-            [str(q.get("QuizId", "")), _short(_display_text(q.get("Name", "")), 35), _fmt_date(q.get("StartDate")), _fmt_date(q.get("EndDate"))]
-            for q in quizzes
-        ], title=f"Quizzes – {t}")
+    def _render(quizzes: list[dict[str, Any]], t: str) -> None:
+        _print_table(
+            ["ID", "Name", "Start", "End"],
+            [
+                [
+                    str(q.get("QuizId", "")),
+                    _short(_display_text(q.get("Name", "")), 35),
+                    _fmt_date(q.get("StartDate")),
+                    _fmt_date(q.get("EndDate")),
+                ]
+                for q in quizzes
+            ],
+            title=f"Quizzes – {t}",
+        )
+
     return _show_with_error_handling(
         org_id,
         _fetch,

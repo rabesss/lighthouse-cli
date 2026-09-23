@@ -8,14 +8,19 @@ import math
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
-import requests
 import pytest
+import requests
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, NetworkError
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _resolve_course_scope
-from lighthouse_cli.display import _has_json_option, format_user_error, output_json, safe_display_text
+from lighthouse_cli.display import (
+    _has_json_option,
+    format_user_error,
+    output_json,
+    safe_display_text,
+)
 from lighthouse_cli.utils import get_course_name, get_enrolled_course_catalog
 
 

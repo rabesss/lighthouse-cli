@@ -38,14 +38,16 @@ from .credential_store import CredentialStore, CredentialStoreError
 from .ms_auth import (
     MFA_METHOD_APP,
     MFA_METHOD_AUTH_IDS,
-    MFA_METHOD_AUTO,
     MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    MicrosoftSSOClient,
+)
+from .ms_errors import (
+    MFA_METHOD_AUTO,
     VALID_MFA_METHODS,
     MfaPendingError,
-    MicrosoftSSOClient,
     MicrosoftSSOError,
 )
 from .ms_mfa import format_user_proof, safe_auth_method_id
@@ -54,7 +56,8 @@ from .ms_mfa import format_user_proof, safe_auth_method_id
 # Exceptions and uniform exits
 # ---------------------------------------------------------------------------
 
-class _PromptUnavailable(Exception):
+
+class _PromptUnavailableError(Exception):
     """A credential is missing and stdin cannot be prompted."""
 
 
@@ -344,12 +347,12 @@ def _prompt_password() -> str:
 def _prompt_credential(field: str, *, interactive: bool, json_output: bool) -> str:
     """Prompt for one credential only when an interactive stream is available."""
     if not interactive:
-        raise _PromptUnavailable(field)
+        raise _PromptUnavailableError(field)
     if field == "username":
         return _prompt_username(json_output)
     if field == "password":
         return _prompt_password()
-    raise _PromptUnavailable(field)
+    raise _PromptUnavailableError(field)
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +463,7 @@ def _cli_method_for_auth_id(auth_method_id: str) -> str | None:
     return None
 
 
-def _pending_selected_method(pending: dict | None) -> str | None:
+def _pending_selected_method(pending: dict[str, Any] | None) -> str | None:
     """Return the explicit method represented by a sealed MFA checkpoint."""
     if not isinstance(pending, dict):
         return None
@@ -478,7 +481,7 @@ def plan_login(
     totp_code: str | None,
     read_totp_after_challenge: bool,
     mfa_method: str,
-    pending: dict | None,
+    pending: dict[str, Any] | None,
     interactive: bool,
 ) -> LoginPlan:
     """Decide resume vs fresh vs defer from flags + pending state + interactivity.
@@ -738,7 +741,7 @@ def cmd_auth_mfa_methods(
             stored,
             prompt,
         )
-    except _PromptUnavailable:
+    except _PromptUnavailableError:
         return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
     if not username or not password:
         return _auth_error("Username and password are required", json_output)
@@ -847,7 +850,7 @@ def cmd_auth_login(
             stored,
             prompt,
         )
-    except _PromptUnavailable:
+    except _PromptUnavailableError:
         return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
 
     if not username:

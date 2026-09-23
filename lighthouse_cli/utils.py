@@ -6,13 +6,12 @@ import json
 import math
 import os
 import re
-import uuid
 import urllib.parse
+import uuid
 from contextlib import suppress
 from inspect import isfunction, ismethod
 from pathlib import Path
 from typing import Any, NoReturn
-
 
 # ---------------------------------------------------------------------------
 # External result identifiers
@@ -101,8 +100,8 @@ def atomic_write(path: Path, data: bytes | str, *, mode: int | None = None) -> N
         text_mode = not isinstance(data, bytes)
         with os.fdopen(
             fd,
-            "wb" if not text_mode else "w",
-            **({} if not text_mode else {"encoding": "utf-8"}),
+            "w" if text_mode else "wb",
+            encoding="utf-8" if text_mode else None,
         ) as fh:
             fh.write(data)
             fh.flush()
@@ -244,6 +243,8 @@ def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
                 and _is_explicit_legacy_override(client, legacy_getter)
             ):
                 raise
+            if legacy_getter is None:
+                raise
             raw_courses = legacy_getter()
             legacy_used = True
     elif callable(legacy_getter):
@@ -255,6 +256,8 @@ def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
     if not legacy_used and not isinstance(raw_courses, (list, tuple)) and _is_explicit_legacy_override(
         client, legacy_getter
     ):
+        if legacy_getter is None:
+            return []
         raw_courses = legacy_getter()
     if not isinstance(raw_courses, (list, tuple)):
         return []

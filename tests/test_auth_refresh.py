@@ -77,7 +77,7 @@ def test_auth_refresh_preflights_extracts_and_persists(monkeypatch) -> None:
 
 
 def test_failed_auth_refresh_preserves_pending_checkpoint(monkeypatch) -> None:
-    cookies = {name: "value" for name in COOKIE_NAMES}
+    cookies = dict.fromkeys(COOKIE_NAMES, "value")
 
     class FakeStore:
         def preflight(self) -> None:

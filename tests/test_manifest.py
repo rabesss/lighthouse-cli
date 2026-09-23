@@ -9,17 +9,16 @@ from pathlib import Path
 import pytest
 
 from lighthouse_cli.manifest import (
+    MANIFEST_FILENAME,
     MAX_MANIFEST_SIZE,
+    REQUIRED_ENTRY_KEYS,
     Manifest,
     ManifestCorruptError,
     ManifestError,
-    REQUIRED_ENTRY_KEYS,
     compute_file_sha256,
     compute_sha256,
     normalize_sha256,
-    MANIFEST_FILENAME,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

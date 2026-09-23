@@ -5,17 +5,20 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import click
 
 from .api import LighthouseClient
 from .assessment_api import (
-    AssessmentAPI, AssessmentWriteUnknownError, assignment_payload, project, quiz_payload,
+    AssessmentAPI,
+    AssessmentWriteUnknownError,
+    assignment_payload,
+    project,
+    quiz_payload,
 )
-from .display import JsonOutputCommand, JsonOutputGroup, format_user_error, output_json
 from .course_read_commands import register_course_reads
-
+from .display import JsonOutputCommand, JsonOutputGroup, format_user_error, output_json
 
 _ID = click.IntRange(min=1)
 
@@ -28,10 +31,10 @@ def _emit(data: Any, json_output: bool) -> None:
 
 
 def _site() -> str:
-    context = click.get_current_context()
+    context: click.Context | None = click.get_current_context()
     while context is not None:
         if "site" in context.params:
-            return context.params["site"]
+            return cast(str, context.params["site"])
         context = context.parent
     return "lighthouse"
 

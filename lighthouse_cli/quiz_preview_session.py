@@ -5,19 +5,24 @@ from __future__ import annotations
 import fcntl
 import os
 import stat
-from contextlib import contextmanager, suppress
 from collections.abc import Iterator
-from typing import Any
+from contextlib import contextmanager, suppress
+from typing import Any, cast
 
 from .api import LighthouseClient, _require_positive_endpoint_id
 from .connection import connection_for
 from .credential_store import CredentialStore, _validate_credential_path
-from .quiz_preview_transport import (
-    PreviewStartUnknownError, PreviewSaveUnknownError, PreviewAdvanceUnknownError,
-    start_preview, read_current_preview, save_current_preview_answer, advance_current_preview,
-    page_path,
-)
 from .quiz_preview_finish import PreviewSubmitUnknownError, submit_preview, verify_receipt
+from .quiz_preview_transport import (
+    PreviewAdvanceUnknownError,
+    PreviewSaveUnknownError,
+    PreviewStartUnknownError,
+    advance_current_preview,
+    page_path,
+    read_current_preview,
+    save_current_preview_answer,
+    start_preview,
+)
 
 
 class PreviewWorkflowError(ValueError):
@@ -70,7 +75,12 @@ class PreviewWorkflow:
                 or state.get("operation") not in (None, "start", "answer", "next", "submit")):
             raise PreviewWorkflowError("The saved preview checkpoint is invalid.")
         if state["status"] in {"active", "submitted"} or state.get("attempt_id") is not None:
-            page_path(self.course_id, self.quiz_id, state.get("attempt_id"), state.get("page"))
+            page_path(
+                self.course_id,
+                self.quiz_id,
+                cast(int, state.get("attempt_id")),
+                cast(int, state.get("page")),
+            )
         return state
 
     def _save(self, state: dict[str, Any]) -> None:
@@ -152,7 +162,7 @@ class PreviewWorkflow:
                              "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "starting",
                              "operation": "start", "attempt_id": None, "page": None}
                 else:
-                    state = dict(previous)
+                    state = dict(cast("dict[str, Any]", previous))
                     if state["status"] == "uncertain":
                         return self._recover(client, state)
                 if operation == "page":
@@ -163,7 +173,12 @@ class PreviewWorkflow:
                     if operation == "start":
                         result = start_preview(client, course_id=self.course_id, quiz_id=self.quiz_id, bypass_availability=bypass_availability)
                     elif operation == "answer":
-                        result = save_current_preview_answer(client, **self._identity(state), question_id=question_id, choice_id=choice_id)
+                        result = save_current_preview_answer(
+                            client,
+                            **self._identity(state),
+                            question_id=cast(int, question_id),
+                            choice_id=cast(int, choice_id),
+                        )
                     elif operation == "next":
                         result = advance_current_preview(client, **self._identity(state))
                     else:
@@ -196,8 +211,15 @@ class PreviewWorkflow:
 
     def _identity(self, state: dict[str, Any]) -> dict[str, int]:
         if type(state.get("attempt_id")) is not int or type(state.get("page")) is not int:
-            raise PreviewWorkflowError("The start outcome is unknown. Inspect the browser before abandoning or starting again.")
-        return dict(course_id=self.course_id, quiz_id=self.quiz_id, attempt_id=state["attempt_id"], page=state["page"])
+            raise PreviewWorkflowError(
+                "The start outcome is unknown. Inspect the browser before abandoning or starting again."
+            )
+        return {
+            "course_id": self.course_id,
+            "quiz_id": self.quiz_id,
+            "attempt_id": state["attempt_id"],
+            "page": state["page"],
+        }
 
     def _recover(self, client: LighthouseClient, state: dict[str, Any]) -> dict[str, Any]:
         identity = self._identity(state)
@@ -221,8 +243,12 @@ class PreviewWorkflow:
         elif operation != "answer":
             raise PreviewWorkflowError("The start outcome must be checked in the browser.")
         result = read_current_preview(client, **identity)
-        if operation == "answer" and not result.confirms_answer(state.get("question_id"), state.get("choice_id")):
-            raise PreviewWorkflowError("The intended answer is not confirmed saved; the checkpoint remains uncertain.")
+        if operation == "answer" and not result.confirms_answer(
+            cast(int, state.get("question_id")), cast(int, state.get("choice_id"))
+        ):
+            raise PreviewWorkflowError(
+                "The intended answer is not confirmed saved; the checkpoint remains uncertain."
+            )
         state.update(status="active", operation=None, page=result.page)
         self._save(state)
         return result.public_data()

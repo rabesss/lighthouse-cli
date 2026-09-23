@@ -10,7 +10,6 @@ import pytest
 
 from lighthouse_cli.utils import atomic_write
 
-
 # ---------------------------------------------------------------------------
 # Round-trip
 # ---------------------------------------------------------------------------
@@ -155,7 +154,7 @@ class TestAtomicWriteConcurrency:
             try:
                 for _ in range(25):
                     atomic_write(target, payload)
-            except Exception as exc:  # noqa: BLE001 - recorded and asserted below
+            except Exception as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=writer, args=(p,)) for p in payloads]

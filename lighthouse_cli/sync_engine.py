@@ -21,10 +21,10 @@ including warnings — is returned as data for the caller to render.
 from __future__ import annotations
 
 import hashlib
+import re
 from enum import Enum
 from os.path import normpath
 from pathlib import Path
-import re
 from stat import S_ISREG
 from typing import Any
 from urllib.parse import unquote
@@ -380,7 +380,9 @@ def _validate_course_destination(output_root: Path, dest: Path) -> None:
         raise ValueError("Course manifest is a symlinked path")
 
 
-def build_entry(tid: str, name: str, path: str, content_or_entry: bytes | dict, sha: str = "") -> dict:
+def build_entry(
+    tid: str, name: str, path: str, content_or_entry: bytes | dict[str, Any], sha: str = ""
+) -> dict[str, Any]:
     """Build a sync/download entry dict. content_or_entry is bytes (content) or dict (manifest entry)."""
     safe_tid = str(tid)
     safe_name = _safe_display_filename(name)
@@ -403,7 +405,7 @@ def build_entry(tid: str, name: str, path: str, content_or_entry: bytes | dict, 
     }
 
 
-def fetch_toc_and_name(client: LighthouseClient, org_id: int) -> tuple[dict, str]:
+def fetch_toc_and_name(client: LighthouseClient, org_id: int) -> tuple[dict[str, Any], str]:
     """Fetch content TOC and course name. Raises on failure."""
     return client.get_content_toc(org_id), get_course_name(client, org_id)
 
@@ -411,7 +413,7 @@ def fetch_toc_and_name(client: LighthouseClient, org_id: int) -> tuple[dict, str
 def download_and_persist_topic(
     client: LighthouseClient,
     org_id: int,
-    topic: dict,
+    topic: dict[str, Any],
     dest: Path,
     manifest: Manifest,
     *,
@@ -663,7 +665,7 @@ def _preflight_assignment_selector(
     client: LighthouseClient,
     org_id: int,
     assignment_id: int,
-    folder_snapshot: object | None,
+    folder_snapshot: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
 ) -> tuple[list[dict[str, Any]] | tuple[dict[str, Any], ...] | None, dict[str, str] | None]:
     """Fetch/validate one assignment snapshot before any course processing."""
     if folder_snapshot is None:
@@ -691,7 +693,9 @@ def _load_manifest(manifest_path: Path, result: dict[str, Any]) -> Manifest:
         return manifest
 
 
-def _track_duplicate(sha_hashes: dict[str, list[dict]], file_hash: str, tid: str, filename: str) -> None:
+def _track_duplicate(
+    sha_hashes: dict[str, list[dict[str, Any]]], file_hash: str, tid: str, filename: str
+) -> None:
     """Record an entry hash for per-course SHA-256 duplicate detection."""
     normalized_hash = normalize_sha256(file_hash)
     if not normalized_hash:
@@ -876,7 +880,7 @@ def run_course(
 
     downloaded, skipped, updated = result["downloaded"], result["skipped"], result["updated"]
     errors = result["errors"]
-    sha_hashes: dict[str, list[dict]] = {}
+    sha_hashes: dict[str, list[dict[str, Any]]] = {}
     path_owners: dict[Path, str | None] = {}
     for topic in all_topics:
         topic_id = _positive_int(topic.get("topic_id"))
@@ -993,7 +997,7 @@ def run_course(
             for entry in skipped_a + updated_a + downloaded_a:
                 live_orphans.pop(assignment_key(entry.get("folder_id", 0), entry.get("file_id", 0)), None)
         result["orphaned"] = [
-            build_entry(tid, e.get("filename", ""), "", e)
+            build_entry(tid, (e or {}).get("filename", ""), "", e or {})
             for tid, e in sorted(live_orphans.items(), key=lambda item: str(item[0]))
         ]
     elif include_assignments:

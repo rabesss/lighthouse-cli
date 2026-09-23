@@ -11,7 +11,13 @@ from typing import Any
 
 import requests
 
-from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response, _require_positive_endpoint_id
+from .api import (
+    LighthouseClient,
+    NetworkError,
+    SessionExpiredError,
+    _close_response,
+    _require_positive_endpoint_id,
+)
 from .display import safe_display_text
 
 

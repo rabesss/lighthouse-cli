@@ -7,16 +7,15 @@ Never treat its hidden fields as a ready-to-replay submission request.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from bs4 import BeautifulSoup, Tag
 
 from .display import safe_display_text
 from .request_protection import FormProtection
-
 
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 MAX_QUESTIONS = 200
@@ -40,9 +39,12 @@ def _id(value: object) -> int:
 
 def _metadata(container: Tag, name: str) -> str:
     values = container.select(f".{name} input")
-    if len(values) != 1 or not isinstance(values[0].get("value"), str):
+    if len(values) != 1:
         raise PreviewPageError()
-    return values[0]["value"]
+    value = values[0].get("value")
+    if not isinstance(value, str):
+        raise PreviewPageError()
+    return value
 
 
 def _expanded(node: Tag) -> BeautifulSoup:
@@ -233,7 +235,12 @@ def parse_preview_page(
             if cid in choice_ids:
                 raise PreviewPageError()
             choice_ids.add(cid)
-            label = container.find("label", attrs={"for": radio.get("id")})
+            radio_id = radio.get("id")
+            label = (
+                container.find("label", attrs={"for": radio_id})
+                if isinstance(radio_id, str)
+                else None
+            )
             label = label if label is not None else radio.find_parent("tr")
             if label is None:
                 raise PreviewPageError()

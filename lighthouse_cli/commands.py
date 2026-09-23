@@ -11,16 +11,28 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlparse
 
 from .api import CourseNotFoundError, LighthouseClient, resolve_course_id
-from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
-from .display import error as _error, fmt_date as _fmt_date, format_user_error, output_json as _output_json, print_table as _print_table, safe_display_text, short as _short, utc_now_iso as _utc_now_iso
-from .course_config import load as _load_course_config, semester_state as _semester_state
-from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .assignments import download_single_attachment as _download_single_attachment
+from .config import BASE_URL, DEFAULT_DOWNLOAD_DIR, warn_if_cookies_stale
+from .course_config import load as _load_course_config
+from .course_config import semester_state as _semester_state
+from .display import error as _error
+from .display import fmt_date as _fmt_date
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
+from .display import print_table as _print_table
+from .display import short as _short
+from .display import utc_now_iso as _utc_now_iso
 from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
+from .show import (  # noqa: F401 — re-export
+    cmd_announcements,
+    cmd_assignments,
+    cmd_calendar,
+    cmd_grades,
+    cmd_quizzes,
+)
 from .submit import cmd_submit  # noqa: F401 — re-export
-from .show import cmd_grades, cmd_announcements, cmd_calendar, cmd_assignments, cmd_quizzes  # noqa: F401 — re-export
+from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .utils import _course_identifier, get_enrolled_course_catalog
-
 
 _ASSIGNMENT_NOT_FOUND = "Requested assignment folder was not found."
 _ASSIGNMENT_LIST_INVALID = "Assignment folders have an invalid response shape."
@@ -327,21 +339,35 @@ def _course_list_error_payload() -> dict[str, Any]:
     return {"courses": []}
 
 
-def _output_multi_course_json(sem_id: int, sem_name: str, courses_results: list[dict], also_errors: list[str]) -> None:
-    _output_json({
-        "semester": {
-            "id": sem_id,
-            "name": _safe_server_text(sem_name, fallback="Unknown Semester"),
-        },
-        "synced_at": _utc_now_iso(),
-        "summary": {"courses_checked": len(courses_results),
-                    **{k: sum(len(c.get(k, [])) for c in courses_results) for k in (
-                        "downloaded", "skipped", "updated", "duplicates", "errors",
-                        "assignments_downloaded", "assignment_errors",
-                    )}},
-        "courses": courses_results,
-        "also_errors": [format_user_error(error) for error in also_errors],
-    })
+def _output_multi_course_json(
+    sem_id: int, sem_name: str, courses_results: list[dict[str, Any]], also_errors: list[str]
+) -> None:
+    _output_json(
+        {
+            "semester": {
+                "id": sem_id,
+                "name": _safe_server_text(sem_name, fallback="Unknown Semester"),
+            },
+            "synced_at": _utc_now_iso(),
+            "summary": {
+                "courses_checked": len(courses_results),
+                **{
+                    k: sum(len(c.get(k, [])) for c in courses_results)
+                    for k in (
+                        "downloaded",
+                        "skipped",
+                        "updated",
+                        "duplicates",
+                        "errors",
+                        "assignments_downloaded",
+                        "assignment_errors",
+                    )
+                },
+            },
+            "courses": courses_results,
+            "also_errors": [format_user_error(error) for error in also_errors],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +596,7 @@ def _single_course_json(result: dict[str, Any], *, action: str, include_assignme
         return data
 
     assignments = result["assignments"]
-    data: dict[str, Any] = {
+    data = {
         "course_id": result["org_id"],
         "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
         "folder": str(result["dest"]),
@@ -1021,7 +1047,7 @@ def _resolve_semester(
     semester_filter: str | None,
     semester_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve semester filter to a semester dict, or None if not found. Matches by OrgUnitId (numeric) or name substring."""
+    """Resolve semester filter to a semester record, or None if not found. Matches by OrgUnitId (numeric) or name substring."""
     if semester_records is None:
         semester_records = client.get_semesters()
     if not isinstance(semester_records, (list, tuple)):
@@ -1059,6 +1085,8 @@ def _resolve_semester(
         return exact
     if matches := [s for s in semesters if lower_filter in s["Name"].lower()]:
         return max(matches, key=lambda s: _positive_id(s.get("OrgUnitId")) or 0)
+
+    return None
 
 
 def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
@@ -1370,7 +1398,7 @@ def cmd_courses(
             json_output=json_output,
             payload=_course_list_error_payload(),
         )
-    courses = []
+    courses: list[dict[str, Any]] = []
     for enrolled_course in enrolled_courses:
         if not isinstance(enrolled_course, dict):
             continue

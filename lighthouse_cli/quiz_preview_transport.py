@@ -7,12 +7,12 @@ Only preview pages are accepted. No student attempt can be written here.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
-from .quiz_attempt_page import MAX_PAGE_BYTES, PreviewPage, parse_preview_page, hidden_form
+from .quiz_attempt_page import MAX_PAGE_BYTES, PreviewPage, hidden_form, parse_preview_page
 from .request_protection import form_protection_from_homepage
 
 
@@ -85,16 +85,29 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         _close_response(response)
         response = None
         root, _ = client.get_raw(root_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
-        candidates = [f.get("src") for f in BeautifulSoup(root, "html.parser").find_all("iframe")
-                      if isinstance(f.get("src"), str) and urlparse(f["src"]).path.endswith("/quiz_start_iframe_2_auto.d2l")]
+        candidates = [
+            src
+            for f in BeautifulSoup(root, "html.parser").find_all("iframe")
+            if isinstance(src := f.get("src"), str)
+            and urlparse(src).path.endswith("/quiz_start_iframe_2_auto.d2l")
+        ]
         if len(candidates) != 1:
             raise PreviewStartUnknownError()
-        frame_path = _start_target(client, candidates[0], "quiz_start_iframe_2_auto.d2l", course_id, quiz_id)
-        frame, _ = client.get_raw(frame_path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Referer": root_url})
-        frames = BeautifulSoup(frame, "html.parser").select('iframe[name="hiddenFrame"], frame[name="hiddenFrame"]')
-        if len(frames) != 1 or not isinstance(frames[0].get("src"), str):
+        frame_path = _start_target(
+            client, candidates[0], "quiz_start_iframe_2_auto.d2l", course_id, quiz_id
+        )
+        frame, _ = client.get_raw(
+            frame_path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Referer": root_url}
+        )
+        frames = BeautifulSoup(frame, "html.parser").select(
+            'iframe[name="hiddenFrame"], frame[name="hiddenFrame"]'
+        )
+        frames_src = frames[0].get("src") if len(frames) == 1 else None
+        if not isinstance(frames_src, str):
             raise PreviewStartUnknownError()
-        process_url = _start_target(client, frames[0]["src"], "quiz_start_process_auto.d2l", course_id, quiz_id)
+        process_url = _start_target(
+            client, frames_src, "quiz_start_process_auto.d2l", course_id, quiz_id
+        )
         # This legacy GET creates server state: it is deliberately not replayed.
         state_created = True
         result, _ = client.get_raw(process_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
@@ -153,7 +166,7 @@ def save_current_preview_answer(
     path = page_path(course_id, quiz_id, attempt_id, page)
     homepage, _ = client.get_raw("/d2l/home", max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
     protection = form_protection_from_homepage(homepage)
-    identity = dict(course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+    identity = {"course_id": course_id, "quiz_id": quiz_id, "attempt_id": attempt_id, "page": page}
     current = read_current_preview(client, **identity)
     fields = current.answer_fields(question_id, choice_id, protection)
     url = client.canonical_url(

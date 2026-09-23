@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 _UPSTREAM_URL_RE = re.compile(r"(?i)(?:https?://|//)[^\s<>'\"]+")
 _UPSTREAM_EMAIL_RE = re.compile(
     r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"

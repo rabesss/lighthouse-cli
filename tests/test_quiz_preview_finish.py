@@ -8,7 +8,11 @@ from unittest.mock import Mock
 import pytest
 
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
-from lighthouse_cli.quiz_preview_finish import PreviewSubmitUnknownError, submit_preview, verify_receipt
+from lighthouse_cli.quiz_preview_finish import (
+    PreviewSubmitUnknownError,
+    submit_preview,
+    verify_receipt,
+)
 from tests.test_quiz_attempt_page import bootstrap, html, question
 
 

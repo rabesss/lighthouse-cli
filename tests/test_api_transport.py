@@ -15,10 +15,10 @@ import requests
 import lighthouse_cli.api as api
 from lighthouse_cli.api import (
     BASE_URL,
+    MAX_HTML_TOPIC_RESPONSE_BYTES,
     ContentResponseShapeError,
     CourseNotFoundError,
     LighthouseClient,
-    MAX_HTML_TOPIC_RESPONSE_BYTES,
     NetworkError,
     SessionExpiredError,
     SubmissionOutcomeUnknownError,
@@ -30,7 +30,7 @@ from lighthouse_cli.api import (
 def test_legacy_state_creating_get_is_not_retried_or_refreshed() -> None:
     client = LighthouseClient()
     client._loaded = True
-    client._cookies = {key: "synthetic" for key in api.COOKIE_NAMES}
+    client._cookies = dict.fromkeys(api.COOKIE_NAMES, "synthetic")
     client._session.request = MagicMock(side_effect=requests.ConnectionError("token=SENTINEL"))
     with patch.object(api, "refresh_auth_from_browser") as refresh:
         with pytest.raises(NetworkError):
@@ -1097,7 +1097,7 @@ class FakeUrlopenResponse:
         self.status = status
         self.final_url = final_url
 
-    def __enter__(self) -> "FakeUrlopenResponse":
+    def __enter__(self) -> FakeUrlopenResponse:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -1270,15 +1270,18 @@ def test_browser_harness_failure_does_not_expose_stderr() -> None:
 def test_browser_harness_failure_falls_back_to_direct_cdp() -> None:
     expected = {"d2lSessionVal": "session"}
 
-    with patch.object(
-        api,
-        "_refresh_via_browser_harness",
-        side_effect=api._BrowserHarnessFallback("helper failed"),
-    ), patch.object(
-        api,
-        "_refresh_via_cdp_websocket",
-        return_value=expected,
-    ) as direct:
+    with (
+        patch.object(
+            api,
+            "_refresh_via_browser_harness",
+            side_effect=api._BrowserHarnessFallbackError("helper failed"),
+        ),
+        patch.object(
+            api,
+            "_refresh_via_cdp_websocket",
+            return_value=expected,
+        ) as direct,
+    ):
         assert api.refresh_auth_from_browser(9222) == expected
 
     direct.assert_called_once_with(9222)

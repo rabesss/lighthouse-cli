@@ -12,7 +12,13 @@ import requests
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredError
-from lighthouse_cli.assessment_api import AssessmentAPI, AssessmentWriteUnknownError, assignment_payload, project, quiz_payload
+from lighthouse_cli.assessment_api import (
+    AssessmentAPI,
+    AssessmentWriteUnknownError,
+    assignment_payload,
+    project,
+    quiz_payload,
+)
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.connection import connection_for
@@ -47,7 +53,7 @@ def test_trial_urls_cookies_and_pagination_are_origin_scoped():
         client.get("https://lighthouse.manipal.edu/d2l/api/versions/")
     with pytest.raises(NetworkError):
         client.get("https://hetrynow.brightspace.com.evil.invalid/d2l/api/versions/")
-    client._apply_cookies_to_session({key: "test" for key in COOKIE_NAMES})
+    client._apply_cookies_to_session(dict.fromkeys(COOKIE_NAMES, "test"))
     assert {cookie.domain for cookie in client._session.cookies} == {"hetrynow.brightspace.com"}
     assert client._read_only_auth
 
@@ -82,7 +88,7 @@ def test_write_network_failure_is_not_replayed_and_is_not_reported_success():
     client = LighthouseClient()
     client._csrf_token = "synthetic-csrf"
     client._loaded = True
-    client._cookies = {key: "test" for key in COOKIE_NAMES}
+    client._cookies = dict.fromkeys(COOKIE_NAMES, "test")
     client._session.request = Mock(side_effect=requests.ConnectionError("cookie=NEVER_PRINT"))
     with patch("lighthouse_cli.assessment_commands.LighthouseClient", return_value=client):
         result = CliRunner().invoke(cli, ["instructor", "assignment-create", "12", "--name", "Practice", "--yes", "--json"])
@@ -127,8 +133,13 @@ def test_projection_has_resource_limits():
 
 
 def test_session_import_is_sealed_origin_bound_and_separate():
-    document = {"origin": "https://hetrynow.brightspace.com", "cookies": {key: "SYNTHETIC_SESSION" for key in COOKIE_NAMES}}
-    result = CliRunner().invoke(cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document))
+    document = {
+        "origin": "https://hetrynow.brightspace.com",
+        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+    }
+    result = CliRunner().invoke(
+        cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document)
+    )
     assert result.exit_code == 0
     assert "SYNTHETIC_SESSION" not in result.output
     store = CredentialStore(config_dir=connection_for("trial").cookie_dir)
@@ -140,8 +151,13 @@ def test_session_import_is_sealed_origin_bound_and_separate():
 
 
 def test_session_import_rejects_wrong_origin_without_writes():
-    document = {"origin": "https://wrong.invalid", "cookies": {key: "SYNTHETIC_SESSION" for key in COOKIE_NAMES}}
-    result = CliRunner().invoke(cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document))
+    document = {
+        "origin": "https://wrong.invalid",
+        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+    }
+    result = CliRunner().invoke(
+        cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document)
+    )
     assert result.exit_code == 1
     assert "SYNTHETIC_SESSION" not in result.output
     assert not CredentialStore(config_dir=connection_for("trial").cookie_dir).cookie_file.exists()
@@ -149,10 +165,14 @@ def test_session_import_rejects_wrong_origin_without_writes():
 
 def test_trial_artifact_cannot_be_used_from_production_cookie_path():
     store = CredentialStore()
-    store.write_artifact(store.cookie_file, metadata={}, secret={
-        "origin": "https://hetrynow.brightspace.com",
-        "cookies": {key: "SYNTHETIC_SESSION" for key in COOKIE_NAMES},
-    })
+    store.write_artifact(
+        store.cookie_file,
+        metadata={},
+        secret={
+            "origin": "https://hetrynow.brightspace.com",
+            "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+        },
+    )
     assert LighthouseClient(read_only_auth=True).cookies == {}
 
 

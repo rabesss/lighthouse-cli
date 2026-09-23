@@ -7,7 +7,6 @@ from pathlib import Path
 
 from lighthouse_cli.utils import _sanitize_filename
 
-
 # ---------------------------------------------------------------------------
 # _sanitize_filename tests
 # ---------------------------------------------------------------------------
