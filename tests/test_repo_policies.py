@@ -12,6 +12,8 @@ everything) and once against the real repository tree.
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import json
 import re
 from pathlib import Path
@@ -22,7 +24,6 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 _REQUIREMENT_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)(\[[^\]]*\])?==([^\s;#]+)")
-_BARE_CALLABLE = re.compile(r"\bCallable\b(?!\s*\[)")
 _FULL_SHA_USES = re.compile(r"^[^@\s]+@[0-9a-f]{40}(?:\s+#.*)?$")
 
 
@@ -44,14 +45,54 @@ def _missing_future_annotations(modules: list[Path]) -> list[Path]:
     ]
 
 
+def _annotation_nodes(tree: ast.AST) -> list[ast.expr]:
+    """Every annotation expression (and bare type-alias value) in a module."""
+    nodes: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg) and node.annotation is not None:
+            nodes.append(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns:
+            nodes.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            nodes.append(node.annotation)
+            if node.value is not None:
+                nodes.append(node.value)  # `Fn: TypeAlias = Callable`
+        elif isinstance(node, ast.Assign) and isinstance(node.value, (ast.Name, ast.Attribute)):
+            nodes.append(node.value)  # implicit alias such as `Fn = Callable`
+    # String annotations are still annotations.
+    for node in list(nodes):
+        for const in ast.walk(node):
+            if isinstance(const, ast.Constant) and isinstance(const.value, str):
+                with contextlib.suppress(SyntaxError):
+                    parsed = ast.parse(const.value, mode="eval").body
+                    ast.increment_lineno(parsed, const.lineno - 1)
+                    nodes.append(parsed)
+    return nodes
+
+
 def _typing_offenders(source: str) -> list[int]:
-    """Line numbers using ``Optional[...]`` or a bare ``Callable`` annotation."""
-    return [
-        lineno
-        for lineno, line in enumerate(source.splitlines(), start=1)
-        if re.search(r"\bOptional\[", line)
-        or (not re.match(r"\s*(from|import)\b", line) and _BARE_CALLABLE.search(line))
-    ]
+    """Line numbers of annotations using ``Optional[...]`` or a bare ``Callable``.
+
+    Works on the AST, so imports, comments, and prose never match.
+    """
+    offenders: set[int] = set()
+    for annotation in _annotation_nodes(ast.parse(source)):
+        subscripted = {
+            id(node.value) for node in ast.walk(annotation) if isinstance(node, ast.Subscript)
+        }
+        for node in ast.walk(annotation):
+            name = (
+                node.id
+                if isinstance(node, ast.Name)
+                else node.attr
+                if isinstance(node, ast.Attribute)
+                else None
+            )
+            if name == "Optional" and id(node) in subscripted:
+                offenders.add(node.lineno)
+            elif name == "Callable" and id(node) not in subscripted:
+                offenders.add(node.lineno)
+    return sorted(offenders)
 
 
 def _parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
@@ -116,6 +157,8 @@ class TestPythonModulePolicies:
             "handler: Callable = print",
             "handlers: dict[str, Callable] = {}",
             "def f(x: list[Callable] | None) -> None: ...",
+            "def f(cb: 'Callable') -> None: ...",
+            "Fn = Callable",
         ],
     )
     def test_typing_checker_rejects(self, line: str) -> None:
@@ -127,6 +170,10 @@ class TestPythonModulePolicies:
             "from collections.abc import Callable",
             "def f(cb: Callable[[int], str]) -> Callable[..., None]: ...",
             "def f(x: int | None) -> None: ...",
+            "from collections.abc import (\n    Callable,\n)",
+            "# a bare Callable is not allowed; neither is Optional[int]",
+            'def f() -> None:\n    """cb (Callable): prose about Optional[int]."""',
+            'value = settings["Optional[int]"]',
         ],
     )
     def test_typing_checker_accepts(self, line: str) -> None:
@@ -262,13 +309,16 @@ class TestSecretScanningPolicies:
         config = (ROOT / ".gitleaks.toml").read_text()
         assert "useDefault = true" in config
         lines = [line.strip() for line in config.splitlines()]
-        # A top-level [[allowlists]] (TOML allows indenting it) ignores
-        # `condition = "AND"` and would allow every finding in its paths.
+        # A global allowlist, the plural [[allowlists]] or the legacy singular
+        # [allowlist] (both honored by gitleaks 8.30; TOML allows indenting
+        # them), ignores `condition = "AND"` and would allow every finding in
+        # its paths.
         assert "[[allowlists]]" not in lines
+        assert "[allowlist]" not in lines
         # Exactly one allowlist, scoped to generic-api-key, the baseline file,
         # and the hashed_secret line shape; widening any of them must fail.
         assert lines.count("[[rules.allowlists]]") == 1
-        assert lines.count("[[rules]]") == 1
+        assert "[rules.allowlist]" not in lines
         for expected in (
             'id = "generic-api-key"',
             'condition = "AND"',

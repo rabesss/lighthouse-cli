@@ -166,3 +166,9 @@ def test_generated_doc_covers_instructor_preview_subcommands(generated_reference
     for sub in ("start", "answer", "next", "page", "submit", "status", "abandon"):
         assert f"##### `lighthouse instructor preview {sub}`" in generated_reference
         assert f"Usage: lighthouse instructor preview {sub} " in generated_reference
+
+
+def test_unimportable_package_is_a_clean_help_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "lighthouse_cli.cli", None)  # makes the import raise
+    with pytest.raises(gen.HelpError, match="cannot import lighthouse_cli"):
+        gen.load_root()
