@@ -1362,24 +1362,8 @@ the local equivalents. For exact options of any command, run
 `lighthouse <command> --help` (groups nest, e.g.
 `lighthouse instructor preview --help`).
 
-This repo is wired for several AI reviewers. Each reads its own committed
-config; all derive from `REVIEW.md`:
-
-| Reviewer | Config file(s) |
-|----------|----------------|
-| OpenAI Codex / Google Jules / Devin | [`AGENTS.md`](AGENTS.md) |
-| Gemini Code Assist | [`.gemini/config.yaml`](.gemini/config.yaml), [`.gemini/styleguide.md`](.gemini/styleguide.md) |
-| CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) (ingests `REVIEW.md` + `AGENTS.md`) |
-| Qodo Merge | [`.pr_agent.toml`](.pr_agent.toml), [`best_practices.md`](best_practices.md) |
-| GitHub Copilot | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
-| Greptile | [`greptile.json`](greptile.json) |
-| Kilo Code | [`REVIEW.md`](REVIEW.md) — enable "Use REVIEW.md" in the Kilo dashboard |
-| Socket Security | [`socket.yml`](socket.yml) (supply-chain) |
-| Pullfrog | [`AGENTS.md`](AGENTS.md) + Pullfrog dashboard |
-
-> Kilo reads `REVIEW.md` from the PR **base** branch, so policy changes take
-> effect only after they merge to `main`. CodeRabbit/Greptile read their config
-> from the PR source branch (effective within the same PR).
+The AI review bots each read their own committed config; the reviewer map
+lives in [`REVIEW.md`](REVIEW.md).
 
 ## License
 

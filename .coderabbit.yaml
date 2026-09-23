@@ -50,4 +50,3 @@ knowledge_base:
     filePatterns:
       - "REVIEW.md"
       - "AGENTS.md"
-      - ".github/copilot-instructions.md"
