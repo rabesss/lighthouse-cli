@@ -100,6 +100,28 @@ def test_one_way_page_has_next_without_previous():
     assert not final_page.has_previous_control
 
 
+def test_id_less_radio_uses_its_own_row_not_a_stray_label():
+    # Without an id there is no label[for] to follow. Label lookup must not
+    # fall back to "first label lacking a for attribute" (BeautifulSoup's
+    # meaning of attrs={"for": None}), which would attach the wrong text.
+    body = question(1).replace(' id="q1a"', "").replace(' id="q1b"', "")
+    body = body.replace("<fieldset>", "<label>Stray instructions</label><fieldset>")
+    page = parse(html(body))
+    assert page.public_data()["questions"][0]["choices"] == [
+        {"choice_id": 401, "text": "True"},
+        {"choice_id": 402, "text": "False"},
+    ]
+
+
+def test_id_less_radio_outside_a_row_fails_closed():
+    # No id and no enclosing row: there is no trustworthy label, so the page
+    # is rejected rather than guessing from nearby text.
+    stray = '<label>Stray instructions</label><input type="radio" name="tAtom201_300" value="403">'
+    body = question(1).replace("<fieldset>", stray + "<fieldset>", 1)
+    with pytest.raises(PreviewPageError):
+        parse(html(body))
+
+
 @pytest.mark.parametrize("saved", ["False", "unknown", ""])
 def test_selected_choice_without_saved_confirmation_is_not_success(saved):
     page = parse(html(question(1, saved=saved)))

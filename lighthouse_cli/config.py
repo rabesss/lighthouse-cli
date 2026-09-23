@@ -216,7 +216,7 @@ def load_cookies(
         )
         return {}
 
-    # Legacy plaintext ({"cookies": ...} wrapper or flat dict[str, Any]).
+    # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
     cookies = _cookies_from_legacy_doc(doc)
     legacy_extracted = doc.get("extracted_at")
     upgraded = _try_upgrade_plaintext_cookies(

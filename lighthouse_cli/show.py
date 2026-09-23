@@ -792,7 +792,7 @@ def _rich_text_string(value: Any) -> str | None:
     Brightspace normally returns ``{"Text": ..., "Html": ...}``, but nested
     ``Text``/``Html`` objects and plain strings also occur across endpoint
     versions. Walk those shapes iteratively so malformed upstream data cannot
-    trigger recursion failures or be rendered through ``str(dict[str, Any])``. The
+    trigger recursion failures or be rendered through ``str(dict)``. The
     bounded walk also keeps a cyclic response from hanging the command.
     """
     pending: list[tuple[Any, int]] = [(value, 0)]

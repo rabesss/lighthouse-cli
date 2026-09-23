@@ -1144,7 +1144,7 @@ def _resolve_semester(
     semester_filter: str | None,
     semester_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve semester filter to a semester dict[str, Any], or None if not found. Matches by OrgUnitId (numeric) or name substring."""
+    """Resolve semester filter to a semester record, or None if not found. Matches by OrgUnitId (numeric) or name substring."""
     if semester_records is None:
         semester_records = client.get_semesters()
     if not isinstance(semester_records, (list, tuple)):

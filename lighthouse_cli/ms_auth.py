@@ -36,7 +36,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
@@ -115,6 +115,11 @@ from lighthouse_cli.ms_session import (
     _safe_absolute_url,
     _tenant_id_from_ms_url,
 )
+
+if TYPE_CHECKING:
+    # The parameter type of BrowserContext.add_cookies; Playwright does not
+    # re-export it from playwright.sync_api.
+    from playwright._impl._api_structures import SetCookieParam
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
@@ -293,6 +298,20 @@ class Transition(NamedTuple):
 # ---------------------------------------------------------------------------
 # Pure transition functions (no I/O — trivially snapshot-testable)
 # ---------------------------------------------------------------------------
+
+
+def _browser_cookies(session: requests.Session) -> list[SetCookieParam]:
+    """Session cookies in Playwright's shape, normalized like ``_export_session_cookies``.
+
+    A missing value becomes ``""`` (Playwright requires a string). Cookies
+    without a domain are skipped: Playwright needs a domain or URL to scope
+    them and would reject the whole batch otherwise.
+    """
+    return [
+        {"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"]}
+        for c in _export_session_cookies(session)
+        if c["domain"]
+    ]
 
 
 def extract_saml_response(html: str) -> str | None:
@@ -1549,16 +1568,7 @@ class MicrosoftSSOClient:
             if isinstance(raw_user_agent, str)
             else raw_user_agent.decode("utf-8", "replace")
         )
-        export_cookies: list[dict[str, Any]] = []
-        for cookie in self._session.cookies:
-            export_cookies.append(
-                {
-                    "name": cookie.name,
-                    "value": cookie.value,
-                    "domain": cookie.domain,
-                    "path": cookie.path or "/",
-                }
-            )
+        export_cookies = _browser_cookies(self._session)
 
         try:
             manager = sync_playwright()
@@ -1584,7 +1594,7 @@ class MicrosoftSSOClient:
             try:
                 context = browser.new_context(user_agent=user_agent)
                 if export_cookies:
-                    context.add_cookies(cast(Any, export_cookies))
+                    context.add_cookies(export_cookies)
                 page = context.new_page()
                 page.goto(ms_url, wait_until="networkidle", timeout=60000)
                 login_input = page.query_selector('input[name="loginfmt"]')

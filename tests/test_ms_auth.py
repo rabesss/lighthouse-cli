@@ -1166,3 +1166,28 @@ class TestVoiceAndPushMethods:
             proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
         )
         assert "AdditionalAuthData" not in payload
+
+
+class TestBrowserCookieExport:
+    def test_cookies_are_normalized_for_playwright(self) -> None:
+        from lighthouse_cli.ms_auth import _browser_cookies
+
+        session = requests.Session()
+        session.cookies.set("esctx", "SYNTHETIC", domain="login.microsoftonline.com", path="/")
+        # A value-less cookie (``cookie.value is None``); cookies.set(name, None) would delete it.
+        session.cookies.set_cookie(
+            requests.cookies.create_cookie("flag", None, domain=".microsoftonline.com")
+        )
+        session.cookies.set("hostless", "SYNTHETIC")
+
+        cookies = sorted(_browser_cookies(session), key=lambda c: c["name"])
+
+        assert cookies == [
+            {
+                "name": "esctx",
+                "value": "SYNTHETIC",
+                "domain": "login.microsoftonline.com",
+                "path": "/",
+            },
+            {"name": "flag", "value": "", "domain": ".microsoftonline.com", "path": "/"},
+        ]
