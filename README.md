@@ -217,7 +217,19 @@ be verified with `page`, while uncertain navigation requires browser inspection
 before continuing or abandoning. `status` reads the local cursor; `abandon`
 forgets it without deleting the remote attempt. Starting another preview in the
 browser can invalidate an unretained CLI preview. Write commands also support
-`--dry-run`.
+`--dry-run`. A hidden quiz needs `start --bypass-availability`.
+
+If a start's outcome is uncertain, starting again is refused (even after
+`abandon`) until it is resolved with the read-only `reconcile` command:
+
+```bash
+# Verify and resume a start that is bound to a known attempt, or list candidates:
+lighthouse instructor --site trial preview reconcile 22985 54489 --json
+# Bind one listed candidate (checked for account, quiz, in-progress and preview mode):
+lighthouse instructor --site trial preview reconcile 22985 54489 --attempt-id ATTEMPT_ID --json
+# Only after the browser shows no preview was created and none is listed:
+lighthouse instructor --site trial preview reconcile 22985 54489 --confirm-no-remote-attempt --json
+```
 
 Real learner quiz attempts, question authoring, teacher grading and full
 course-administration parity are **not implemented** by these additions.

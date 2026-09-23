@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+from lighthouse_cli.quiz_attempt_page import PreviewRefusedError
 from lighthouse_cli.quiz_preview_finish import (
     PreviewSubmitUnknownError,
     submit_preview,
@@ -37,11 +38,36 @@ def test_submit_is_preview_only_and_verifies_independent_receipt():
     client, prep, rpc = client_for_submit()
     result = submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1, retain=True, actor_id=7)
     assert result["submitted"] and result["receipt_verified"] and result["retained_for_grading"]
-    params = json.loads(client._request.call_args_list[1].kwargs["data"]["params"])
-    assert params == {"param1": "20", "param2": "30", "param3": True, "param4": True, "param5": True, "param6": False, "param7": ""}
+    rpc_call = client._request.call_args_list[1]
+    # Brightspace rejects the RPC unless params is compact JSON (browser form).
+    assert rpc_call.kwargs["data"]["params"] == (
+        '{"param1":"20","param2":"30","param3":true,"param4":true,"param5":true,"param6":false,"param7":""}'
+    )
     assert client._request.call_count == 2  # one preparatory save, one final RPC
     prep.close.assert_called_once()
     rpc.close.assert_called_once()
+
+
+def test_submit_rpc_context_names_the_current_page():
+    client, _, _ = client_for_submit()
+    responses = list(client.get_raw.side_effect)
+    client.get_raw.side_effect = [(html(question(2, page=2), page=2), {}), *responses[1:]]
+    submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=2)
+    url = client._request.call_args_list[1].args[1]
+    assert "quiz_attempt_iframe_auto.d2lfile?" in url
+    assert "&pg=2&" in url
+
+
+@pytest.mark.parametrize("body, message", [
+    (html(question(1, saved="False")), "Answer and save every question"),
+    (html(question(1), extra="<button>Next Page</button>"), "Move to the last page"),
+])
+def test_submit_refuses_before_any_write(body, message):
+    client, _, _ = client_for_submit()
+    client.get_raw.side_effect = [(body, {})]
+    with pytest.raises(PreviewRefusedError, match=message):
+        submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+    client._request.assert_not_called()
 
 
 def test_secure_browser_attempt_is_not_submitted_by_http_client():

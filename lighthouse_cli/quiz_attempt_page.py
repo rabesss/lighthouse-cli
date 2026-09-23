@@ -28,6 +28,22 @@ class PreviewPageError(ValueError):
         super().__init__("The response is not a supported current quiz preview page.")
 
 
+class PreviewRefusedError(ValueError):
+    """A fixed, actionable refusal raised before any state-changing request.
+
+    Only the module constants below may be passed; callers show the message
+    verbatim, so it must never contain page content, tokens or URLs.
+    """
+
+
+REFUSE_UNSUPPORTED = "This page has a question type the preview driver does not support."
+REFUSE_NOT_ON_PAGE = "That question is not on the current preview page. Run preview page to see it."
+REFUSE_NOT_A_CHOICE = "That choice is not an option for this question."
+REFUSE_UNANSWERED = "Answer and save every question on this page first."
+REFUSE_LAST_PAGE = "This is the last page. Use preview submit."
+REFUSE_NOT_LAST_PAGE = "Move to the last page with preview next before submitting."
+
+
 def _id(value: object) -> int:
     if not isinstance(value, str) or not value.isascii() or not value.isdecimal() or len(value) > 18:
         raise PreviewPageError()
@@ -45,6 +61,16 @@ def _metadata(container: Tag, name: str) -> str:
     if not isinstance(value, str):
         raise PreviewPageError()
     return value
+
+
+def _inside_options(node: Tag, container: Tag) -> bool:
+    """Whether ``node`` sits inside the answer options of ``container``."""
+    for parent in node.parents:
+        if parent is container:
+            return False
+        if parent.name in {"fieldset", "table", "label"}:
+            return True
+    return False
 
 
 def _expanded(node: Tag) -> BeautifulSoup:
@@ -129,11 +155,15 @@ class PreviewPage:
         Callers must send once and verify a fresh readback. This helper does
         not advance pages, finalize attempts or grant navigation permission.
         """
-        if type(question_id) is not int or type(choice_id) is not int or not all(q["supported"] for q in self.questions):
+        if type(question_id) is not int or type(choice_id) is not int:
             raise PreviewPageError()
+        if not all(q["supported"] for q in self.questions):
+            raise PreviewRefusedError(REFUSE_UNSUPPORTED)
         question = next((q for q in self.questions if q["question_id"] == question_id), None)
-        if question is None or choice_id not in {c["choice_id"] for c in question["choices"]}:
-            raise PreviewPageError()
+        if question is None:
+            raise PreviewRefusedError(REFUSE_NOT_ON_PAGE)
+        if choice_id not in {c["choice_id"] for c in question["choices"]}:
+            raise PreviewRefusedError(REFUSE_NOT_A_CHOICE)
         if self._hidden_fields.get("d2l_referrer") != protection.csrf_token:
             raise PreviewPageError()
         try:
@@ -170,8 +200,10 @@ class PreviewPage:
 
     def advance_fields(self, protection: FormProtection) -> dict[str, str]:
         """Forward only, after every answer on this page is confirmed saved."""
-        if not self.ready_to_leave() or not self.has_next_control:
-            raise PreviewPageError()
+        if not self.has_next_control:
+            raise PreviewRefusedError(REFUSE_LAST_PAGE)
+        if not self.ready_to_leave():
+            raise PreviewRefusedError(REFUSE_UNANSWERED)
         first = self.questions[0]
         fields = self.answer_fields(first["question_id"], first["selected_choice_ids"][0], protection)
         fields["d2l_actionparam"] = f"2,{self.page + 1},{self.page}"
@@ -217,6 +249,15 @@ def parse_preview_page(
         saved = _metadata(container, "d2l-quiz-question-autosave-is-saved")
         saved_value = {"true": True, "false": False}.get(saved.lower())
         prompt = container.select_one('[id^="d2l_read_element_"]')
+        if prompt is None:
+            # Brightspace tenant variants sometimes put the prompt directly
+            # in one custom HTML block without the legacy read-element ID.
+            # Rich-text answer choices use the same element, so only blocks
+            # outside the options (fieldset/table/label) can be the prompt.
+            blocks = [block for block in container.find_all("d2l-html-block")
+                      if not _inside_options(block, container)]
+            if len(blocks) == 1 and isinstance(blocks[0].get("html"), str):
+                prompt = blocks[0]
         if prompt is None:
             raise PreviewPageError()
         radios = container.select('input[type="radio"]')

@@ -7,12 +7,20 @@ Only preview pages are accepted. No student attempt can be written here.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
-from .quiz_attempt_page import MAX_PAGE_BYTES, PreviewPage, hidden_form, parse_preview_page
+from .quiz_attempt_page import (
+    MAX_PAGE_BYTES,
+    PreviewPage,
+    PreviewPageError,
+    PreviewRefusedError,
+    hidden_form,
+    parse_preview_page,
+)
 from .request_protection import form_protection_from_homepage
 
 
@@ -22,7 +30,9 @@ class PreviewSaveUnknownError(NetworkError):
 
 
 class PreviewStartUnknownError(NetworkError):
-    def __init__(self) -> None:
+    def __init__(self, *, attempt_id: int | None = None, page: int | None = None) -> None:
+        self.attempt_id = attempt_id
+        self.page = page
         super().__init__("Preview start could not be verified. Inspect quiz attempts before starting again.")
 
 
@@ -43,8 +53,25 @@ def _start_target(client: LighthouseClient, value: str, filename: str, course_id
     return url
 
 
-def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, bypass_availability: bool = False) -> PreviewPage:
-    """Start an instructor preview once; availability bypass is explicit."""
+_START_UNAVAILABLE = (
+    "Preview start is not available to this account or under the current quiz restrictions. "
+    "For a hidden or unavailable quiz, retry with --bypass-availability."
+)
+_START_NEEDS_BROWSER = "This preview requires an additional browser authorization step."
+_START_PROTECTION = "Preview form protection could not be verified. Nothing was started."
+
+
+def start_preview(
+    client: LighthouseClient, *, course_id: int, quiz_id: int, bypass_availability: bool = False,
+    on_identity: Callable[[int, int], None] | None = None,
+) -> PreviewPage:
+    """Start an instructor preview once; availability bypass is explicit.
+
+    ``on_identity`` receives the validated attempt id and page as soon as the
+    start callback reveals them, before the page readback, so the caller can
+    seal them durably. If it raises, the start is reported as unknown with
+    that identity attached.
+    """
     # Reuse strict identity validation before any request.
     page_path(course_id, quiz_id, 1, 1)
     if type(bypass_availability) is not bool:
@@ -56,13 +83,13 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
     soup = BeautifulSoup(body, "html.parser")
     if not any(button.get_text(" ", strip=True) == "Start Quiz!" and not button.has_attr("disabled")
                for button in soup.find_all("button")):
-        raise NetworkError("Preview start is not available to this account or under the current quiz restrictions.")
+        raise PreviewRefusedError(_START_UNAVAILABLE)
     form, fields = hidden_form(body)
     if form.select('input[type="password"]') or fields.get("hps"):
-        raise NetworkError("This preview requires an additional browser authorization step.")
+        raise PreviewRefusedError(_START_NEEDS_BROWSER)
     protection = form_protection_from_homepage(body)
     if fields.get("d2l_referrer") != protection.csrf_token:
-        raise NetworkError("Preview form protection could not be verified.")
+        raise PreviewRefusedError(_START_PROTECTION)
     fields.update(d2l_action="Custom", d2l_actionparam="1", d2l_hitCode=protection.next_hit_code())
     if bypass_availability:
         fields["bypass"] = "1"
@@ -70,6 +97,8 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
     response = None
     state_created = False
     start_dispatched = False
+    attempt_id: int | None = None
+    page: int | None = None
     try:
         # The summary POST registers the preview/bypass choice. Skipping it
         # can appear to work for visible quizzes but fails for hidden ones.
@@ -122,10 +151,26 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         if len(matches) != 1:
             raise PreviewStartUnknownError()
         attempt_id, page = matches.pop()
-        return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+        try:
+            page_path(course_id, quiz_id, attempt_id, page)
+        except ValueError:
+            raise PreviewStartUnknownError() from None
+        if on_identity is not None:
+            try:
+                on_identity(attempt_id, page)
+            except Exception:
+                raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
+        try:
+            return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+        except SessionExpiredError:
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
+        except Exception:  # all post-create readback failures are ambiguous
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
+    except PreviewStartUnknownError:
+        raise
     except SessionExpiredError:
         if state_created:
-            raise PreviewStartUnknownError() from None
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
         if start_dispatched:
             raise PreviewStartUnknownError() from None
         raise
@@ -152,6 +197,45 @@ def read_current_preview(
     path = page_path(course_id, quiz_id, attempt_id, page)
     body, _ = client.get_raw(path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"})
     return parse_preview_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+
+
+def _server_page(body: bytes, *, course_id: int, quiz_id: int, attempt_id: int) -> int | None:
+    """The page Brightspace reports for exactly this preview attempt, else None."""
+    try:
+        _, hidden = hidden_form(body)
+    except PreviewPageError:
+        return None
+    expected = {"ou": course_id, "qi": quiz_id, "ai": attempt_id, "isprv": 1}
+    if any(hidden.get(key) != str(value) for key, value in expected.items()):
+        return None
+    value = hidden.get("pg")
+    if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,5}", value):
+        return None
+    return int(value)
+
+
+def read_server_current_preview(
+    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
+) -> PreviewPage:
+    """Read-only recovery: return the attempt's server-side current page.
+
+    Only for reconciling a start whose cursor is uncertain, never before a
+    write. Observed on the trial tenant (2026-09-23): for a forward-only quiz
+    already on page 2, requesting page 1 returns page 2 with ``pg=2``, and a
+    page beyond the cursor redirects. An all-at-once quiz has a single page.
+    The reported page is used only after the complete preview identity
+    (course, quiz, attempt, ``isprv=1``) matches, and the page must then
+    parse strictly as that page.
+    """
+    path = page_path(course_id, quiz_id, attempt_id, page)
+    body, _ = client.get_raw(path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"})
+    try:
+        return parse_preview_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+    except PreviewPageError:
+        server_page = _server_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
+        if server_page is None or server_page == page:
+            raise
+        return parse_preview_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=server_page)
 
 
 def save_current_preview_answer(
@@ -211,6 +295,10 @@ def advance_current_preview(
     homepage, _ = client.get_raw("/d2l/home", max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
     protection = form_protection_from_homepage(homepage)
     current = read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+    # advance_fields requires a Next control, so the page + 1 readback below
+    # always exists. Never request a page beyond the quiz's last page: on the
+    # trial tenant (2026-09-23) that permanently breaks the preview attempt
+    # (every later read redirects to /d2l/error/500).
     fields = current.advance_fields(protection)
     url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({
         "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,

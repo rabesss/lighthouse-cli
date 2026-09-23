@@ -9,6 +9,7 @@ from typing import Any
 import click
 
 from .display import JsonOutputCommand, format_user_error, output_json
+from .quiz_attempt_page import PreviewPageError, PreviewRefusedError
 from .quiz_preview_session import _UNCERTAIN, PreviewWorkflow, PreviewWorkflowError
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
@@ -39,7 +40,7 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
         _emit({"site": site, "mode": "preview", "operation": operation, "course_id": course_id,
                "quiz_id": quiz_id, "dry_run": True, "options": options}, json_output)
         return
-    writes = operation not in {"page", "status"}
+    writes = operation not in {"page", "status", "reconcile"}
     if writes and not yes and (not sys.stdin.isatty() or not click.confirm(
         f"Run preview {operation} on {site}, course {course_id}, quiz {quiz_id}?", err=True,
     )):
@@ -53,11 +54,15 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
             result = workflow.status()
         elif operation == "abandon":
             result = workflow.abandon()
+        elif operation == "reconcile":
+            result = workflow.reconcile(**options)
         else:
             result = workflow.run(operation, **options)
         _emit({"site": site, **result}, json_output)
     except Exception as exc:
-        message = str(exc) if isinstance(exc, (PreviewWorkflowError, *_UNCERTAIN)) else format_user_error(exc)
+        # These carry only fixed, local messages; anything else is sanitized.
+        fixed = (PreviewWorkflowError, PreviewRefusedError, PreviewPageError, *_UNCERTAIN)
+        message = str(exc) if isinstance(exc, fixed) else format_user_error(exc)
         click.echo(message, err=True)
         if json_output:
             output_json({"site": site, "mode": "preview", "course_id": course_id, "quiz_id": quiz_id, "error": message})
@@ -87,6 +92,24 @@ def page(course_id: int, quiz_id: int, json_output: bool) -> None:
     continuing or abandoning the preview.
     """
     _execute("page", course_id, quiz_id, json_output)
+
+
+@preview.command("reconcile", cls=JsonOutputCommand)
+@click.argument("course_id", type=_ID)
+@click.argument("quiz_id", type=_ID)
+@click.option("--attempt-id", type=_ID, help="Bind a listed candidate attempt explicitly.")
+@click.option("--confirm-no-remote-attempt", is_flag=True,
+              help="Record that the browser shows no preview was created (only when none is listed).")
+@click.option("--json", "json_output", is_flag=True)
+def reconcile(course_id: int, quiz_id: int, attempt_id: int | None, confirm_no_remote_attempt: bool,
+              json_output: bool) -> None:
+    """Resolve an uncertain start with read-only checks; never writes remotely.
+
+    Without options, lists candidate attempts. A start already bound to an
+    attempt is verified and resumed.
+    """
+    _execute("reconcile", course_id, quiz_id, json_output, attempt_id=attempt_id,
+             confirm_no_remote_attempt=confirm_no_remote_attempt)
 
 
 @preview.command("status", cls=JsonOutputCommand)

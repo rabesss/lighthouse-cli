@@ -173,6 +173,34 @@ Python parsing, transport, cursor recovery, and JSON behavior are covered by
 local tests. Real learner authorization and assignment submission still need
 a learner login or authorized impersonation.
 
+### End-to-end CLI validation, 2026-09-23
+
+The installed CLI now completes both layouts on the trial with an imported
+trial session (issue #24). Two live defects were found and fixed first: the
+question prompt arrives as a single `d2l-html-block` without the legacy
+`d2l_read_element_` wrapper, and Brightspace rejects the `ProcessQuizSubmission`
+RPC (error redirect) unless its `params` JSON is compact and the context names
+the current page, as the browser sends it.
+
+| Scenario | Attempt | Result |
+| --- | --- | --- |
+| One question per page, full flow with `--retain` (`54489`) | `29226` | Saved, advanced, saved, submitted; 2 points, receipt verified, retained |
+| All questions on one page (`54488`) | `29227` | Both saved, submitted; 2 points, receipt verified |
+| Known-ID uncertain start (readback failure simulated after a real start) | `29228` | Identity sealed; start refused before and after `abandon`; `reconcile` resumed; 2 points |
+| Lost start response (no identity), attempt advanced outside the CLI | `29229` | `reconcile` listed only the new attempt, bound it at the server-reported page 2; 2 points |
+| Lost start response on the all-at-once quiz | `29231` | Candidate listed; `--confirm-no-remote-attempt` refused while a candidate existed; bound and submitted |
+
+Refusals made before any request (hidden quiz without `--bypass-availability`,
+a question not on the current page, an unknown choice, unanswered questions,
+not yet on the last page, `next` on the last page) now show specific messages
+and leave the cursor unchanged.
+
+Observed server behavior relied on by recovery: for a forward-only quiz on
+page 2, requesting page 1 returns page 2 (`pg=2`). Requesting a page past the
+quiz's last page permanently breaks that preview attempt (every later read
+redirects to `/d2l/error/500`); the CLI never requests one. Attempts `29225`
+and `29230` were broken that way by manual probes.
+
 Helium was relaunched through its installed launcher using the active desktop's
 Wayland environment; the ChatGPT extension reconnected automatically. No debug
 port, alternate profile, or authentication settings were introduced.
