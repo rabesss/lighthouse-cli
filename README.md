@@ -1250,73 +1250,10 @@ programmatically. Here's the recommended workflow:
 
 ## Project Structure
 
-```
-lighthouse-cli/
-  pyproject.toml           Package config and bounded core/optional dependencies
-  README.md                This file
-  lighthouse_cli/
-    __init__.py            Version string (__version__ = "0.1.0")
-    api.py                 LighthouseClient — HTTP client, auth, cookie
-                           management, all API methods, course ID resolution,
-                           CDP-based cookie extraction (used by auth refresh)
-    auth.py                cmd_auth_login / cmd_auth_verify / cmd_auth_refresh
-                           orchestration
-    credential_store.py    Fernet encryption with passphrase/keyring key sources
-    ms_auth.py             MicrosoftSSOClient — pure-HTTP Microsoft Entra (Azure
-                           AD) SSO (SAML + ConvergedTFA MFA); username bootstrap
-                           via optional Playwright
-    ms_parse.py            $Config / HTML / SAML extraction helpers
-    ms_session.py          cookie & session helpers (export/import, phone mask)
-    ms_mfa.py              MFA proof types + selection (SMS vs app TOTP)
-    ms_errors.py           MicrosoftSSOError + MFA method constants
-    commands.py            Command implementations — data fetching, formatting,
-                           output (rich tables + plain text fallback + JSON)
-    cli.py                 Click command wiring — CLI entry point, arguments
-    config.py              cookies.json / mfa_pending.json storage helpers
-    show.py, display.py    shared table/JSON rendering helpers
-    submit.py              dropbox file-submission command
-    assignments.py         assignment listing + attachment download
-    course_config.py       course tracking + semester mapping
-    manifest.py            Manifest class — load/save manifest files, add_entry,
-                           atomic writes, SHA-256 file hashing for incremental
-                           sync and deduplication
-    utils.py               Shared utilities — _sanitize_filename() and helpers
-```
-
-**Key classes and functions:**
-
-- `LighthouseClient` (api.py) — Stateful HTTP client wrapping
-  `requests.Session` with D2L auth cookies. Lazy-loads cookies from disk on
-  first request. All API methods live here.
-- `resolve_course_id()` (api.py) — Resolves a string identifier (numeric
-  OrgUnitId or name substring) to an integer course ID.
-- `refresh_auth_from_browser()` (api.py) — Extracts cookies from browser via
-  CDP (tries browser-harness, then loopback-validated Python websockets).
-- `MicrosoftSSOClient` (ms_auth.py) — pure-HTTP Microsoft Entra (Azure AD) SSO:
-  replays the `$Config` / SAS-MFA / SAML ACS endpoints, handles two-step SMS
-  MFA and offline Authenticator TOTP, and returns D2L session cookies.
-  Playwright is used only to bootstrap the username "Next" step.
-- `CredentialStore` (credential_store.py) — Secure credential storage using Fernet
-  symmetric encryption with OS keyring fallback.
-- `Manifest` (manifest.py) — Manages `.lighthouse.json` files in download
-  directories. Tracks file paths with SHA-256 hashes. Supports atomic writes
-  to prevent corruption.
-- `_sanitize_filename()` (utils.py) — URL-decodes and sanitizes filenames
-  from Content-Disposition headers.
-- `cmd_*` functions (commands.py) — One per CLI command. Return exit code
-  (0 or 1). Handle `--json` output mode internally.
-- `_walk_content_tree()` (commands.py) and `flatten_all_topics()`
-  (sync_engine.py) — Recursively process the nested content TOC for display
-  and download.
-
-**Core dependencies:**
-
-| Package | Purpose |
-|---------|---------|
-| `click>=8.2` | CLI framework (commands, options, arguments) |
-| `requests>=2.31` | HTTP client for D2L REST API |
-| `beautifulsoup4>=4.12` | Microsoft SSO HTML parsing |
-| `cryptography>=41.0` | Fernet encryption for credential storage |
+The module map and layering rules live in [`AGENTS.md`](AGENTS.md) and the
+`[tool.importlinter]` contracts in `pyproject.toml`; runtime and dev
+dependencies are declared in `pyproject.toml` and pinned in
+`requirements.txt` / `requirements-dev.txt`.
 
 **Optional dependency groups:**
 
@@ -1330,13 +1267,6 @@ lighthouse-cli/
 Install the direct browser-refresh fallback with `pip install -e '.[cdp]'`.
 An installed `browser-harness` CLI is used first and does not require that
 extra.
-
-**Dev dependencies:**
-
-| Package | Purpose |
-|---------|---------|
-| `pytest>=7.0` | Testing framework |
-| `pytest-mock>=3.12` | Mocking utilities |
 
 ## Environment Variables
 
