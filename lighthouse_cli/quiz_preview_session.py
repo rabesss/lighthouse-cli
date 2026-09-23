@@ -92,6 +92,37 @@ class PreviewWorkflow:
         result["retained_for_grading"] = bool(state.get("retain", False))
         return result
 
+    def _remote_attempt(self, client: LighthouseClient, *, actor_id: int, attempt_id: int) -> dict[str, Any]:
+        if type(attempt_id) is not int or not 0 < attempt_id < 10**18:
+            raise PreviewWorkflowError("The remote attempt identity could not be verified.")
+        record = client.get_json(
+            f"/{self.course_id}/quizzes/{self.quiz_id}/attempts/{attempt_id}",
+            _replay_safe=False,
+        )
+        if (not isinstance(record, dict)
+                or type(record.get("AttemptId")) is not int or record["AttemptId"] != attempt_id
+                or type(record.get("QuizId")) is not int or record["QuizId"] != self.quiz_id
+                or type(record.get("UserId")) is not int or record["UserId"] != actor_id
+                or "Completed" not in record):
+            raise PreviewWorkflowError("The remote attempt identity could not be verified.")
+        return record
+
+    def _bind_start_attempt(
+        self, client: LighthouseClient, state: dict[str, Any], *, actor_id: int, attempt_id: int,
+    ) -> dict[str, Any]:
+        record = self._remote_attempt(client, actor_id=actor_id, attempt_id=attempt_id)
+        if record.get("Completed") is not None:
+            raise PreviewWorkflowError("The remote attempt is already completed and cannot be bound.")
+        state.update(status="uncertain", operation="start", attempt_id=attempt_id, page=1)
+        try:
+            result = read_current_preview(client, **self._identity(state))
+        except Exception:  # any post-start readback failure is ambiguous
+            self._save(state)
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=1) from None
+        state.update(status="active", operation=None, page=result.page)
+        self._save(state)
+        return result.public_data()
+
     def _actor(self, client: LighthouseClient) -> int:
         who = client.get_json(client.base_url + "/d2l/api/lp/1.47/users/whoami", _replay_safe=False)
         if not isinstance(who, dict):
@@ -104,6 +135,28 @@ class PreviewWorkflow:
             if state is None:
                 return {"mode": "preview", "status": "absent", "course_id": self.course_id, "quiz_id": self.quiz_id}
             return {key: state.get(key) for key in ("mode", "status", "course_id", "quiz_id", "attempt_id", "page", "operation")}
+
+    def reconcile(self, attempt_id: int | None = None) -> dict[str, Any]:
+        """Bind one verified incomplete remote attempt to an uncertain start."""
+        with self._locked():
+            state = self._load()
+            if state is None or state.get("status") != "uncertain":
+                raise PreviewWorkflowError("Preview reconciliation requires an uncertain start checkpoint.")
+            if state.get("operation") != "start":
+                raise PreviewWorkflowError("Preview reconciliation only applies to an uncertain start.")
+            if attempt_id is None:
+                raise PreviewWorkflowError(
+                    "Preview reconciliation requires an explicit --attempt-id after read-only inspection."
+                )
+            client = LighthouseClient(read_only_auth=True, site=self.site)
+            try:
+                actor = self._actor(client)
+                if state["actor_id"] != actor:
+                    raise PreviewWorkflowError("The saved preview belongs to a different signed-in account.")
+                return self._bind_start_attempt(client, state, actor_id=actor, attempt_id=attempt_id)
+            finally:
+                with suppress(Exception):
+                    client._session.close()
 
     def abandon(self) -> dict[str, Any]:
         with self._locked():
@@ -120,25 +173,24 @@ class PreviewWorkflow:
             raise PreviewWorkflowError("Unsupported preview operation.")
         with self._locked():
             previous = self._load()
-            if operation == "start":
-                if previous and previous["status"] not in {"submitted", "abandoned"}:
-                    raise PreviewWorkflowError("A preview already exists. Inspect it before starting again; abandon only after resolving its outcome.")
-            elif not previous or previous["status"] not in {"active", "uncertain"}:
-                raise PreviewWorkflowError("No active preview exists for this quiz.")
-            elif previous["status"] == "uncertain" and operation != "page":
-                raise PreviewWorkflowError("The last operation is uncertain. Inspect the browser before another write or abandon the preview.")
             client = LighthouseClient(read_only_auth=True, site=self.site)
+            state: dict[str, Any] | None = None
             try:
                 actor = self._actor(client)
+                if operation == "start" and previous and previous["status"] not in {"submitted", "abandoned"}:
+                    raise PreviewWorkflowError(
+                        "A preview already exists. Inspect it with preview page or reconcile; "
+                        "starting again is blocked while the outcome is unresolved."
+                    )
+                elif operation != "start" and (not previous or previous["status"] not in {"active", "uncertain"}):
+                    raise PreviewWorkflowError("No active preview exists for this quiz.")
+                elif operation != "start" and previous and previous["status"] == "uncertain" and operation != "page":
+                    raise PreviewWorkflowError("The last operation is uncertain. Inspect the browser before another write or abandon the preview.")
                 if previous and operation != "start" and previous["actor_id"] != actor:
                     raise PreviewWorkflowError("The saved preview belongs to a different signed-in account.")
                 if previous and operation != "start" and previous.get("attempt_id") is not None:
                     attempt_id = previous["attempt_id"]
-                    record = client.get_json(f"/{self.course_id}/quizzes/{self.quiz_id}/attempts/{attempt_id}", _replay_safe=False)
-                    if (not isinstance(record, dict) or type(record.get("AttemptId")) is not int or record["AttemptId"] != attempt_id
-                            or type(record.get("QuizId")) is not int or record["QuizId"] != self.quiz_id
-                            or type(record.get("UserId")) is not int or record["UserId"] != actor):
-                        raise PreviewWorkflowError("The remote attempt identity could not be verified.")
+                    record = self._remote_attempt(client, actor_id=actor, attempt_id=attempt_id)
                     if record.get("Completed") is not None:
                         receipt = self._receipt_with_retention(
                             verify_receipt(client, course_id=self.course_id, quiz_id=self.quiz_id, attempt_id=attempt_id, actor_id=actor),
@@ -183,6 +235,18 @@ class PreviewWorkflow:
                         result = advance_current_preview(client, **self._identity(state))
                     else:
                         receipt = submit_preview(client, **self._identity(state), retain=retain, actor_id=actor)
+                except PreviewStartUnknownError as exc:
+                    state["status"] = "uncertain"
+                    if type(exc.attempt_id) is int and type(exc.page) is int:
+                        try:
+                            page_path(self.course_id, self.quiz_id, exc.attempt_id, exc.page)
+                        except ValueError:
+                            pass
+                        else:
+                            state["attempt_id"] = exc.attempt_id
+                            state["page"] = exc.page
+                    self._save(state)
+                    raise
                 except _UNCERTAIN:
                     state["status"] = "uncertain"
                     self._save(state)
@@ -191,7 +255,7 @@ class PreviewWorkflow:
                     # Known pre-mutation validation errors do not consume a step.
                     if previous is not None:
                         self._save(previous)
-                    else:
+                    elif state is not None:
                         state.update(status="abandoned", operation=None)
                         self._save(state)
                     raise
@@ -240,6 +304,11 @@ class PreviewWorkflow:
             raise PreviewWorkflowError(
                 "Navigation outcome is uncertain. Inspect the browser before abandoning or continuing."
             )
+        elif operation == "start":
+            result = read_current_preview(client, **identity)
+            state.update(status="active", operation=None, page=result.page)
+            self._save(state)
+            return result.public_data()
         elif operation != "answer":
             raise PreviewWorkflowError("The start outcome must be checked in the browser.")
         result = read_current_preview(client, **identity)

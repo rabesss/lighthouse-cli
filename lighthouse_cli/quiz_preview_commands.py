@@ -39,7 +39,7 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
         _emit({"site": site, "mode": "preview", "operation": operation, "course_id": course_id,
                "quiz_id": quiz_id, "dry_run": True, "options": options}, json_output)
         return
-    writes = operation not in {"page", "status"}
+    writes = operation not in {"page", "status", "reconcile"}
     if writes and not yes and (not sys.stdin.isatty() or not click.confirm(
         f"Run preview {operation} on {site}, course {course_id}, quiz {quiz_id}?", err=True,
     )):
@@ -53,6 +53,8 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
             result = workflow.status()
         elif operation == "abandon":
             result = workflow.abandon()
+        elif operation == "reconcile":
+            result = workflow.reconcile(**options)
         else:
             result = workflow.run(operation, **options)
         _emit({"site": site, **result}, json_output)
@@ -87,6 +89,16 @@ def page(course_id: int, quiz_id: int, json_output: bool) -> None:
     continuing or abandoning the preview.
     """
     _execute("page", course_id, quiz_id, json_output)
+
+
+@preview.command("reconcile", cls=JsonOutputCommand)
+@click.argument("course_id", type=_ID)
+@click.argument("quiz_id", type=_ID)
+@click.option("--attempt-id", type=_ID, help="Bind a verified incomplete remote attempt explicitly.")
+@click.option("--json", "json_output", is_flag=True)
+def reconcile(course_id: int, quiz_id: int, attempt_id: int | None, json_output: bool) -> None:
+    """Recover an uncertain start using read-only attempt identity checks."""
+    _execute("reconcile", course_id, quiz_id, json_output, attempt_id=attempt_id)
 
 
 @preview.command("status", cls=JsonOutputCommand)

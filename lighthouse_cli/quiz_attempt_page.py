@@ -218,6 +218,12 @@ def parse_preview_page(
         saved_value = {"true": True, "false": False}.get(saved.lower())
         prompt = container.select_one('[id^="d2l_read_element_"]')
         if prompt is None:
+            # Brightspace tenant variants sometimes put the prompt directly
+            # in one custom HTML block without the legacy read-element ID.
+            blocks = container.find_all("d2l-html-block")
+            if len(blocks) == 1 and isinstance(blocks[0].get("html"), str):
+                prompt = blocks[0]
+        if prompt is None:
             raise PreviewPageError()
         radios = container.select('input[type="radio"]')
         unsupported = bool(_expanded(container).select('textarea, select, input[type="checkbox"], input[type="text"], img, math, iframe, audio, video'))

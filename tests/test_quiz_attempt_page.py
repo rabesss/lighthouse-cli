@@ -61,6 +61,23 @@ def test_all_at_once_exposes_only_current_visible_questions():
     assert "SESSION_SENTINEL" not in json.dumps(data)
 
 
+def test_custom_html_block_prompt_without_legacy_id_is_supported():
+    body = html(question(1))
+    body = body.replace(
+        b'<div id="d2l_read_element_1">Question 1: choose true.',
+        b'<d2l-html-block html="&lt;p&gt;Synthetic prompt&lt;/p&gt;"></d2l-html-block>',
+    )
+    body = body.replace(b'<label for="q1a">True</label>', b'<span>True</span>')
+    body = body.replace(b'<label for="q1b">False</label>', b'<span>False</span>')
+    parsed = parse(body)
+    assert parsed.questions[0]["text"] == "Synthetic prompt"
+    assert parsed.questions[0]["supported"] is True
+    assert parsed.questions[0]["choices"] == [
+        {"choice_id": 401, "text": "True"},
+        {"choice_id": 402, "text": "False"},
+    ]
+
+
 def test_one_way_page_has_next_without_previous():
     page = parse(html(question(1), extra='<button>Next Page</button>'))
     assert len(page.questions) == 1
@@ -283,8 +300,10 @@ def test_start_readback_auth_expiry_is_unknown_after_state_creation():
         (b'<script>parent.GoToAttemptQuizAuto( 30,1,0 );</script>', {}),
         SessionExpiredError("session expired"),
     ])
-    with pytest.raises(PreviewStartUnknownError):
+    with pytest.raises(PreviewStartUnknownError) as exc_info:
         start_preview(client, course_id=10, quiz_id=20)
+    assert exc_info.value.attempt_id == 30
+    assert exc_info.value.page == 1
     assert client._request.call_count == 1
 
 

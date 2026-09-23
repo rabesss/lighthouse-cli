@@ -22,7 +22,9 @@ class PreviewSaveUnknownError(NetworkError):
 
 
 class PreviewStartUnknownError(NetworkError):
-    def __init__(self) -> None:
+    def __init__(self, *, attempt_id: int | None = None, page: int | None = None) -> None:
+        self.attempt_id = attempt_id
+        self.page = page
         super().__init__("Preview start could not be verified. Inspect quiz attempts before starting again.")
 
 
@@ -70,6 +72,8 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
     response = None
     state_created = False
     start_dispatched = False
+    attempt_id: int | None = None
+    page: int | None = None
     try:
         # The summary POST registers the preview/bypass choice. Skipping it
         # can appear to work for visible quizzes but fails for hidden ones.
@@ -122,10 +126,17 @@ def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, byp
         if len(matches) != 1:
             raise PreviewStartUnknownError()
         attempt_id, page = matches.pop()
-        return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+        try:
+            return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+        except SessionExpiredError:
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
+        except Exception:  # all post-create readback failures are ambiguous
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
+    except PreviewStartUnknownError:
+        raise
     except SessionExpiredError:
         if state_created:
-            raise PreviewStartUnknownError() from None
+            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
         if start_dispatched:
             raise PreviewStartUnknownError() from None
         raise
