@@ -9,11 +9,6 @@ import requests
 
 from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
-    MFA_METHOD_APP,
-    MFA_METHOD_CALL,
-    MFA_METHOD_CHOOSE,
-    MFA_METHOD_PUSH,
-    MFA_METHOD_SMS,
     MS_ERROR_CODES,
     VALID_MFA_METHODS,
     MfaProbeResult,
@@ -21,11 +16,9 @@ from lighthouse_cli.ms_auth import (
     MicrosoftSSOError,
     ResponseSnapshot,
     UserProof,
-    _absolute_url,
     _extract_config_json,
     _extract_error_code_and_msg,
     _parse_user_proofs,
-    _prompt_user_proof_choice,
     _select_user_proof,
     build_sso_error,
     extract_saml_response,
@@ -33,6 +26,14 @@ from lighthouse_cli.ms_auth import (
     is_mfa_page,
     kmsi_page_detected,
 )
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_APP,
+    MFA_METHOD_CALL,
+    MFA_METHOD_CHOOSE,
+    MFA_METHOD_PUSH,
+    MFA_METHOD_SMS,
+)
+from lighthouse_cli.ms_mfa import _prompt_user_proof_choice
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -304,12 +305,6 @@ class TestCollectTotpAfterChallenge:
         )
         assert code == "123456"
         client.close()
-
-
-class TestAbsoluteUrl:
-    def test_resolves_tenant_relative_kmsi_path(self) -> None:
-        base = "https://login.microsoftonline.com/29bebd42-f1ff-4c3d-9688-067e3460dc1f/login"
-        assert _absolute_url(base, "/kmsi") == "https://login.microsoftonline.com/kmsi"
 
 
 class TestExtractConfigJson:

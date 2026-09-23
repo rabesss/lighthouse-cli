@@ -60,6 +60,7 @@ from lighthouse_cli.ms_errors import (
     MFA_AUTH_APP_NOTIFY,
     MFA_AUTH_APP_OTP,
     MFA_AUTH_SMS,
+    MFA_METHOD_APP,
     MFA_METHOD_AUTO,
     MFA_METHOD_INSTRUCTIONS,
     MS_ERROR_CODES,
@@ -71,24 +72,6 @@ from lighthouse_cli.ms_errors import (
     safe_diagnostic_text,
     safe_upstream_text,
 )
-from lighthouse_cli.ms_errors import (
-    MFA_METHOD_APP as MFA_METHOD_APP,
-)
-from lighthouse_cli.ms_errors import (
-    MFA_METHOD_AUTH_IDS as MFA_METHOD_AUTH_IDS,
-)
-from lighthouse_cli.ms_errors import (
-    MFA_METHOD_CALL as MFA_METHOD_CALL,
-)
-from lighthouse_cli.ms_errors import (
-    MFA_METHOD_CHOOSE as MFA_METHOD_CHOOSE,
-)
-from lighthouse_cli.ms_errors import (
-    MFA_METHOD_PUSH as MFA_METHOD_PUSH,
-)
-from lighthouse_cli.ms_errors import (
-    MFA_METHOD_SMS as MFA_METHOD_SMS,
-)
 from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
     UserProof,
@@ -97,18 +80,11 @@ from lighthouse_cli.ms_mfa import (
     format_user_proof,
     safe_proof_destination,
 )
-from lighthouse_cli.ms_mfa import (
-    _prompt_user_proof_choice as _prompt_user_proof_choice,
-)
-from lighthouse_cli.ms_parse import (
-    _extract_balanced_json_object as _extract_balanced_json_object,
-)
 from lighthouse_cli.ms_parse import (
     _extract_config_json,
     _extract_error_code_and_msg,
 )
 from lighthouse_cli.ms_session import (
-    _absolute_url,  # noqa: F401 - preserved public re-export
     _export_session_cookies,
     _import_session_cookies,
     _prune_stale_esctx_cookies,

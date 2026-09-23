@@ -121,17 +121,6 @@ def _prune_stale_esctx_cookies(session: requests.Session) -> None:
         session.cookies.clear(cookie.domain, cookie.path, cookie.name)
 
 
-def _absolute_url(base_url: str, path: str) -> str:
-    """Resolve Microsoft login URLs (often tenant-relative paths)."""
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    parsed = urlparse(base_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    if path.startswith("/"):
-        return f"{origin}{path}"
-    return urljoin(f"{origin}/", path)
-
-
 def _tenant_id_from_ms_url(ms_url: str) -> str:
     """Extract Azure AD tenant id from a Microsoft login URL."""
     m = re.search(r"login\.microsoftonline\.com/([0-9a-f-]{36})/", ms_url, re.IGNORECASE)
