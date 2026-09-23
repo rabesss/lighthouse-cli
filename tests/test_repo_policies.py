@@ -83,6 +83,11 @@ def _unpinned_actions(workflow: str) -> list[str]:
     return [ref for ref in refs if not ref.startswith("./") and not _FULL_SHA_USES.match(ref)]
 
 
+# Vendor-generated workflows ("DO NOT EDIT") whose installer tracks a major
+# tag. Listed explicitly so any other floating ref, or a new one here, fails.
+_VENDOR_MANAGED_ACTIONS = {"pullfrog.yml": ["pullfrog/pullfrog@v0"]}
+
+
 def _read_lock(name: str) -> tuple[dict[str, str], list[str]]:
     return _parse_requirements((ROOT / name).read_text())
 
@@ -173,6 +178,19 @@ class TestDependencyPolicies:
         assert hook, "ruff pre-commit hook not found"
         assert hook.group(1) == dev["ruff"], "pre-commit ruff rev drifted from requirements-dev.txt"
 
+    def test_detect_secrets_version_is_consistent(self) -> None:
+        # The gate, the pre-commit hook, the lockfile, and the baseline format
+        # must agree, or the gate reports a spuriously "stale" baseline.
+        dev, _ = _read_lock("requirements-dev.txt")
+        ci = re.search(r"pip install detect-secrets==([0-9.]+)", (WORKFLOWS / "ci.yml").read_text())
+        hook = re.search(
+            r"Yelp/detect-secrets\s*\n\s*rev:\s*v?(\S+)",
+            (ROOT / ".pre-commit-config.yaml").read_text(),
+        )
+        baseline = json.loads((ROOT / ".secrets.baseline").read_text())["version"]
+        assert ci and hook, "detect-secrets pin missing from ci.yml or pre-commit"
+        assert {dev["detect-secrets"], ci.group(1), hook.group(1), baseline} == {baseline}
+
 
 class TestCIPolicies:
     def test_ci_workflow_gates_exist(self) -> None:
@@ -211,10 +229,13 @@ class TestCIPolicies:
         )
         assert _unpinned_actions(workflow) == ["actions/checkout@v4"]
 
-    @pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
-    def test_gate_and_release_actions_are_sha_pinned(self, workflow: str) -> None:
-        unpinned = _unpinned_actions((WORKFLOWS / workflow).read_text())
-        assert not unpinned, f"{workflow} uses mutable action refs: {unpinned}"
+    def test_every_workflow_action_is_sha_pinned(self) -> None:
+        unpinned = {
+            path.name: refs
+            for path in sorted(WORKFLOWS.glob("*.yml"))
+            if (refs := _unpinned_actions(path.read_text()))
+        }
+        assert unpinned == _VENDOR_MANAGED_ACTIONS, f"mutable action refs: {unpinned}"
 
     def test_release_automation_present(self) -> None:
         release = (WORKFLOWS / "release.yml").read_text()
