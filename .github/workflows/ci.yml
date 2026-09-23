@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.10"
           cache: pip
@@ -36,8 +36,10 @@ jobs:
       - name: Unused / undeclared dependency scan
         run: deptry .
       - name: Complexity ratchet
-        # Known hotspots (ms_auth SSO state machine) are excluded; the gate
-        # still fails if averages regress or new worst-case blocks appear.
+        # Gates the average (-a B) and per-module (-m C) complexity only.
+        # `-b F` is the loosest block rank, so it does NOT stop a new
+        # worst-case (rank F) block from landing; review catches those.
+        # ms_auth.py (SSO state machine) is excluded as a known hotspot.
         run: xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli
 
   security:
@@ -45,20 +47,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Git history secret scan
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-python@v5
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # pragma: allowlist secret
+          # Pinned so the rule-scoped allowlist in .gitleaks.toml keeps the
+          # semantics it was verified against.
+          GITLEAKS_VERSION: "8.30.1"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
       - name: Working tree secret scan (audited baseline)
-        run: |
+        # Rejects any finding in git-tracked files that is not in the audited
+        # baseline and never writes the baseline (scripts/check_secrets.py).
+        # The pragma marks "detect-secrets==1.5.0" as a version pin, not a secret.
+        run: | # pragma: allowlist secret
           pip install detect-secrets==1.5.0
-          detect-secrets scan --baseline .secrets.baseline
+          python scripts/check_secrets.py
 
   tests:
     name: tests (py${{ matrix.python-version }})
@@ -70,11 +78,13 @@ jobs:
         include:
           - python-version: "3.10"
             install: pip install -r requirements-dev.txt && pip install -e . --no-deps
+          # The lockfile is compiled for 3.10 but every pin also resolves on
+          # 3.13; both legs install it so 3.13 never floats to new versions.
           - python-version: "3.13"
-            install: pip install -e '.[dev]'
+            install: pip install -r requirements-dev.txt && pip install -e . --no-deps
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -83,7 +93,7 @@ jobs:
       - name: Test suite
         run: pytest -q --durations=10 --cov --cov-report=term --cov-report=xml
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-py${{ matrix.python-version }}
           path: coverage.xml
@@ -93,11 +103,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
-      # Policy tests are stdlib-only file assertions; they need just pytest.
-      - run: pip install pytest pytest-mock
-      - run: pytest tests/test_repo_policies.py -q
+      # Same locked install as the test legs: conftest imports click and the
+      # package, and the secret-gate regressions need detect-secrets.
+      - run: pip install -r requirements-dev.txt && pip install -e . --no-deps
+      - run: pytest tests/test_repo_policies.py tests/test_secret_gate.py -q

@@ -4,16 +4,37 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    # Burn-in: let new upstream releases settle for a week before proposing them,
-    # which filters most yanked/patch-on-patch churn (see min-release-age intent).
-    minimum-update-age: "7 days"
+    # Burn-in: let new upstream releases settle for a week before proposing
+    # them, which filters most yanked/patch-on-patch churn.
+    cooldown:
+      default-days: 7
+    # requirements.txt files carry no dev/production metadata, so
+    # `dependency-type` cannot split them; group by explicit package names.
+    # Dependabot assigns each update to the first matching group.
     groups:
-      dev-toolchain:
-        dependency-type: "development"
       runtime-dependencies:
-        dependency-type: "production"
+        # Everything pinned in requirements.txt (runtime closure).
+        patterns:
+          - "beautifulsoup4"
+          - "certifi"
+          - "cffi"
+          - "charset-normalizer"
+          - "click"
+          - "cryptography"
+          - "idna"
+          - "pycparser"
+          - "requests"
+          - "soupsieve"
+          - "typing-extensions"
+          - "urllib3"
+      dev-toolchain:
+        # Remaining requirements-dev.txt pins: tooling and optional extras.
+        patterns:
+          - "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    minimum-update-age: "7 days"
+    # github-actions supports only `default-days` (no semver-specific days).
+    cooldown:
+      default-days: 7

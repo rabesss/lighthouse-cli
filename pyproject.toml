@@ -22,18 +22,20 @@ credentials = ["keyring>=24.0", "cryptography>=41.0,<100"]
 auth = ["playwright>=1.40"]
 cdp = ["websockets>=12,<16"]
 dev = [
-    "pytest>=7.0",
-    "pytest-mock>=3.12",
-    "pytest-cov>=5.0",
-    "ruff>=0.15",
-    "mypy>=1.14",
-    "types-requests>=2.31",
-    "import-linter>=2.0",
-    "deptry>=0.20",
-    "xenon>=0.9",
-    "radon>=6.0",
-    "detect-secrets>=1.5",
-    "pre-commit>=3.6",
+    # Upper bounds stop a lockfile regeneration from silently crossing a
+    # breaking release; 0.x tools are bounded at the next minor.
+    "pytest>=9.0,<10",
+    "pytest-mock>=3.12,<4",
+    "pytest-cov>=7.0,<8",
+    "ruff>=0.16.8,<0.17",
+    "mypy>=2.0,<3",
+    "types-requests>=2.31,<3",
+    "import-linter>=2.0,<3",
+    "deptry>=0.25,<0.26",
+    "xenon>=0.9,<0.10",
+    "radon>=6.0,<7",
+    "detect-secrets>=1.5,<2",
+    "pre-commit>=4.0,<5",
 ]
 
 [project.scripts]
@@ -78,8 +80,8 @@ ignore_missing_imports = true
 root_packages = ["lighthouse_cli"]
 
 [[tool.importlinter.contracts]]
-# Layers were derived from the actual import graph (see scripts/check_import_layers
-# regeneration notes in CONTRIBUTING). Every module sits in the lowest layer that is
+# Layers were derived from the actual import graph (`lint-imports` enforces them;
+# CONTRIBUTING explains how to extend them). Every module sits in the lowest layer that is
 # above all of its internal dependencies; `|` separates sibling modules that never
 # import each other. Breaking a layer (e.g. foundation importing the API client)
 # fails CI.

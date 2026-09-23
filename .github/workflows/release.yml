@@ -1,5 +1,13 @@
 name: Release
 
+# Known limitation (external prerequisite, not yet provisioned): this job runs
+# as the default GITHUB_TOKEN, and GitHub does not trigger workflows for pull
+# requests or pushes made with that token. Release-please PRs therefore get no
+# CI runs, and the required checks show as missing rather than passed. Do not
+# treat such a PR as checked. Until an approved GitHub App token is wired in
+# (see docs/runbooks/ci-red-triage.md, "Release PRs"), push an empty commit
+# to the release branch or close and reopen the PR so CI runs before merging.
+
 on:
   push:
     branches: [main]
@@ -17,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           release-type: python
           package-name: lighthouse-cli

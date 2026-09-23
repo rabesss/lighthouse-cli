@@ -1,0 +1,25 @@
+# Gitleaks configuration: the default ruleset plus one narrow allowlist.
+#
+# `.secrets.baseline` (detect-secrets) records a SHA-1 digest of each audited
+# false positive in a `hashed_secret` field. Those digests are one-way hashes,
+# not credentials, but they match the generic-api-key rule. Only lines of that
+# exact shape, only in that file, and only for that rule are allowed; every
+# other rule, file, and line in the working tree and history is still scanned.
+#
+# The allowlist is rule-scoped on purpose: a top-level [[allowlists]] entry
+# ignores `condition = "AND"` (verified on gitleaks 8.30.1) and would silently
+# allow every finding in the file.
+title = "lighthouse-cli gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "detect-secrets baseline hashed_secret digests (audited false positives, not secrets)"
+condition = "AND"
+paths = ['''^\.secrets\.baseline$''']
+regexTarget = "line"
+regexes = ['''^\s*"hashed_secret": "[0-9a-f]{40}",?$''']
