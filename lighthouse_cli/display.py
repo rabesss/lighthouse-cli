@@ -35,6 +35,18 @@ def _has_json_option(args: list[str]) -> bool:
     return False
 
 
+class _JsonUsageError(click.UsageError):
+    """Sanitized usage error for ``--json`` invocations (repository exit code 1)."""
+
+    exit_code = 1
+
+
+def _safe_usage_error(ctx: click.Context, *, json_requested: bool) -> click.UsageError:
+    """Build a UsageError that never echoes the rejected input."""
+    error_type = _JsonUsageError if json_requested else click.UsageError
+    return error_type(JSON_USAGE_ERROR, ctx=ctx)
+
+
 class JsonOutputCommand(click.Command):
     """Click command that prefixes JSON parse errors with a safe JSON record.
 
@@ -59,10 +71,7 @@ class JsonOutputCommand(click.Command):
             # Click's original UsageError includes the invalid value. Replace
             # it before rendering so a pasted password, token, or URL cannot
             # reach stderr.
-            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
-            if requested_json:
-                safe_error.exit_code = 1
-            raise safe_error from None
+            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
 
 class JsonOutputGroup(click.Group):
@@ -77,10 +86,7 @@ class JsonOutputGroup(click.Group):
         except click.UsageError:
             if requested_json and not ctx.resilient_parsing:
                 output_json({"error": JSON_USAGE_ERROR})
-            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
-            if requested_json:
-                safe_error.exit_code = 1
-            raise safe_error from None
+            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
     def invoke(self, ctx: click.Context) -> Any:
         try:
@@ -94,10 +100,7 @@ class JsonOutputGroup(click.Group):
             requested_json = bool(getattr(self, "_json_requested", False))
             if requested_json and not ctx.resilient_parsing:
                 output_json({"error": JSON_USAGE_ERROR})
-            safe_error = click.UsageError(JSON_USAGE_ERROR, ctx=ctx)
-            if requested_json:
-                safe_error.exit_code = 1
-            raise safe_error from None
+            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
 
 # ---------------------------------------------------------------------------

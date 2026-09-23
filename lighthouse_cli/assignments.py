@@ -510,7 +510,7 @@ def _download_and_record(
     dest: Path,
     manifest: Manifest,
     *,
-    existing_entry: dict[str, Any] | None | object = _USE_MANIFEST_ENTRY,
+    existing_entry: dict[str, Any] | object | None = _USE_MANIFEST_ENTRY,
     claimed_paths: set[Path] | None = None,
 ) -> dict[str, Any]:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
