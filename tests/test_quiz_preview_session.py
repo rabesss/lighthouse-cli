@@ -349,6 +349,25 @@ def test_attempt_paging_never_leaves_the_attempts_route(remote, make_next):
     assert all("quiz_start" not in c.args[0] for c in client.get_json.call_args_list)
 
 
+@pytest.mark.parametrize("plain", [True, False])
+def test_oversized_attempt_listing_refuses_start_before_dispatch(remote, plain):
+    _, state = remote
+    many = [_attempt(n) for n in range(1, 10_002)]
+    def listing(path):
+        if plain:
+            return many
+        if "bookmark=" in path:
+            return many[5000:]  # a wrapped page followed by a plain list
+        return {"Objects": many[:5000], "Next": path + "?bookmark=abc"}
+    state["listing"] = listing
+    workflow = PreviewWorkflow("trial", 10, 20)
+    with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
+        with pytest.raises(PreviewWorkflowError, match="Too many attempts"):
+            workflow.run("start")
+    start.assert_not_called()
+    assert workflow.status()["status"] == "absent"
+
+
 def test_attempt_paging_follows_bookmarks_on_the_same_route(remote):
     _, state = remote
     workflow = PreviewWorkflow("trial", 10, 20)

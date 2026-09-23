@@ -169,13 +169,14 @@ class PreviewWorkflow:
                 raise PreviewWorkflowError(_LISTING_INVALID)
             seen.add(url)
             data = client.get_json(url)
-            if isinstance(data, list):
-                return items + data
-            if not isinstance(data, dict) or not isinstance(data.get("Objects"), list):
+            page_items = data if isinstance(data, list) else data.get("Objects") if isinstance(data, dict) else None
+            if not isinstance(page_items, list):
                 raise PreviewWorkflowError(_LISTING_INVALID)
-            items.extend(data["Objects"])
+            items.extend(page_items)
             if len(items) > _MAX_BASELINE:
                 raise PreviewWorkflowError("Too many attempts to reconcile safely.")
+            if isinstance(data, list):
+                return items
             following = data.get("Next")
             if following is None or following == "":
                 return items
