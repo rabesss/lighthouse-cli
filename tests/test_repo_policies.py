@@ -299,6 +299,19 @@ class TestSecretScanningPolicies:
         assert "results" in baseline
         assert "plugins_used" in baseline
 
+    def test_every_baseline_entry_records_an_audit_decision(self) -> None:
+        # `detect-secrets scan` output has no is_secret field; only an audit
+        # (`detect-secrets audit`) records one. A real secret must never be
+        # baselined, so every entry must be an explicit false positive.
+        results = json.loads((ROOT / ".secrets.baseline").read_text())["results"]
+        unaudited = [
+            f"{path}:{entry['line_number']}"
+            for path, entries in results.items()
+            for entry in entries
+            if entry.get("is_secret") is not False
+        ]
+        assert not unaudited, f"unaudited .secrets.baseline entries: {unaudited}"
+
     def test_pre_commit_runs_ruff_and_detect_secrets(self) -> None:
         config = (ROOT / ".pre-commit-config.yaml").read_text()
         assert "ruff" in config

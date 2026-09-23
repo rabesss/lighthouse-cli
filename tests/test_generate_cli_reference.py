@@ -162,6 +162,13 @@ def test_every_click_command_path_appears_in_generated_doc(generated_reference: 
         assert f"Usage: {heading} " in generated_reference, heading
 
 
+def test_committed_reference_matches_a_fresh_generation(generated_reference: str) -> None:
+    committed = gen.DEFAULT_OUTPUT.read_text(encoding="utf-8")
+    assert committed == generated_reference, (
+        "docs/cli-reference.md is stale; run: python scripts/generate_cli_reference.py"
+    )
+
+
 def test_generated_doc_covers_instructor_preview_subcommands(generated_reference: str) -> None:
     for sub in ("start", "answer", "next", "page", "submit", "status", "abandon"):
         assert f"##### `lighthouse instructor preview {sub}`" in generated_reference
