@@ -9,23 +9,15 @@ import requests
 
 from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
-    MFA_METHOD_APP,
-    MFA_METHOD_CALL,
-    MFA_METHOD_CHOOSE,
-    MFA_METHOD_PUSH,
-    MFA_METHOD_SMS,
     MS_ERROR_CODES,
     VALID_MFA_METHODS,
-    MfaProbeResult,
     MicrosoftSSOClient,
     MicrosoftSSOError,
     ResponseSnapshot,
     UserProof,
-    _absolute_url,
     _extract_config_json,
     _extract_error_code_and_msg,
     _parse_user_proofs,
-    _prompt_user_proof_choice,
     _select_user_proof,
     build_sso_error,
     extract_saml_response,
@@ -33,6 +25,14 @@ from lighthouse_cli.ms_auth import (
     is_mfa_page,
     kmsi_page_detected,
 )
+from lighthouse_cli.ms_errors import (
+    MFA_METHOD_APP,
+    MFA_METHOD_CALL,
+    MFA_METHOD_CHOOSE,
+    MFA_METHOD_PUSH,
+    MFA_METHOD_SMS,
+)
+from lighthouse_cli.ms_mfa import _prompt_user_proof_choice
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -243,52 +243,6 @@ class TestMfaMethodSelection:
         assert "REAL_SECRET" not in output
         assert "A verification code was just sent to your phone." in output
 
-    def test_probe_script_does_not_render_untrusted_display(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from scripts.probe_mfa_methods import _print_proofs
-
-        proof = UserProof(
-            "OneWaySMS",
-            "FULL-DISPLAY-SENTINEL user@example.com +919876541234",
-            "+919876541234",
-            True,
-        )
-        _print_proofs(MfaProbeResult(page="converged", proofs=[proof]))
-        output = capsys.readouterr().out
-
-        assert "Text code (SMS or WhatsApp): ***1234" in output
-        assert "FULL-DISPLAY-SENTINEL" not in output
-        assert "user@example.com" not in output
-        assert "+919876541234" not in output
-
-    def test_probe_script_wraps_unexpected_error_without_traceback(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        from scripts import probe_mfa_methods as probe
-
-        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@example.com")
-        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "PASSWORD_SENTINEL")
-        monkeypatch.setattr(
-            probe.MicrosoftSSOClient,
-            "probe_mfa_methods",
-            lambda _self, _username, _password: (_ for _ in ()).throw(
-                RuntimeError(
-                    "GET https://login.microsoftonline.com/?token=PROBE_SECRET"
-                )
-            ),
-        )
-
-        assert probe.main() == 1
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert "MFA method discovery failed" in captured.err
-        assert "PROBE_SECRET" not in captured.err
-        assert "PASSWORD_SENTINEL" not in captured.err
-        assert "Traceback" not in captured.err
-
     def test_choose_single_proof_skips_prompt(self) -> None:
         single = [UserProof("OneWaySMS", "SMS", "+91", True)]
         assert _prompt_user_proof_choice(single).auth_method_id == "OneWaySMS"
@@ -304,12 +258,6 @@ class TestCollectTotpAfterChallenge:
         )
         assert code == "123456"
         client.close()
-
-
-class TestAbsoluteUrl:
-    def test_resolves_tenant_relative_kmsi_path(self) -> None:
-        base = "https://login.microsoftonline.com/29bebd42-f1ff-4c3d-9688-067e3460dc1f/login"
-        assert _absolute_url(base, "/kmsi") == "https://login.microsoftonline.com/kmsi"
 
 
 class TestExtractConfigJson:

@@ -35,17 +35,15 @@ from .config import (
     save_cookies,
 )
 from .credential_store import CredentialStore, CredentialStoreError
-from .ms_auth import (
+from .ms_auth import MicrosoftSSOClient
+from .ms_errors import (
     MFA_METHOD_APP,
     MFA_METHOD_AUTH_IDS,
+    MFA_METHOD_AUTO,
     MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
-    MicrosoftSSOClient,
-)
-from .ms_errors import (
-    MFA_METHOD_AUTO,
     VALID_MFA_METHODS,
     MfaPendingError,
     MicrosoftSSOError,

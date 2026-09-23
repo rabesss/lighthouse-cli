@@ -211,7 +211,6 @@ followed manually so the SAML body is never replayed to an untrusted target.
 | `lighthouse_cli/ms_auth.py` | SSO + MFA + SAML implementation |
 | `lighthouse_cli/auth.py` | CLI orchestration, credential store |
 | `lighthouse_cli/config.py` | `cookies.json`, `mfa_pending.json` |
-| `scripts/probe_mfa_methods.py` | Legacy debug probe — superseded by `auth mfa-methods` |
 
 ## Verification
 

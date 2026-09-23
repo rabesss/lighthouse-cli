@@ -21,11 +21,11 @@ import requests
 
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
-    MFA_METHOD_APP,
     MfaPendingError,
     MicrosoftSSOClient,
     MicrosoftSSOError,
 )
+from lighthouse_cli.ms_errors import MFA_METHOD_APP
 
 # ---------------------------------------------------------------------------
 # Sentinels (never asserted by value; used only as fixture payloads)

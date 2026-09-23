@@ -9,10 +9,8 @@ it:
 | OpenAI Codex (`chatgpt-codex-connector`) | [`AGENTS.md`](AGENTS.md) → `## Review guidelines` |
 | Google Jules (`google-labs-jules`) | [`AGENTS.md`](AGENTS.md) (conventions) |
 | Devin (`devin-ai-integration`) | [`AGENTS.md`](AGENTS.md) + Devin dashboard/Wiki |
-| Gemini Code Assist | [`.gemini/styleguide.md`](.gemini/styleguide.md) + [`.gemini/config.yaml`](.gemini/config.yaml) |
 | CodeRabbit | [`.coderabbit.yaml`](.coderabbit.yaml) (also ingests this file + `AGENTS.md`) |
 | Qodo Merge | [`.pr_agent.toml`](.pr_agent.toml) + [`best_practices.md`](best_practices.md) |
-| GitHub Copilot | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
 | Greptile | [`greptile.json`](greptile.json) (loads this file via `customContext`) |
 | Kilo Code (`kilo-code-bot`) | **this file** — read from the PR base branch; enable "Use REVIEW.md" in the Kilo dashboard |
 | Socket Security | [`socket.yml`](socket.yml) (supply-chain only) |

@@ -1762,6 +1762,24 @@ class TestAuthMfaMethodsCommand:
         assert result.exit_code == 1
         assert json.loads(result.stdout)["success"] is False
 
+    def test_unexpected_probe_error_is_clean_json_without_details(
+        self, cli_runner: CliRunner, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "secret")
+        boom = MagicMock(side_effect=RuntimeError("PROBE_SECRET https://x.test/?token=abc"))
+        with patch.object(auth_mod.MicrosoftSSOClient, "probe_mfa_methods", boom):
+            result = cli_runner.invoke(cli, ["auth", "mfa-methods", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout) == {
+            "success": False, "error": "Unexpected error (RuntimeError).",
+        }
+        assert "Traceback" not in result.output
+        assert "PROBE_SECRET" not in result.output
+        assert "token=abc" not in result.output
+
     def test_missing_credentials_error(
         self, cli_runner: CliRunner, isolated_config: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
