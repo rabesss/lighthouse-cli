@@ -63,6 +63,16 @@ def _metadata(container: Tag, name: str) -> str:
     return value
 
 
+def _inside_options(node: Tag, container: Tag) -> bool:
+    """Whether ``node`` sits inside the answer options of ``container``."""
+    for parent in node.parents:
+        if parent is container:
+            return False
+        if parent.name in {"fieldset", "table", "label"}:
+            return True
+    return False
+
+
 def _expanded(node: Tag) -> BeautifulSoup:
     copy = BeautifulSoup(str(node), "html.parser")
     # Brightspace puts question content in a custom element's html attribute;
@@ -242,7 +252,10 @@ def parse_preview_page(
         if prompt is None:
             # Brightspace tenant variants sometimes put the prompt directly
             # in one custom HTML block without the legacy read-element ID.
-            blocks = container.find_all("d2l-html-block")
+            # Rich-text answer choices use the same element, so only blocks
+            # outside the options (fieldset/table/label) can be the prompt.
+            blocks = [block for block in container.find_all("d2l-html-block")
+                      if not _inside_options(block, container)]
             if len(blocks) == 1 and isinstance(blocks[0].get("html"), str):
                 prompt = blocks[0]
         if prompt is None:

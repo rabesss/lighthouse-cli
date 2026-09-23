@@ -253,8 +253,16 @@ class PreviewWorkflow:
                 return {**receipt, "reconciled": True}
             identity = {"course_id": self.course_id, "quiz_id": self.quiz_id, "attempt_id": attempt_id}
             if bound and type(state.get("page")) is int:
-                # The start callback's page is authoritative: keep that cursor.
-                current = read_current_preview(client, **identity, page=state["page"])
+                # Keep the start's cursor when it still reads back. If the
+                # attempt moved on (e.g. advanced in the browser), use the
+                # server-reported page of this exact attempt, as for unbound
+                # candidates, and only on a supported layout.
+                try:
+                    current = read_current_preview(client, **identity, page=state["page"])
+                except PreviewPageError:
+                    if not _supported_layout(client.get_quiz_detail(self.course_id, self.quiz_id)):
+                        raise
+                    current = read_server_current_preview(client, **identity, page=state["page"])
             else:
                 # Unbound: use the server-reported current page of this exact
                 # preview attempt (read-only; persisted before any write).
@@ -363,21 +371,27 @@ class PreviewWorkflow:
             raise PreviewWorkflowError("Unsupported preview operation.")
         with self._locked():
             previous = self._load()
+            # Refusals that depend only on the local cursor come before any
+            # authentication or network request, so they stay actionable.
+            if operation == "start" and previous and self._unresolved_start(previous):
+                raise PreviewWorkflowError(_UNRESOLVED_START)
+            if operation == "start" and previous and previous["status"] not in {"submitted", "abandoned"}:
+                raise PreviewWorkflowError(
+                    "A preview already exists. Inspect it with preview page or reconcile; "
+                    "starting again is blocked while the outcome is unresolved."
+                )
+            elif operation != "start" and (not previous or previous["status"] not in {"active", "uncertain"}):
+                raise PreviewWorkflowError("No active preview exists for this quiz.")
+            elif operation != "start" and previous and previous["status"] == "uncertain" and operation != "page":
+                if previous.get("operation") == "start":
+                    raise PreviewWorkflowError(
+                        "The preview start is unresolved. Run preview reconcile before another write."
+                    )
+                raise PreviewWorkflowError("The last operation is uncertain. Inspect the browser before another write or abandon the preview.")
             client = LighthouseClient(read_only_auth=True, site=self.site)
             state: dict[str, Any] | None = None
             try:
                 actor = self._actor(client)
-                if operation == "start" and previous and self._unresolved_start(previous):
-                    raise PreviewWorkflowError(_UNRESOLVED_START)
-                if operation == "start" and previous and previous["status"] not in {"submitted", "abandoned"}:
-                    raise PreviewWorkflowError(
-                        "A preview already exists. Inspect it with preview page or reconcile; "
-                        "starting again is blocked while the outcome is unresolved."
-                    )
-                elif operation != "start" and (not previous or previous["status"] not in {"active", "uncertain"}):
-                    raise PreviewWorkflowError("No active preview exists for this quiz.")
-                elif operation != "start" and previous and previous["status"] == "uncertain" and operation != "page":
-                    raise PreviewWorkflowError("The last operation is uncertain. Inspect the browser before another write or abandon the preview.")
                 if previous and operation != "start" and previous["actor_id"] != actor:
                     raise PreviewWorkflowError("The saved preview belongs to a different signed-in account.")
                 if previous and operation != "start" and previous.get("attempt_id") is not None:
@@ -511,7 +525,12 @@ class PreviewWorkflow:
                 "Navigation outcome is uncertain. Inspect the browser before abandoning or continuing."
             )
         elif operation == "start":
-            result = read_current_preview(client, **identity)
+            try:
+                result = read_current_preview(client, **identity)
+            except PreviewPageError:
+                raise PreviewWorkflowError(
+                    "The started preview's page could not be verified. Run preview reconcile."
+                ) from None
             state.update(status="active", operation=None, page=result.page)
             self._save(state)
             return result.public_data()

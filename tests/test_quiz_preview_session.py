@@ -439,6 +439,57 @@ def test_confirmed_no_remote_attempt_is_refused_for_a_bound_start(remote):
     assert workflow.status()["unresolved_start"] is True
 
 
+def test_reconcile_resumes_a_bound_start_advanced_in_the_browser(remote):
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow, identity=(31, 1))
+    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", side_effect=PreviewPageError()), \
+            patch("lighthouse_cli.quiz_preview_session.read_server_current_preview",
+                  return_value=page(2, attempt_id=31)) as server:
+        assert workflow.reconcile()["page"] == 2
+    assert server.call_args.kwargs["attempt_id"] == 31
+    assert (workflow.status()["status"], workflow.status()["attempt_id"], workflow.status()["page"]) == ("active", 31, 2)
+
+
+def test_bound_start_fallback_is_refused_on_an_unsupported_layout(remote):
+    client, _ = remote
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow, identity=(31, 1))
+    before = saved(workflow)
+    client.get_quiz_detail.return_value = {"PagingTypeId": 1, "PreventMovingBackwards": False,
+                                           "IsSingleSession": False, "SubmissionTimeLimit": {"IsEnforced": False}}
+    with patch("lighthouse_cli.quiz_preview_session.read_current_preview", side_effect=PreviewPageError()), \
+            patch("lighthouse_cli.quiz_preview_session.read_server_current_preview") as server:
+        with pytest.raises(PreviewWorkflowError, match="not changed"):
+            workflow.reconcile()
+    server.assert_not_called()
+    assert saved(workflow) == before
+
+
+@pytest.mark.parametrize("operation, message", [
+    ("page", "No active preview"),
+    ("answer", "No active preview"),
+])
+def test_local_cursor_refusals_come_before_authentication(operation, message):
+    with patch("lighthouse_cli.quiz_preview_session.LighthouseClient",
+               side_effect=AssertionError("must not authenticate")) as client:
+        workflow = PreviewWorkflow("trial", 10, 20)
+        with pytest.raises(PreviewWorkflowError, match=message):
+            workflow.run(operation, question_id=1, choice_id=2)
+    client.assert_not_called()
+
+
+def test_unresolved_start_blocks_start_before_authentication(remote):
+    workflow = PreviewWorkflow("trial", 10, 20)
+    unknown_start(workflow)
+    with patch("lighthouse_cli.quiz_preview_session.LighthouseClient",
+               side_effect=AssertionError("must not authenticate")) as client:
+        with pytest.raises(PreviewWorkflowError, match="reconcile"):
+            workflow.run("start")
+        with pytest.raises(PreviewWorkflowError, match="reconcile"):
+            workflow.run("answer", question_id=1, choice_id=2)
+    client.assert_not_called()
+
+
 def test_reconcile_of_a_completed_bound_attempt_verifies_the_receipt(remote):
     _, state = remote
     workflow = PreviewWorkflow("trial", 10, 20)

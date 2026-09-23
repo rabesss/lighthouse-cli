@@ -84,6 +84,18 @@ def test_custom_html_block_prompt_without_legacy_id_is_supported():
     ]
 
 
+def test_rich_text_choice_is_never_taken_as_the_prompt():
+    # No legacy read-element and no prompt block: the only html block is an
+    # answer choice, so the page must fail closed instead of mislabeling it.
+    q = question(1).replace('<div id="d2l_read_element_1">Question 1: choose true.', '<div>')
+    q = q.replace('<label for="q1a">True</label>', '<label for="q1a"><d2l-html-block html="True"></d2l-html-block></label>')
+    with pytest.raises(PreviewPageError):
+        parse(html(q))
+    prompt = '<d2l-html-block html="&lt;p&gt;Two plus two equals four.&lt;/p&gt;"></d2l-html-block><fieldset>'
+    page = parse(html(q.replace("<fieldset>", prompt, 1)))
+    assert page.questions[0]["text"] == "Two plus two equals four."
+
+
 def test_one_way_page_has_next_without_previous():
     page = parse(html(question(1), extra='<button>Next Page</button>'))
     assert len(page.questions) == 1
