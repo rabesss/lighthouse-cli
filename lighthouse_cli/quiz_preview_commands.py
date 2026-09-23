@@ -9,6 +9,7 @@ from typing import Any
 import click
 
 from .display import JsonOutputCommand, format_user_error, output_json
+from .quiz_attempt_page import PreviewPageError, PreviewRefusedError
 from .quiz_preview_session import _UNCERTAIN, PreviewWorkflow, PreviewWorkflowError
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
@@ -59,7 +60,9 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
             result = workflow.run(operation, **options)
         _emit({"site": site, **result}, json_output)
     except Exception as exc:
-        message = str(exc) if isinstance(exc, (PreviewWorkflowError, *_UNCERTAIN)) else format_user_error(exc)
+        # These carry only fixed, local messages; anything else is sanitized.
+        fixed = (PreviewWorkflowError, PreviewRefusedError, PreviewPageError, *_UNCERTAIN)
+        message = str(exc) if isinstance(exc, fixed) else format_user_error(exc)
         click.echo(message, err=True)
         if json_output:
             output_json({"site": site, "mode": "preview", "course_id": course_id, "quiz_id": quiz_id, "error": message})

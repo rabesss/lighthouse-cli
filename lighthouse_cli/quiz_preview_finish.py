@@ -16,7 +16,13 @@ from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
-from .quiz_attempt_page import MAX_PAGE_BYTES, PreviewPageError, hidden_form
+from .quiz_attempt_page import (
+    MAX_PAGE_BYTES,
+    REFUSE_NOT_LAST_PAGE,
+    REFUSE_UNANSWERED,
+    PreviewRefusedError,
+    hidden_form,
+)
 from .quiz_preview_transport import page_path, read_current_preview
 from .request_protection import form_protection_from_homepage
 
@@ -97,8 +103,10 @@ def submit_preview(
     if type(retain) is not bool:
         raise ValueError("Invalid preview submission settings.")
     current = read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
-    if not current.ready_to_leave() or current.has_next_control:
-        raise PreviewPageError()
+    if current.has_next_control:
+        raise PreviewRefusedError(REFUSE_NOT_LAST_PAGE)
+    if not current.ready_to_leave():
+        raise PreviewRefusedError(REFUSE_UNANSWERED)
     home, _ = client.get_raw("/d2l/home", max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
     protection = form_protection_from_homepage(home)
     first = current.questions[0]
@@ -133,14 +141,17 @@ def submit_preview(
         # Match the observed legacy JavaScript Boolean(string) conversion.
         # This is distinct from HDN_isUsingRldb, which must be zero above.
         integration_flag = bool(confirmation_fields.get("HDN_isRldbUse", ""))
-        context = {"qi": quiz_id, "ai": attempt_id, "isprv": 1, "dnb": 0, "drc": "", "pg": 1,
+        context = {"qi": quiz_id, "ai": attempt_id, "isprv": 1, "dnb": 0, "drc": "", "pg": page,
                    "cfql": 0, "rldbsv": 1, "fromQB": 0, "cft": "", "d2l_body_type": 1, "ou": course_id}
         parent_path = "/d2l/lms/quizzing/user/attempt/quiz_attempt_iframe_auto.d2l"
         rpc_url = client.canonical_url(parent_path + "file?" + urlencode({**context, "d2l_rh": "rpc", "d2l_rt": "call"}))
         params = {"param1": str(quiz_id), "param2": str(attempt_id), "param3": True,
                   "param4": retain, "param5": integration_flag, "param6": False, "param7": ""}
         response = client._request("POST", rpc_url, stream=True,
-                                   data={"d2l_rf": "ProcessQuizSubmission", "params": json.dumps(params),
+                                   data={"d2l_rf": "ProcessQuizSubmission",
+                                         # Brightspace rejects this RPC (error redirect) unless the
+                                         # params JSON is compact, as the browser sends it.
+                                         "params": json.dumps(params, separators=(",", ":")),
                                          "d2l_referrer": protection.csrf_token, "d2l_hitcode": protection.next_hit_code(),
                                          "d2l_action": "rpc"},
                                    headers={"Referer": client.canonical_url(parent_path + "?" + urlencode(context))})

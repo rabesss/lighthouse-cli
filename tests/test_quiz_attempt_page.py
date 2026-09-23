@@ -9,12 +9,18 @@ from unittest.mock import Mock
 import pytest
 
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
-from lighthouse_cli.quiz_attempt_page import MAX_PAGE_BYTES, PreviewPageError, parse_preview_page
+from lighthouse_cli.quiz_attempt_page import (
+    MAX_PAGE_BYTES,
+    PreviewPageError,
+    PreviewRefusedError,
+    parse_preview_page,
+)
 from lighthouse_cli.quiz_preview_transport import (
     PreviewAdvanceUnknownError,
     PreviewSaveUnknownError,
     PreviewStartUnknownError,
     advance_current_preview,
+    read_server_current_preview,
     save_current_preview_answer,
     start_preview,
 )
@@ -176,10 +182,28 @@ def test_answer_form_resolves_response_flag_and_preserves_sibling_answer():
 
 def test_answer_form_rejects_stale_session_or_unknown_choice():
     page = parse(html(question(1)))
-    with pytest.raises(PreviewPageError):
+    with pytest.raises(PreviewRefusedError, match="not an option"):
         page.answer_fields(101, 999, FormProtection("SESSION_SENTINEL", "123"))
+    with pytest.raises(PreviewRefusedError, match="not on the current preview page"):
+        page.answer_fields(999, 401, FormProtection("SESSION_SENTINEL", "123"))
     with pytest.raises(PreviewPageError):
         page.answer_fields(101, 401, FormProtection("DIFFERENT_SESSION", "123"))
+
+
+def test_answer_refusal_for_an_unsupported_question_type():
+    q = question(1).replace("Question 1: choose true.", 'Question 1: <img alt="diagram">')
+    with pytest.raises(PreviewRefusedError, match="does not support"):
+        parse(html(q)).answer_fields(101, 401, FormProtection("SESSION_SENTINEL", "123"))
+
+
+def test_advance_refusals_are_specific():
+    protection = FormProtection("SESSION_SENTINEL", "123")
+    unsaved = parse(html(question(1, saved="False"), extra="<button>Next Page</button>"))
+    with pytest.raises(PreviewRefusedError, match="Answer and save every question"):
+        unsaved.advance_fields(protection)
+    last = parse(html(question(1)))
+    with pytest.raises(PreviewRefusedError, match="last page"):
+        last.advance_fields(protection)
 
 
 def bootstrap() -> bytes:
@@ -282,9 +306,68 @@ def test_start_follows_typed_callback_without_executing_scripts():
 def test_start_rejects_missing_button_without_creating_attempt():
     client = LighthouseClient(site="trial")
     client.get_raw = Mock(return_value=(b'<h1>Quiz Summary</h1>', {}))
-    with pytest.raises(Exception, match="not available"):
+    client._request = Mock()
+    with pytest.raises(PreviewRefusedError, match="--bypass-availability"):
         start_preview(client, course_id=10, quiz_id=20)
     client.get_raw.assert_called_once()
+    client._request.assert_not_called()
+
+
+def start_client(readback):
+    client = LighthouseClient(site="trial")
+    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
+    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
+    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
+    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
+    client.get_raw = Mock(side_effect=[
+        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
+        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
+        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
+        (b'<script>parent.GoToAttemptQuizAuto( 30,1,0 );</script>', {}),
+        readback,
+    ])
+    return client
+
+
+def test_start_reports_identity_before_the_page_readback():
+    calls = []
+    client = start_client(PreviewPageError())
+    def on_identity(attempt_id, page):
+        calls.append((attempt_id, page, client.get_raw.call_count))
+    with pytest.raises(PreviewStartUnknownError) as exc_info:
+        start_preview(client, course_id=10, quiz_id=20, on_identity=on_identity)
+    assert calls == [(30, 1, 4)]  # before the fifth request (readback)
+    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
+    client._request.assert_called_once()
+
+
+def test_start_identity_callback_failure_is_unknown_with_identity():
+    client = start_client((html(question(1)), {}))
+    with pytest.raises(PreviewStartUnknownError) as exc_info:
+        start_preview(client, course_id=10, quiz_id=20, on_identity=Mock(side_effect=OSError("disk full")))
+    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
+    assert client.get_raw.call_count == 4  # no readback after a failed seal
+    client._request.assert_called_once()
+
+
+def test_server_current_page_is_used_only_for_the_same_preview_attempt():
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(return_value=(html(question(2, page=2), page=2), {}))
+    result = read_server_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+    assert result.page == 2 and result.questions[0]["question_id"] == 102
+    client.get_raw.assert_called_once()
+
+
+@pytest.mark.parametrize("field, value", [("ai", "31"), ("isprv", "0"), ("qi", "21")])
+def test_server_current_page_rejects_another_attempt_or_a_learner_page(field, value):
+    body = html(question(2, page=2), page=2)
+    original = {"ai": "30", "isprv": "1", "qi": "20"}[field]
+    body = body.replace(f'name="{field}" type="hidden" value="{original}"'.encode(),
+                        f'name="{field}" type="hidden" value="{value}"'.encode())
+    client = LighthouseClient(site="trial")
+    client.get_raw = Mock(return_value=(body, {}))
+    with pytest.raises(PreviewPageError):
+        read_server_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
 
 
 def test_start_readback_auth_expiry_is_unknown_after_state_creation():
