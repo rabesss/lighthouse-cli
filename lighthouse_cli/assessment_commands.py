@@ -62,9 +62,7 @@ def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], An
 
 
 @click.group()
-@click.option(
-    "--site", type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True
-)
+@click.option("--site", type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)
 def instructor(site: str) -> None:
     """Inspect and author assessments with your account's course permissions.
 
@@ -74,9 +72,7 @@ def instructor(site: str) -> None:
 
 
 @click.group()
-@click.option(
-    "--site", type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True
-)
+@click.option("--site", type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)
 def student(site: str) -> None:
     """Read learner assessment details and your own submission history."""
 
@@ -84,7 +80,6 @@ def student(site: str) -> None:
 class _LazyPreview(JsonOutputGroup):
     def _implementation(self) -> click.Group:
         from .quiz_preview_commands import preview
-
         return preview
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
@@ -97,9 +92,7 @@ class _LazyPreview(JsonOutputGroup):
         return self._implementation().invoke(ctx)
 
 
-instructor.add_command(
-    _LazyPreview(name="preview", help="Experimental trial-only, checkpointed quiz previews.")
-)
+instructor.add_command(_LazyPreview(name="preview", help="Experimental trial-only, checkpointed quiz previews."))
 
 
 def _register_read(group: click.Group, name: str, resource: str, detail: bool) -> None:
@@ -117,9 +110,7 @@ def _register_read(group: click.Group, name: str, resource: str, detail: bool) -
 for _group in (instructor, student):
     for _resource in ("quiz", "assignment"):
         _register_read(_group, _resource, _resource, True)
-        _register_read(
-            _group, "quizzes" if _resource == "quiz" else "assignments", _resource, False
-        )
+        _register_read(_group, "quizzes" if _resource == "quiz" else "assignments", _resource, False)
 
 
 @instructor.command("quiz-questions", cls=JsonOutputCommand)
@@ -171,31 +162,15 @@ register_course_reads(student, _run)
 register_course_reads(instructor, _run)
 
 
-def _create(
-    course_id: int,
-    resource: str,
-    payload: dict[str, Any],
-    yes: bool,
-    dry_run: bool,
-    json_output: bool,
-) -> None:
+def _create(course_id: int, resource: str, payload: dict[str, Any], yes: bool, dry_run: bool, json_output: bool) -> None:
     site = _site()
     if dry_run:
-        _emit(
-            {
-                "site": site,
-                "course_id": course_id,
-                "dry_run": True,
-                "operation": f"create-{resource}",
-                "data": project(payload),
-            },
-            json_output,
-        )
+        _emit({"site": site, "course_id": course_id, "dry_run": True,
+               "operation": f"create-{resource}", "data": project(payload)}, json_output)
         return
     if not yes:
         if not sys.stdin.isatty() or not click.confirm(
-            f"Create a hidden {resource} on {site}, course {course_id}?",
-            err=True,
+            f"Create a hidden {resource} on {site}, course {course_id}?", err=True,
         ):
             click.echo("Creation cancelled. Use --yes for non-interactive creation.", err=True)
             if json_output:
@@ -223,15 +198,7 @@ def _settings(factory: Callable[[], dict[str, Any]], json_output: bool) -> dict[
 @click.option("--yes", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 @click.option("--json", "json_output", is_flag=True)
-def quiz_create(
-    course_id: int,
-    name: str,
-    layout: str,
-    attempts: int,
-    yes: bool,
-    dry_run: bool,
-    json_output: bool,
-) -> None:
+def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create a hidden quiz shell, with no questions or gradebook link.
 
     Add questions through Brightspace; the public quiz API supports reading
@@ -246,23 +213,11 @@ def quiz_create(
 @click.argument("course_id", type=_ID)
 @click.option("--name", required=True)
 @click.option("--instructions", default="")
-@click.option(
-    "--submission-type", type=click.Choice(["file", "text"]), default="file", show_default=True
-)
+@click.option("--submission-type", type=click.Choice(["file", "text"]), default="file", show_default=True)
 @click.option("--yes", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 @click.option("--json", "json_output", is_flag=True)
-def assignment_create(
-    course_id: int,
-    name: str,
-    instructions: str,
-    submission_type: str,
-    yes: bool,
-    dry_run: bool,
-    json_output: bool,
-) -> None:
+def assignment_create(course_id: int, name: str, instructions: str, submission_type: str, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create a hidden individual assignment, with no gradebook link."""
-    payload = _settings(
-        lambda: assignment_payload(name, instructions, submission_type), json_output
-    )
+    payload = _settings(lambda: assignment_payload(name, instructions, submission_type), json_output)
     _create(course_id, "assignment", payload, yes, dry_run, json_output)

@@ -35,5 +35,7 @@ def navigation_rules(quiz: dict[str, Any]) -> dict[str, Any]:
         ),
         "prevent_moving_backwards": prevent_back,
         "save_before_advancing": True,
-        "can_revisit_previous_pages": (None if prevent_back is None else not prevent_back),
+        "can_revisit_previous_pages": (
+            None if prevent_back is None else not prevent_back
+        ),
     }

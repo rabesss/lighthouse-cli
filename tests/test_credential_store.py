@@ -14,7 +14,6 @@ from lighthouse_cli.auth import CredentialStore, CredentialStoreError
 # Fixtures
 # ---------------------------------------------------------------------------
 
-
 @pytest.fixture
 def config_dir(tmp_path: Path) -> Path:
     d = tmp_path / ".config" / "lighthouse-cli"
@@ -30,7 +29,6 @@ def credentials_path(config_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # VAL-AUTH-013: Encrypted credential storage
 # ---------------------------------------------------------------------------
-
 
 def test_save_credentials_encrypted(
     config_dir: Path,
@@ -88,7 +86,6 @@ def test_credentials_file_permissions(
 # VAL-AUTH-022: Corrupted credentials file
 # ---------------------------------------------------------------------------
 
-
 def test_corrupted_credentials_fallback(
     config_dir: Path,
     credentials_path: Path,
@@ -111,7 +108,6 @@ def test_corrupted_credentials_fallback(
 # VAL-AUTH-023: Encryption key change
 # ---------------------------------------------------------------------------
 
-
 def test_passphrase_sealed_survives_keyring_loss(
     config_dir: Path,
     credentials_path: Path,
@@ -129,7 +125,6 @@ def test_passphrase_sealed_survives_keyring_loss(
     assert doc["key_source"] == "passphrase"
 
     import sys as _sys
-
     monkeypatch.setitem(_sys.modules, "keyring", None)  # import becomes unavailable
     store2 = CredentialStore()
     assert store2.load() == ("user@manipal.edu", "secret_password")
@@ -166,7 +161,6 @@ def test_keyring_sealed_fails_cleanly_on_wrong_key(
 # VAL-AUTH-030 / VAL-AUTH-031: Empty username/password rejection
 # ---------------------------------------------------------------------------
 
-
 def test_empty_password_rejected_in_store(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -196,7 +190,6 @@ def test_empty_username_rejected_in_store(
 # ---------------------------------------------------------------------------
 # VAL-AUTH-029: Custom config directory respected
 # ---------------------------------------------------------------------------
-
 
 def test_config_dir_env_var_respected(
     tmp_path: Path,
@@ -231,7 +224,9 @@ def test_save_rejects_symlinked_config_dir_without_touching_target(
     with pytest.raises(CredentialStoreError) as exc_info:
         CredentialStore().save("user@manipal.edu", "secret")
 
-    assert str(exc_info.value) == ("Credential storage path contains a symlink and cannot be used.")
+    assert str(exc_info.value) == (
+        "Credential storage path contains a symlink and cannot be used."
+    )
     assert sentinel.read_text(encoding="utf-8") == "outside-sentinel"
     assert list(outside.iterdir()) == [sentinel]
 
@@ -287,7 +282,9 @@ def test_legacy_migration_rejects_symlinked_config_dir_without_resealing(
     outside = tmp_path / "outside"
     outside.mkdir()
     key = Fernet.generate_key()
-    fake_keyring.backend.set_password("lighthouse-cli", "credential-key", key.decode("ascii"))
+    fake_keyring.backend.set_password(
+        "lighthouse-cli", "credential-key", key.decode("ascii")
+    )
     legacy = Fernet(key).encrypt(
         json.dumps({"username": "user@manipal.edu", "password": "secret"}).encode()
     )
@@ -329,10 +326,7 @@ def test_ensure_config_dir_rejects_symlink_without_chmod_target(
 # Additional tests for CredentialStore
 # ---------------------------------------------------------------------------
 
-
-def test_store_no_credentials_file_returns_none(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_store_no_credentials_file_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """load() returns None when credentials file doesn't exist."""
     config_dir = tmp_path / ".config" / "lighthouse-cli"
     config_dir.mkdir(parents=True)
@@ -396,7 +390,6 @@ def test_strict_json_loader_rejects_overflowing_floats() -> None:
 # binascii.Error / UnicodeEncodeError / ValueError traceback.
 # ---------------------------------------------------------------------------
 
-
 def _sealed_doc(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Save credentials and return the parsed sealed envelope."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
@@ -405,8 +398,7 @@ def _sealed_doc(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 def test_truncated_kdf_salt_raises_clean_error(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _sealed_doc(config_dir, monkeypatch)
     # 11 chars: not a multiple of 4, so b64decode(validate=True) rejects the
@@ -418,8 +410,7 @@ def test_truncated_kdf_salt_raises_clean_error(
 
 
 def test_non_base64_kdf_salt_raises_clean_error(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _sealed_doc(config_dir, monkeypatch)
     doc["kdf_salt"] = "!!!not-base64!!!"
@@ -429,15 +420,13 @@ def test_non_base64_kdf_salt_raises_clean_error(
 
 
 def test_non_ascii_ciphertext_raises_clean_error(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _sealed_doc(config_dir, monkeypatch)
     doc["ciphertext"] = "gAAAA-ünïcödé-ciphertext"
     (config_dir / "credentials.json").write_text(json.dumps(doc))
     with pytest.raises(CredentialStoreError):
         CredentialStore().load()
-
 
 def test_corrupt_keyring_entry_raises_clean_error(
     config_dir: Path,
@@ -448,15 +437,9 @@ def test_corrupt_keyring_entry_raises_clean_error(
     """A hand-mangled keyring entry wraps Fernet's raw ValueError cleanly."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     fake_keyring.set_password("lighthouse-cli", "credential-key", "not-a-fernet-key")
-    credentials_path.write_text(
-        json.dumps(
-            {
-                "v": 2,
-                "key_source": "keyring",
-                "ciphertext": "gAAAAA",
-            }
-        )
-    )
+    credentials_path.write_text(json.dumps({
+        "v": 2, "key_source": "keyring", "ciphertext": "gAAAAA",
+    }))
     with pytest.raises(CredentialStoreError):
         CredentialStore().load()
 
@@ -465,10 +448,8 @@ def test_corrupt_keyring_entry_raises_clean_error(
 # F15: the passphrase-derived-key cache is bounded.
 # ---------------------------------------------------------------------------
 
-
 def test_passphrase_key_cache_is_bounded(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from lighthouse_cli.credential_store import _derive_passphrase_key
 
@@ -480,8 +461,7 @@ def test_passphrase_key_cache_is_bounded(
 
 
 def test_passphrase_envelope_records_kdf_iterations(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sealed envelopes record their KDF count; envelopes from before the
     field existed still open via the pre-record fallback (no orphans)."""
@@ -508,7 +488,6 @@ def test_passphrase_envelope_records_kdf_iterations(
     with pytest.raises(CredentialStoreError):
         CredentialStore().load()
 
-
 @pytest.mark.parametrize("bad_iterations", [True, 0, -1, "600000", 600_001, 10**12])
 def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
     config_dir: Path,
@@ -518,11 +497,9 @@ def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
     doc = _sealed_doc(config_dir, monkeypatch)
     doc["kdf_iterations"] = bad_iterations
     (config_dir / "credentials.json").write_text(json.dumps(doc))
-    expected = (
-        "unsupported KDF iteration"
-        if isinstance(bad_iterations, int) and not isinstance(bad_iterations, bool)
-        else "invalid KDF iteration"
-    )
+    expected = "unsupported KDF iteration" if isinstance(
+        bad_iterations, int
+    ) and not isinstance(bad_iterations, bool) else "invalid KDF iteration"
     with pytest.raises(CredentialStoreError, match=expected) as exc_info:
         CredentialStore().load()
     if isinstance(bad_iterations, int) and not isinstance(bad_iterations, bool):

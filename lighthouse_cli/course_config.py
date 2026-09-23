@@ -158,13 +158,11 @@ def _entries(config: dict[str, dict[str, str]]) -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
     for course_id, entry in sorted(normalized, key=lambda item: item[0]):
         name, semester = _safe_tracked_labels(entry)
-        entries.append(
-            {
-                "id": str(course_id),
-                "name": name,
-                "semester": semester,
-            }
-        )
+        entries.append({
+            "id": str(course_id),
+            "name": name,
+            "semester": semester,
+        })
     return entries
 
 
@@ -228,7 +226,8 @@ def cmd_config_courses(
                 (
                     raw_id
                     for raw_id, entry in config.items()
-                    if _positive_course_id(raw_id) == remove_id and isinstance(entry, dict)
+                    if _positive_course_id(raw_id) == remove_id
+                    and isinstance(entry, dict)
                 ),
                 None,
             )
@@ -259,9 +258,7 @@ def cmd_config_courses(
             if json_output:
                 _output_json([])
             else:
-                print(
-                    "No courses tracked. Run: lighthouse config courses (without flags) to set up."
-                )
+                print("No courses tracked. Run: lighthouse config courses (without flags) to set up.")
             return 0
         entries = _entries(config)
         if json_output:
@@ -269,10 +266,7 @@ def cmd_config_courses(
             return 0
         _print_table(
             ["ID", "Name", "Semester"],
-            [
-                [e["id"], _short(e["name"], 45), e["semester"].strip() or "Unmapped"]
-                for e in entries
-            ],
+            [[e["id"], _short(e["name"], 45), e["semester"].strip() or "Unmapped"] for e in entries],
             title=f"Tracked Courses ({len(entries)})",
         )
         return 0
@@ -295,7 +289,8 @@ def cmd_config_courses(
             (
                 (course["OrgUnitId"], course["Name"])
                 for course in courses
-                if course["OrgUnitId"] == needle or course["Name"].casefold() == needle.casefold()
+                if course["OrgUnitId"] == needle
+                or course["Name"].casefold() == needle.casefold()
             ),
             None,
         )
@@ -323,16 +318,18 @@ def cmd_config_courses(
     table_rows = []
     for course in courses:
         tracked = config.get(course["OrgUnitId"])
-        tracked_semester = _safe_tracked_labels(tracked)[1] if isinstance(tracked, Mapping) else ""
-        tracking = f"-> {tracked_semester}" if tracked_semester else ("tracked" if tracked else "")
-        table_rows.append(
-            [
-                course["OrgUnitId"],
-                _short(course["Name"], 40),
-                _short(course["Code"], 35),
-                tracking,
-            ]
+        tracked_semester = (
+            _safe_tracked_labels(tracked)[1]
+            if isinstance(tracked, Mapping)
+            else ""
         )
+        tracking = f"-> {tracked_semester}" if tracked_semester else ("tracked" if tracked else "")
+        table_rows.append([
+            course["OrgUnitId"],
+            _short(course["Name"], 40),
+            _short(course["Code"], 35),
+            tracking,
+        ])
     _print_table(
         ["ID", "Name", "Code", "Tracked"],
         table_rows,
@@ -376,7 +373,11 @@ def cmd_config_courses(
     for oid in sorted(selected_ids, key=lambda x: int(x) if x.isdigit() else 0):
         name = course_lookup.get(oid, oid)
         tracked = config.get(oid)
-        existing = _safe_tracked_labels(tracked)[1] if isinstance(tracked, Mapping) else ""
+        existing = (
+            _safe_tracked_labels(tracked)[1]
+            if isinstance(tracked, Mapping)
+            else ""
+        )
         prompt = f"  Semester for {name} ({oid}){' [' + existing + ']' if existing else ''}: "
         try:
             sem = input(prompt).strip()
@@ -389,8 +390,6 @@ def cmd_config_courses(
         save(config)
     except Exception as e:
         return _config_error(e, json_output)
-    print(
-        f"\nUpdated tracking config: {len([oid for oid in selected_ids if oid in config])} course(s) updated."
-    )
+    print(f"\nUpdated tracking config: {len([oid for oid in selected_ids if oid in config])} course(s) updated.")
     print("View tracked courses: lighthouse config courses --list")
     return 0

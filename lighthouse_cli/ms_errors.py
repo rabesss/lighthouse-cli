@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 
 _UPSTREAM_URL_RE = re.compile(r"(?i)(?:https?://|//)[^\s<>'\"]+")
-_UPSTREAM_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_UPSTREAM_EMAIL_RE = re.compile(
+    r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
+)
 _UPSTREAM_PHONE_RE = re.compile(r"(?<!\d)\+?\d[\d .()*-]{5,}\d(?!\d)")
 _UPSTREAM_SECRET_MARKERS = (
     "password",
@@ -53,21 +55,21 @@ _UPSTREAM_SECRET_KEY_VALUE_RE = re.compile(
     r"(?:\s*(?:[:=]\s*|\b(?:is|was)\b\s+|\s+)"
     r"[\"']?[^\s,;}\]]+[\"']?)"
 )
-_UPSTREAM_FLAG_VALUE_RE = re.compile(r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;)}\]]+")
+_UPSTREAM_FLAG_VALUE_RE = re.compile(
+    r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;)}\]]+"
+)
 _STRUCTURAL_PAGE_MARKER_RE = re.compile(
     r"(?i)\b(?:arrUserProofs|otc-input|ProcessAuth-form|KmsiInterrupt|"
     r"ConvergedTFA|SAMLResponse|sFT-present|urlPost|oPostParams|sso_reload)=[01]\b"
 )
-_SAFE_UPSTREAM_PHRASES = frozenset(
-    {
-        "password is incorrect",
-        "password is incorrect.",
-        "invalid username or password.",
-        "your account is locked.",
-        "account is locked.",
-        "code send failed",
-    }
-)
+_SAFE_UPSTREAM_PHRASES = frozenset({
+    "password is incorrect",
+    "password is incorrect.",
+    "invalid username or password.",
+    "your account is locked.",
+    "account is locked.",
+    "code send failed",
+})
 
 
 def _contains_upstream_secret(text: str) -> bool:
@@ -120,7 +122,6 @@ def safe_diagnostic_text(value: object, *, fallback: str) -> str:
         return fallback
     return text
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -159,14 +160,12 @@ SERVER_SENT_CODE_AUTH_IDS = frozenset({MFA_AUTH_SMS})
 # Methods completed by approving on another device instead of typing a code.
 # Voice calls prompt the user to press #; Authenticator push may require number
 # matching. EndAuth is polled without AdditionalAuthData for all of them.
-CODELESS_APPROVAL_AUTH_IDS = frozenset(
-    {
-        MFA_AUTH_APP_NOTIFY,
-        MFA_AUTH_VOICE_MOBILE,
-        MFA_AUTH_VOICE_ALT_MOBILE,
-        MFA_AUTH_VOICE_OFFICE,
-    }
-)
+CODELESS_APPROVAL_AUTH_IDS = frozenset({
+    MFA_AUTH_APP_NOTIFY,
+    MFA_AUTH_VOICE_MOBILE,
+    MFA_AUTH_VOICE_ALT_MOBILE,
+    MFA_AUTH_VOICE_OFFICE,
+})
 
 # Methods that submit a code through EndAuth's AdditionalAuthData: the
 # server-sent SMS/WhatsApp code and the offline Authenticator TOTP.
@@ -223,7 +222,6 @@ MS_ERROR_CODES: dict[int, str] = {
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
-
 
 class MicrosoftSSOError(Exception):
     """Raised when any step of the Microsoft SSO flow fails."""

@@ -148,7 +148,9 @@ HIDDENFORM_HTML = (
 )
 
 SAML_REQUEST_HTML = (
-    f"<html><script>window.location='{ACS_URL}?SAMLRequest=REQ&RelayState=x';</script></html>"
+    "<html><script>"
+    f"window.location='{ACS_URL}?SAMLRequest=REQ&RelayState=x';"
+    "</script></html>"
 )
 
 
@@ -298,14 +300,7 @@ def read_pending() -> dict[str, Any] | None:
 
 
 def begin_success() -> FakeResponse:
-    return FakeResponse(
-        json_data={
-            "Success": True,
-            "SessionId": "SID-A",
-            "FlowToken": "BEGIN-FT",
-            "Ctx": "BEGIN-CTX",
-        }
-    )
+    return FakeResponse(json_data={"Success": True, "SessionId": "SID-A", "FlowToken": "BEGIN-FT", "Ctx": "BEGIN-CTX"})
 
 
 def end_success() -> FakeResponse:
@@ -318,9 +313,7 @@ def end_success() -> FakeResponse:
 
 
 class TestPasswordFlow:
-    def test_direct_saml_after_password(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_direct_saml_after_password(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """Password POST returns the SAML form directly; ACS sets cookies."""
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
@@ -339,9 +332,7 @@ class TestPasswordFlow:
         assert ("POST", CREDS_POST_URL) in methods_urls
         assert ("POST", ACS_URL) in methods_urls
 
-    def test_wrong_password_error_page(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_wrong_password_error_page(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """Microsoft error page becomes a clean MicrosoftSSOError."""
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
@@ -351,9 +342,7 @@ class TestPasswordFlow:
         with pytest.raises(MicrosoftSSOError, match="50126"):
             run_login(scripted)
 
-    def test_redirect_chain_after_password(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_redirect_chain_after_password(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """A 302 after the password POST is followed to the SAML page."""
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
@@ -369,9 +358,7 @@ class TestPasswordFlow:
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("GET", f"{MS_BASE}/saml/landing") in scripted.calls
 
-    def test_acs_without_cookies_falls_back_to_home(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_acs_without_cookies_falls_back_to_home(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """When ACS sets no cookies the driver probes /d2l/home before failing."""
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
@@ -405,9 +392,7 @@ class TestPasswordFlow:
 
         assert ("GET", expected_next) in scripted.calls
 
-    def test_unexpected_response_error_carries_page_shape(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_unexpected_response_error_carries_page_shape(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """The neither-MFA-nor-error-nor-SAML branch enriches its error with the
         sanitized page-shape summary (status/url/pgid/markers)."""
         scripted.enqueue(
@@ -416,29 +401,19 @@ class TestPasswordFlow:
             # Genuinely unrecognized page: not MFA, not an error page, no
             # SAMLResponse, and no walk-recognizable markers (a KMSI page
             # would now be submitted inline by the bounded walk).
-            FakeResponse(
-                200,
-                html="<html><head><title>Mystery</title></head><body>huh</body></html>",
-                url=CREDS_POST_URL,
-            ),
+            FakeResponse(200, html="<html><head><title>Mystery</title></head><body>huh</body></html>", url=CREDS_POST_URL),
         )
         with pytest.raises(MicrosoftSSOError, match=r"Unexpected response — page:"):
             run_login(scripted)
 
     def test_probe_rejects_unrecognized_post_credentials_page(
-        self,
-        scripted: ScriptedSession,
-        isolated_config: Path,
+        self, scripted: ScriptedSession, isolated_config: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(), url=MS_SSO_URL),
-            FakeResponse(
-                200,
-                html="<html><head><title>Mystery</title></head><body>huh</body></html>",
-                url=CREDS_POST_URL,
-            ),
+            FakeResponse(200, html="<html><head><title>Mystery</title></head><body>huh</body></html>", url=CREDS_POST_URL),
         )
         client = make_client(scripted)
         with pytest.raises(MicrosoftSSOError, match="unrecognized page"):
@@ -487,9 +462,7 @@ class TestPasswordFlow:
 
 class TestUsernameBootstrap:
     def test_http_bootstrap_when_playwright_missing(
-        self,
-        scripted: ScriptedSession,
-        isolated_config: Path,
+        self, scripted: ScriptedSession, isolated_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Without Playwright the browser pre-password requests are mirrored over HTTP."""
@@ -505,11 +478,8 @@ class TestUsernameBootstrap:
             FakeResponse(200, html="{}", url="https://login.live.com/Me.htm?v=3"),
             FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
             FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
-            FakeResponse(
-                200,
-                json_data={"FlowToken": "FLOW-TOKEN-2", "apiCanary": "API-CANARY-2"},
-                url=f"{MS_BASE}/common/GetCredentialType",
-            ),
+            FakeResponse(200, json_data={"FlowToken": "FLOW-TOKEN-2", "apiCanary": "API-CANARY-2"},
+                         url=f"{MS_BASE}/common/GetCredentialType"),
             FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
             FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
             # Password POST lands on SAML directly
@@ -528,19 +498,14 @@ class TestUsernameBootstrap:
         assert f"{MS_BASE}/common/GetCredentialType" in urls
 
     def test_playwright_launch_failure_falls_back_to_http(
-        self,
-        scripted: ScriptedSession,
-        isolated_config: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
+        self, scripted: ScriptedSession, isolated_config: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Playwright importable but Chromium missing: warn on stderr and
         continue via the mirrored HTTP sequence instead of failing login."""
         fake_api = ModuleType("playwright.sync_api")
-
         def boom(*a: Any, **k: Any) -> None:
             raise RuntimeError("chromium executable missing")
-
         fake_api.sync_playwright = boom  # type: ignore[attr-defined]
         fake_root = ModuleType("playwright")
         fake_root.sync_api = fake_api  # type: ignore[attr-defined]
@@ -554,11 +519,8 @@ class TestUsernameBootstrap:
             FakeResponse(200, html="{}", url="https://login.live.com/Me.htm?v=3"),
             FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
             FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
-            FakeResponse(
-                200,
-                json_data={"FlowToken": "FLOW-TOKEN-2"},
-                url=f"{MS_BASE}/common/GetCredentialType",
-            ),
+            FakeResponse(200, json_data={"FlowToken": "FLOW-TOKEN-2"},
+                         url=f"{MS_BASE}/common/GetCredentialType"),
             FakeResponse(200, html="", url=f"{MS_BASE}/ssoprobe"),
             FakeResponse(200, json_data={}, url=f"{MS_BASE}/dssostatus"),
             FakeResponse(200, html=SAML_HTML, url=CREDS_POST_URL),
@@ -577,19 +539,15 @@ class TestUsernameBootstrap:
         assert captured.out == ""
 
     def test_playwright_failure_surfaces_when_http_also_fails(
-        self,
-        scripted: ScriptedSession,
-        isolated_config: Path,
+        self, scripted: ScriptedSession, isolated_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Both paths unusable: the login fails (here via the HTTP path's own
         transport error) rather than swallowing it after the Playwright
         warning; the CLI-level wrapper renders it without a raw traceback."""
         fake_api = ModuleType("playwright.sync_api")
-
         def boom(*a: Any, **k: Any) -> None:
             raise RuntimeError("chromium executable missing")
-
         fake_api.sync_playwright = boom  # type: ignore[attr-defined]
         fake_root = ModuleType("playwright")
         fake_root.sync_api = fake_api  # type: ignore[attr-defined]
@@ -611,9 +569,7 @@ class TestUsernameBootstrap:
             run_login(scripted)
 
     def test_playwright_semantic_failure_does_not_fall_back(
-        self,
-        scripted: ScriptedSession,
-        isolated_config: Path,
+        self, scripted: ScriptedSession, isolated_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fake_api = ModuleType("playwright.sync_api")
@@ -629,7 +585,9 @@ class TestUsernameBootstrap:
                 MicrosoftSSOError("semantic page failure", step="prepare username")
             ),
         )
-        http_fallback = patch.object(MicrosoftSSOClient, "_step_prepare_username_http")
+        http_fallback = patch.object(
+            MicrosoftSSOClient, "_step_prepare_username_http"
+        )
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(url_get_credential_type=True), url=MS_SSO_URL),
@@ -646,9 +604,7 @@ class TestUsernameBootstrap:
 
 
 class TestConvergedMfa:
-    def _mfa_script_head(
-        self, scripted: ScriptedSession, auth_method_id: str = "PhoneAppOTP"
-    ) -> None:
+    def _mfa_script_head(self, scripted: ScriptedSession, auth_method_id: str = "PhoneAppOTP") -> None:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(), url=MS_SSO_URL),
@@ -674,9 +630,7 @@ class TestConvergedMfa:
         assert ("POST", PROCESS_URL) in scripted.calls
         assert read_pending() is None
 
-    def test_app_notification_polls_until_approval(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_app_notification_polls_until_approval(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """PhoneAppNotification polls EndAuth while Retry=true, then finishes."""
         self._mfa_script_head(scripted, "PhoneAppNotification")
         scripted.enqueue(
@@ -694,9 +648,7 @@ class TestConvergedMfa:
         end_posts = [u for m, u in scripted.calls if m == "POST" and u == END_URL]
         assert len(end_posts) == 2
 
-    def test_method_mismatch_rejected(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_method_mismatch_rejected(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """--mfa-method app on an SMS-only account fails before BeginAuth."""
         self._mfa_script_head(scripted, "OneWaySMS")
         with pytest.raises(MicrosoftSSOError, match="not available"):
@@ -712,9 +664,7 @@ class TestConvergedMfa:
             run_login(scripted, totp_code=TOTP_CODE, mfa_method="auto")
         assert ("POST", BEGIN_URL) not in scripted.calls
 
-    def test_begin_auth_failure_raises(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_begin_auth_failure_raises(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """BeginAuth rejection surfaces a clean error."""
         self._mfa_script_head(scripted, "PhoneAppOTP")
         scripted.enqueue(
@@ -723,9 +673,7 @@ class TestConvergedMfa:
         with pytest.raises(MicrosoftSSOError, match="MFA setup failed"):
             run_login(scripted, totp_code=TOTP_CODE)
 
-    def test_end_auth_invalid_json_raises_cleanly(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_end_auth_invalid_json_raises_cleanly(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """Non-JSON EndAuth response becomes a clean MicrosoftSSOError."""
         self._mfa_script_head(scripted, "PhoneAppOTP")
         scripted.enqueue(
@@ -735,9 +683,7 @@ class TestConvergedMfa:
         with pytest.raises(MicrosoftSSOError, match="EndAuth"):
             run_login(scripted, totp_code=TOTP_CODE)
 
-    def test_legacy_form_mfa_posts_otc_form(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_legacy_form_mfa_posts_otc_form(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """Older MFA pages without arrUserProofs fall back to the otc form POST."""
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
@@ -789,9 +735,7 @@ class TestPostMfaInterstitials:
             end_success(),
         )
 
-    def test_kmsi_interrupt_submitted(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_kmsi_interrupt_submitted(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """KmsiInterrupt page is auto-submitted ('Stay signed in')."""
         self._head(scripted)
         scripted.enqueue(
@@ -807,9 +751,7 @@ class TestPostMfaInterstitials:
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("POST", f"{MS_BASE}/common/login") in scripted.calls
 
-    def test_cmsi_interrupt_submitted(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_cmsi_interrupt_submitted(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """CmsiInterrupt page is auto-submitted like KMSI."""
         self._head(scripted)
         scripted.enqueue(
@@ -823,9 +765,7 @@ class TestPostMfaInterstitials:
         cookies = run_login(scripted, totp_code=TOTP_CODE)
         assert set(cookies.keys()) == set(COOKIE_NAMES)
 
-    def test_hiddenform_interstitial_auto_submitted(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_hiddenform_interstitial_auto_submitted(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """Microsoft auto-submit hiddenform pages are POSTed with their fields."""
         self._head(scripted)
         scripted.enqueue(
@@ -840,9 +780,7 @@ class TestPostMfaInterstitials:
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("POST", f"{MS_BASE}/common/final") in scripted.calls
 
-    def test_saml_request_walker_follows_js_redirect(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_saml_request_walker_follows_js_redirect(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """A JS window.location carrying SAMLRequest is fetched (no SAMLResponse yet)."""
         self._head(scripted)
         scripted.enqueue(
@@ -857,18 +795,12 @@ class TestPostMfaInterstitials:
         assert set(cookies.keys()) == set(COOKIE_NAMES)
         assert ("GET", f"{ACS_URL}?SAMLRequest=REQ&RelayState=x") in scripted.calls
 
-    def test_processauth_redirect_chain(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_processauth_redirect_chain(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """ProcessAuth 302 chains are followed until SAML appears."""
         self._head(scripted)
         scripted.enqueue(
             FakeResponse(302, url=PROCESS_URL, headers={"Location": "/hop1"}),
-            FakeResponse(
-                302,
-                url=f"{MS_BASE}/hop1",
-                headers={"Location": "https://lighthouse.manipal.edu/hop2"},
-            ),
+            FakeResponse(302, url=f"{MS_BASE}/hop1", headers={"Location": "https://lighthouse.manipal.edu/hop2"}),
             FakeResponse(200, html=SAML_HTML, url=f"{BASE}/hop2"),
             FakeResponse(200, html="<html>D2L home</html>", url=f"{BASE}/d2l/home"),
         )
@@ -888,9 +820,7 @@ class TestDeferAndResume:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
             FakeResponse(200, html=config_html(), url=MS_SSO_URL),
-            FakeResponse(
-                200, html=mfa_html(auth_method_id="OneWaySMS", display="SMS"), url=MFA_PAGE_URL
-            ),
+            FakeResponse(200, html=mfa_html(auth_method_id="OneWaySMS", display="SMS"), url=MFA_PAGE_URL),
             begin_success(),
         )
         with pytest.raises(MfaPendingError):
@@ -946,7 +876,9 @@ class TestDeferAndResume:
             begin_success(),
         )
         with pytest.raises(MfaPendingError, match="press #"):
-            run_login(scripted, mfa_method="call", defer_mfa_to_pending=True)
+            run_login(
+                scripted, mfa_method="call", defer_mfa_to_pending=True
+            )
 
         scripted.enqueue(
             end_success(),
@@ -969,11 +901,8 @@ class TestDeferAndResume:
         assert "AdditionalAuthData" not in end_calls[-1]["json"]
 
     def test_push_defer_verify_prints_number_match_on_non_tty_stderr(
-        self,
-        scripted: ScriptedSession,
-        isolated_config: Path,
-        capsys: pytest.CaptureFixture[str],
-        monkeypatch: pytest.MonkeyPatch,
+        self, scripted: ScriptedSession, isolated_config: Path,
+        capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         scripted.enqueue(
             FakeResponse(302, url=LOGIN_INIT_URL, headers={"Location": MS_SSO_URL}),
@@ -986,7 +915,9 @@ class TestDeferAndResume:
             begin_success(),
         )
         with pytest.raises(MfaPendingError, match="approval requested"):
-            run_login(scripted, mfa_method="push", defer_mfa_to_pending=True)
+            run_login(
+                scripted, mfa_method="push", defer_mfa_to_pending=True
+            )
 
         scripted.enqueue(
             FakeResponse(json_data={"Retry": True, "Entropy": "42"}),
@@ -1013,9 +944,7 @@ class TestDeferAndResume:
         assert end_calls
         assert all("AdditionalAuthData" not in call["json"] for call in end_calls)
 
-    def test_verify_without_pending_fails_cleanly(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_verify_without_pending_fails_cleanly(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         client = make_client(scripted)
         try:
             with pytest.raises(MicrosoftSSOError, match="No pending MFA session"):
@@ -1060,14 +989,10 @@ class TestDeferAndResume:
             client.close()
 
         assert set(cookies.keys()) == set(COOKIE_NAMES)
-        assert [c for c in scripted.calls[3:] if c == ("POST", END_URL)].count(
-            ("POST", END_URL)
-        ) == 1
+        assert [c for c in scripted.calls[3:] if c == ("POST", END_URL)].count(("POST", END_URL)) == 1
         assert read_pending() is None
 
-    def test_kmsi_checkpoint_resumable(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_kmsi_checkpoint_resumable(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """A KMSI page reached during verify is checkpointed; a second verify
         resumes by submitting the saved KMSI page directly."""
         self._defer_login(scripted)
@@ -1117,8 +1042,7 @@ class TestDeferAndResume:
         # Verify attempt #1: EndAuth succeeds, then ProcessAuth returns a
         # terminal Microsoft page rather than a transport exception.
         scripted.enqueue(
-            end_success(),
-            FakeResponse(200, html=ERROR_HTML, url=PROCESS_URL),
+            end_success(), FakeResponse(200, html=ERROR_HTML, url=PROCESS_URL),
         )
         client = make_client(scripted)
         try:
@@ -1146,14 +1070,10 @@ class TestDeferAndResume:
             client.close()
 
         assert set(cookies.keys()) == set(COOKIE_NAMES)
-        assert [c for c in scripted.calls[3:] if c == ("POST", END_URL)].count(
-            ("POST", END_URL)
-        ) == 1
+        assert [c for c in scripted.calls[3:] if c == ("POST", END_URL)].count(("POST", END_URL)) == 1
         assert read_pending() is None
 
-    def test_wrong_code_clears_pending(
-        self, scripted: ScriptedSession, isolated_config: Path
-    ) -> None:
+    def test_wrong_code_clears_pending(self, scripted: ScriptedSession, isolated_config: Path) -> None:
         """A rejected code clears the checkpoint (must request a fresh one)."""
         self._defer_login(scripted)
 
@@ -1207,13 +1127,10 @@ class TestDeferAndResume:
         self._defer_login(scripted)
 
         scripted.enqueue(
-            FakeResponse(
-                json_data={
-                    "Success": False,
-                    "Retry": False,
-                    "ResultValue": "AuthenticationPreviouslyCompleted",
-                }
-            ),
+            FakeResponse(json_data={
+                "Success": False, "Retry": False,
+                "ResultValue": "AuthenticationPreviouslyCompleted",
+            }),
         )
         client = make_client(scripted)
         try:
@@ -1277,7 +1194,9 @@ class TestDescribePageShape:
 class TestFlowRecorder:
     """LIGHTHOUSE_DEBUG_FLOW writes sanitized step records only."""
 
-    def test_direct_record_call_strips_userinfo_query_fragment_and_controls(self, tmp_path) -> None:
+    def test_direct_record_call_strips_userinfo_query_fragment_and_controls(
+        self, tmp_path
+    ) -> None:
         from lighthouse_cli.ms_auth import MicrosoftSSOClient
 
         log = tmp_path / "flow-malicious.jsonl"
@@ -1363,7 +1282,9 @@ class TestFlowRecorder:
             "/user/ravish%40learner.manipal.edu%3Ftoken=SECRET",
         ],
     )
-    def test_direct_record_call_does_not_log_email_or_phone_pii(self, tmp_path, path: str) -> None:
+    def test_direct_record_call_does_not_log_email_or_phone_pii(
+        self, tmp_path, path: str
+    ) -> None:
         from lighthouse_cli.ms_auth import MicrosoftSSOClient
 
         log = tmp_path / "flow-pii.jsonl"
@@ -1416,24 +1337,11 @@ class TestFlowRecorder:
         log = tmp_path / "flow.jsonl"
         client = MicrosoftSSOClient(flow_log=str(log))
         # GET record via a mocked transport.
-        resp = type(
-            "R",
-            (),
-            {
-                "status_code": 200,
-                "text": "ok",
-                "url": "https://x.test/a?token=SECRET",
-                "headers": {},
-            },
-        )()
+        resp = type("R", (), {"status_code": 200, "text": "ok", "url": "https://x.test/a?token=SECRET", "headers": {}})()
         with patch.object(client._session, "get", return_value=resp):
             client._get("https://x.test/a?token=SECRET")
         # POST records via a mocked transport: field NAMES only, never values.
-        post_resp = type(
-            "R",
-            (),
-            {"status_code": 200, "text": "ok", "url": "https://x.test/login", "headers": {}},
-        )()
+        post_resp = type("R", (), {"status_code": 200, "text": "ok", "url": "https://x.test/login", "headers": {}})()
         with patch.object(client._session, "post", return_value=post_resp):
             client._post("https://x.test/login", data={"passwd": "SECRETVALUE", "login": "user"})
         log_text = log.read_text()
@@ -1472,22 +1380,10 @@ class TestFlowRecorder:
         client._session = ScriptedSession()
         client._session.enqueue(
             FakeResponse(200, html="", url="https://login.live.com/Me.htm?v=3"),
-            FakeResponse(
-                200,
-                html="",
-                url="https://autologon.microsoftazuread-sso.com/common/winauth/ssoprobe",
-            ),
+            FakeResponse(200, html="", url="https://autologon.microsoftazuread-sso.com/common/winauth/ssoprobe"),
             FakeResponse(200, json_data={}, url=f"{MS_BASE}/common/instrumentation/dssostatus"),
-            FakeResponse(
-                200,
-                json_data={"FlowToken": "FLOW-TOKEN-2"},
-                url=f"{MS_BASE}/common/GetCredentialType",
-            ),
-            FakeResponse(
-                200,
-                html="",
-                url="https://autologon.microsoftazuread-sso.com/common/winauth/ssoprobe",
-            ),
+            FakeResponse(200, json_data={"FlowToken": "FLOW-TOKEN-2"}, url=f"{MS_BASE}/common/GetCredentialType"),
+            FakeResponse(200, html="", url="https://autologon.microsoftazuread-sso.com/common/winauth/ssoprobe"),
             FakeResponse(200, json_data={}, url=f"{MS_BASE}/common/instrumentation/dssostatus"),
         )
         config = {
@@ -1517,13 +1413,9 @@ class TestGctMalformedResponse:
         client = MicrosoftSSOClient(flow_log=str(tmp_path / "flow.jsonl"))
         client._session = ScriptedSession()
         client._session.enqueue(FakeResponse(200, html="<html>not json</html>"))
-        config = {
-            "sFT": "tok",
-            "sCtx": "ctx",
-            "urlPost": "/common/login",
-            "urlGetCredentialType": "/common/GetCredentialType",
-            "_ms_url": "https://login.microsoftonline.com/x",
-        }
+        config = {"sFT": "tok", "sCtx": "ctx", "urlPost": "/common/login",
+                  "urlGetCredentialType": "/common/GetCredentialType",
+                  "_ms_url": "https://login.microsoftonline.com/x"}
         out = client._step_get_credential_type(config, "user@example.edu")
         assert out == config  # unchanged, no UnboundLocalError
         records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
@@ -1541,13 +1433,9 @@ class TestGctMalformedResponse:
         client = MicrosoftSSOClient(flow_log=str(tmp_path / "flow.jsonl"))
         client._session = ScriptedSession()
         client._session.enqueue(FakeResponse(200, json_data=payload))
-        config = {
-            "sFT": "tok",
-            "sCtx": "ctx",
-            "urlPost": "/common/login",
-            "urlGetCredentialType": "/common/GetCredentialType",
-            "_ms_url": "https://login.microsoftonline.com/x",
-        }
+        config = {"sFT": "tok", "sCtx": "ctx", "urlPost": "/common/login",
+                  "urlGetCredentialType": "/common/GetCredentialType",
+                  "_ms_url": "https://login.microsoftonline.com/x"}
         out = client._step_get_credential_type(config, "user@example.edu")
         assert out == config  # unchanged, no AttributeError on .keys()
         records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
@@ -1571,13 +1459,9 @@ class TestGctMalformedResponse:
         client = MicrosoftSSOClient(flow_log=str(tmp_path / "flow.jsonl"))
         client._session = ScriptedSession()
         client._session.enqueue(SimplejsonStyleResponse(200))
-        config = {
-            "sFT": "tok",
-            "sCtx": "ctx",
-            "urlPost": "/common/login",
-            "urlGetCredentialType": "/common/GetCredentialType",
-            "_ms_url": "https://login.microsoftonline.com/x",
-        }
+        config = {"sFT": "tok", "sCtx": "ctx", "urlPost": "/common/login",
+                  "urlGetCredentialType": "/common/GetCredentialType",
+                  "_ms_url": "https://login.microsoftonline.com/x"}
         out = client._step_get_credential_type(config, "user@example.edu")
         assert out == config  # unchanged — no raw traceback escapes
         records = [json.loads(line) for line in (tmp_path / "flow.jsonl").read_text().splitlines()]
@@ -1618,7 +1502,9 @@ class TestSsoReloadInterstitial:
     def test_empty_opost_params_is_not_interstitial(self) -> None:
         from lighthouse_cli.ms_auth import is_sso_reload_page
 
-        assert not is_sso_reload_page(self._snap(sso_reload_html(o_post_params={})))
+        assert not is_sso_reload_page(
+            self._snap(sso_reload_html(o_post_params={}))
+        )
 
     def test_urlpost_without_sso_reload_is_not_interstitial(self) -> None:
         from lighthouse_cli.ms_auth import is_sso_reload_page
@@ -1655,7 +1541,9 @@ class TestSsoReloadInterstitial:
     def test_cross_origin_reload_target_is_rejected(self) -> None:
         from lighthouse_cli.ms_auth import sso_reload_transition
 
-        html = sso_reload_html(url_post="https://evil.example/login?sso_reload=True")
+        html = sso_reload_html(
+            url_post="https://evil.example/login?sso_reload=True"
+        )
         with pytest.raises(MicrosoftSSOError, match="unsafe re-POST target"):
             sso_reload_transition(self._snap(html), CREDS_POST_URL)
 
@@ -1669,7 +1557,9 @@ class TestSsoReloadInterstitial:
             "https://login.microsoftonline.com:8443/common/login?sso_reload=True",
         ],
     )
-    def test_reload_rejects_unsafe_url_shapes_without_echoing_target(self, url_post: str) -> None:
+    def test_reload_rejects_unsafe_url_shapes_without_echoing_target(
+        self, url_post: str
+    ) -> None:
         from lighthouse_cli.ms_auth import sso_reload_transition
 
         html = sso_reload_html(url_post=url_post)
@@ -1853,7 +1743,9 @@ class TestSsoReloadInterstitial:
         assert hostile not in str(exc.value)
         assert scripted.calls == [("POST", ACS_URL)]
 
-    def test_saml_path_relative_redirect_uses_response_url(self, scripted: ScriptedSession) -> None:
+    def test_saml_path_relative_redirect_uses_response_url(
+        self, scripted: ScriptedSession
+    ) -> None:
         next_url = f"{BASE}/d2l/lp/auth/saml/next"
         scripted.enqueue(
             FakeResponse(302, url=ACS_URL, headers={"Location": "next"}),
@@ -1875,7 +1767,10 @@ class TestSsoReloadInterstitial:
         from lighthouse_cli.ms_auth import sso_reload_transition
 
         html = sso_reload_html(
-            url_post=("https://login.microsoftonline.com:443/tenant-id/login?sso_reload=True")
+            url_post=(
+                "https://login.microsoftonline.com:443/tenant-id/login"
+                "?sso_reload=True"
+            )
         )
         transition = sso_reload_transition(self._snap(html), CREDS_POST_URL)
 
@@ -1887,7 +1782,10 @@ class TestSsoReloadInterstitial:
         from lighthouse_cli.ms_auth import sso_reload_transition
 
         html = sso_reload_html(
-            url_post=(f"https://login.microsoftonline.com:{port}/tenant-id/login?sso_reload=True")
+            url_post=(
+                f"https://login.microsoftonline.com:{port}/tenant-id/login"
+                "?sso_reload=True"
+            )
         )
 
         with pytest.raises(MicrosoftSSOError, match="unsafe re-POST target"):
@@ -1997,7 +1895,9 @@ class TestSsoReloadInterstitial:
         records = [json.loads(line) for line in raw.splitlines()]
         # The re-POST is recorded by name, like every other form POST.
         repost = [
-            r for r in records if r["method"] == "POST" and "passwd" in (r.get("form_fields") or [])
+            r
+            for r in records
+            if r["method"] == "POST" and "passwd" in (r.get("form_fields") or [])
         ]
         assert repost, "expected the sso_reload re-POST to be recorded"
         # The interstitial page shape flags the new markers.

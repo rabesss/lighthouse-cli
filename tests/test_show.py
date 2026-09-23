@@ -18,9 +18,7 @@ from lighthouse_cli.utils import get_course_name
 
 def test_grades_json_endpoint_failure_is_a_single_json_document() -> None:
     """A failed grades endpoint still returns JSON and a failing exit code."""
-    with patch.object(
-        LighthouseClient, "get_grade_schema", side_effect=RuntimeError("schema down")
-    ):
+    with patch.object(LighthouseClient, "get_grade_schema", side_effect=RuntimeError("schema down")):
         result = CliRunner().invoke(cli, ["grades", "123", "--json"])
 
     assert result.exit_code == 1
@@ -204,7 +202,8 @@ def test_all_course_fanout_supports_a_35_course_roster(monkeypatch, capsys) -> N
 
     monkeypatch.setattr(show, "LighthouseClient", FakeClient)
     courses = [
-        {"OrgUnitId": course_id, "Name": f"Course {course_id}"} for course_id in range(1, 36)
+        {"OrgUnitId": course_id, "Name": f"Course {course_id}"}
+        for course_id in range(1, 36)
     ]
     endpoint_calls = []
 
@@ -258,13 +257,11 @@ def test_all_course_budget_rejects_before_per_course_requests(
     assert endpoint_calls == []
     assert len(clients) == 1
     if json_output:
-        assert json.loads(captured.out) == [
-            {
-                "course_id": None,
-                "items": [],
-                "error": message,
-            }
-        ]
+        assert json.loads(captured.out) == [{
+            "course_id": None,
+            "items": [],
+            "error": message,
+        }]
     else:
         assert captured.out == ""
 
@@ -279,7 +276,8 @@ def test_all_course_workers_reuse_one_client_per_thread(monkeypatch, capsys) -> 
 
     monkeypatch.setattr(show, "LighthouseClient", FakeClient)
     courses = [
-        {"OrgUnitId": course_id, "Name": f"Course {course_id}"} for course_id in range(1, 36)
+        {"OrgUnitId": course_id, "Name": f"Course {course_id}"}
+        for course_id in range(1, 36)
     ]
     monkeypatch.setattr(show, "get_enrolled_course_catalog", lambda _client: courses)
     thread_clients = {}
@@ -389,11 +387,9 @@ def test_grades_all_course_failure_sets_aggregate_exit_code() -> None:
             raise RuntimeError("grades unavailable")
         return [{"Id": 1, "Name": "Quiz", "MaxPoints": 10}]
 
-    with (
-        patch.object(LighthouseClient, "get_courses", return_value=courses),
-        patch.object(LighthouseClient, "get_grade_schema", side_effect=get_schema),
-        patch.object(LighthouseClient, "get_my_grades", return_value=[]),
-    ):
+    with patch.object(LighthouseClient, "get_courses", return_value=courses), \
+        patch.object(LighthouseClient, "get_grade_schema", side_effect=get_schema), \
+        patch.object(LighthouseClient, "get_my_grades", return_value=[]):
         result = CliRunner().invoke(cli, ["grades", "--json"])
 
     assert result.exit_code == 1
@@ -413,7 +409,9 @@ def test_assignments_json_fetches_detail_when_list_omits_attachments() -> None:
             "Text": "Read the brief.",
             "Html": "<p>Read the <b>brief</b>.</p>",
         },
-        "Attachments": [{"Id": 7, "FileName": "brief.pdf", "Size": 42, "Type": "File"}],
+        "Attachments": [
+            {"Id": 7, "FileName": "brief.pdf", "Size": 42, "Type": "File"}
+        ],
     }
 
     payload = show._show_course_assignments(client, 44347, True)
@@ -514,15 +512,11 @@ def test_assignments_json_redacts_secret_shaped_filename() -> None:
     sentinel = "ATTACHMENT_SECRET_SENTINEL"
     folder_sentinel = "FOLDER_SECRET_SENTINEL"
     client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
-        {
-            "Id": 101,
-            "Name": f"password={folder_sentinel}",
-            "Attachments": [
-                {"Id": 7, "FileName": f"password={sentinel}.pdf", "Size": 42, "Type": "File"}
-            ],
-        }
-    ]
+    client.get_dropbox_folders.return_value = [{
+        "Id": 101,
+        "Name": f"password={folder_sentinel}",
+        "Attachments": [{"Id": 7, "FileName": f"password={sentinel}.pdf", "Size": 42, "Type": "File"}],
+    }]
 
     payload = show._show_course_assignments(client, 44347, True)
 
@@ -751,7 +745,8 @@ def test_assignment_view_rejects_malformed_ids_without_echoing_them(
             102,
         ]
         assert [
-            attachment["file_id"] for attachment in result["assignments"][0]["attachments"]
+            attachment["file_id"]
+            for attachment in result["assignments"][0]["attachments"]
         ] == [7, 8]
     else:
         assert result == 0
@@ -834,7 +829,9 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
 
 def test_enrollment_only_name_resolution_and_folder_lookup() -> None:
     client = Mock(spec=LighthouseClient)
-    enrolled = [{"OrgUnitId": 7001, "Name": "Enrollment-only Course", "Code": "E"}]
+    enrolled = [
+        {"OrgUnitId": 7001, "Name": "Enrollment-only Course", "Code": "E"}
+    ]
     client.get_enrolled_courses.return_value = enrolled
     client.get_courses.side_effect = AssertionError("legacy catalog should not be used")
 
@@ -881,10 +878,8 @@ def test_single_course_empty_read_views_have_human_and_json_paths(
 
 
 def test_single_course_empty_grades_have_human_and_json_paths() -> None:
-    with (
-        patch.object(LighthouseClient, "get_grade_schema", return_value=[]),
-        patch.object(LighthouseClient, "get_my_grades", return_value=[]),
-    ):
+    with patch.object(LighthouseClient, "get_grade_schema", return_value=[]), \
+        patch.object(LighthouseClient, "get_my_grades", return_value=[]):
         human = CliRunner().invoke(cli, ["grades", "123"])
         structured = CliRunner().invoke(cli, ["grades", "123", "--json"])
 
@@ -971,23 +966,19 @@ def test_announcements_project_untrusted_fields_without_secret_leak(capsys) -> N
     assert human_rc == 0
     assert structured["announcements"][0]["Title"] == ""
     assert structured["announcements"][0]["Body"] == ""
-    assert structured["announcements"][0]["Attachments"] == [
-        {
-            "Id": 14,
-            "FileName": "good.pdf",
-            "Size": 20,
-            "Type": "File",
-        }
-    ]
+    assert structured["announcements"][0]["Attachments"] == [{
+        "Id": 14,
+        "FileName": "good.pdf",
+        "Size": 20,
+        "Type": "File",
+    }]
     assert structured["announcements"][1]["Title"] == "Valid sibling"
-    assert structured["announcements"][1]["Attachments"] == [
-        {
-            "Id": 21,
-            "FileName": "sibling.pdf",
-            "Size": 30,
-            "Type": "File",
-        }
-    ]
+    assert structured["announcements"][1]["Attachments"] == [{
+        "Id": 21,
+        "FileName": "sibling.pdf",
+        "Size": 30,
+        "Type": "File",
+    }]
     assert sentinel not in json.dumps(structured) + captured.out + captured.err
     assert "Valid sibling" in captured.out
     assert "sibling.pdf" in captured.out
@@ -1136,14 +1127,11 @@ def test_grades_projection_drops_malformed_records_and_fields(capsys) -> None:
 
 
 def test_all_course_empty_human_output_is_quiet() -> None:
-    with (
-        patch.object(
-            LighthouseClient,
-            "get_enrolled_courses",
-            return_value=[{"OrgUnitId": 123, "Name": "Empty Course"}],
-        ),
-        patch.object(LighthouseClient, "get_announcements", return_value=[]),
-    ):
+    with patch.object(
+        LighthouseClient,
+        "get_enrolled_courses",
+        return_value=[{"OrgUnitId": 123, "Name": "Empty Course"}],
+    ), patch.object(LighthouseClient, "get_announcements", return_value=[]):
         result = CliRunner().invoke(cli, ["announcements"])
 
     assert result.exit_code == 0
@@ -1158,14 +1146,11 @@ def test_all_course_json_error_omits_transport_url_and_secret() -> None:
     )
     error.response = response
 
-    with (
-        patch.object(
-            LighthouseClient,
-            "get_enrolled_courses",
-            return_value=[{"OrgUnitId": 123, "Name": "Course"}],
-        ),
-        patch.object(LighthouseClient, "get_announcements", side_effect=error),
-    ):
+    with patch.object(
+        LighthouseClient,
+        "get_enrolled_courses",
+        return_value=[{"OrgUnitId": 123, "Name": "Course"}],
+    ), patch.object(LighthouseClient, "get_announcements", side_effect=error):
         result = CliRunner().invoke(cli, ["announcements", "--json"])
 
     assert result.exit_code == 1

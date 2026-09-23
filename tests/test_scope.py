@@ -95,13 +95,10 @@ def test_course_scope_order_is_deterministic_and_does_not_mutate_inputs() -> Non
 # VAL-SYNC-011 & VAL-SYNC-032: Default to latest semester (highest OrgUnitId)
 # ---------------------------------------------------------------------------
 
-
 class TestLatestSemesterResolution:
     """Test that default (no args) downloads all courses from latest semester."""
 
-    def test_default_downloads_all_courses_from_latest_semester_by_highest_orgunitid(
-        self, cli_runner, tmp_path
-    ):
+    def test_default_downloads_all_courses_from_latest_semester_by_highest_orgunitid(self, cli_runner, tmp_path):
         """VAL-SYNC-011 & VAL-SYNC-032: Latest semester = highest OrgUnitId, not by date or name."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
@@ -121,38 +118,24 @@ class TestLatestSemesterResolution:
         ]
 
         # Map courses to their semester names
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "101": {"name": "Old Course", "semester": "Old Sem"},
-                        "201": {"name": "Newer Course", "semester": "Newer Sem"},
-                        "202": {"name": "Newer Course 2", "semester": "Newer Sem"},
-                        "301": {"name": "Newest Course", "semester": "Newest Sem"},
-                        "302": {"name": "Newest Course 2", "semester": "Newest Sem"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "101": {"name": "Old Course", "semester": "Old Sem"},
+                "201": {"name": "Newer Course", "semester": "Newer Sem"},
+                "202": {"name": "Newer Course 2", "semester": "Newer Sem"},
+                "301": {"name": "Newest Course", "semester": "Newest Sem"},
+                "302": {"name": "Newest Course 2", "semester": "Newest Sem"},
+            }
+        }))
 
         def get_content_toc(cid):
             return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
+                "Modules": [{
+                    "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                        {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                         "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+                    ]
+                }]
             }
 
         def download_topic_file(cid, tid):
@@ -167,14 +150,13 @@ class TestLatestSemesterResolution:
                 {"OrgUnitId": 302, "Name": "Newest Course 2", "Code": "NEWEST"},
             ]
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(LighthouseClient, "get_courses", side_effect=get_courses),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", side_effect=get_courses), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "-o", str(output_dir)],
@@ -195,73 +177,40 @@ class TestLatestSemesterResolution:
         cfg_path = tmp_path / "course-config.json"
 
         semesters = [
-            {
-                "OrgUnitId": 100,
-                "Name": "Sem I",
-                "Code": "0902_I_2025-2026",
-                "StartDate": "2026-09-01T00:00:00Z",
-            },
-            {
-                "OrgUnitId": 200,
-                "Name": "Sem II",
-                "Code": "0902_II_2025-2026",
-                "StartDate": "2026-01-01T00:00:00Z",
-            },
+            {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2025-2026", "StartDate": "2026-09-01T00:00:00Z"},
+            {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2025-2026", "StartDate": "2026-01-01T00:00:00Z"},
         ]
         enrollments = [
             {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"}},
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2025-2026"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid,
-                                "Title": "f",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid, "Title": "f", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2025-2026"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2025-2026"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "-o", str(output_dir)],
@@ -276,7 +225,6 @@ class TestLatestSemesterResolution:
 # ---------------------------------------------------------------------------
 # VAL-SYNC-012: --semester filter
 # ---------------------------------------------------------------------------
-
 
 class TestSemesterFilter:
     """Test --semester filter by name substring or exact ID."""
@@ -298,61 +246,34 @@ class TestSemesterFilter:
             {"OrgUnit": {"Id": 333, "Name": "Course C", "Code": "009_CourseC_0902_III_2025-2026"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                        "333": {"name": "Course C", "semester": "Sem III"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+                "333": {"name": "Course C", "semester": "Sem III"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-                    {
-                        "OrgUnitId": 333,
-                        "Name": "Course C",
-                        "Code": "009_CourseC_0902_III_2025-2026",
-                    },
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
+                 {"OrgUnitId": 333, "Name": "Course C", "Code": "009_CourseC_0902_III_2025-2026"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "Sem III", "-o", str(output_dir)],
@@ -379,55 +300,32 @@ class TestSemesterFilter:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "100", "-o", str(output_dir)],
@@ -442,7 +340,6 @@ class TestSemesterFilter:
 # ---------------------------------------------------------------------------
 # VAL-SYNC-037: Semester not found produces clear error
 # ---------------------------------------------------------------------------
-
 
 class TestSemesterNotFound:
     """Test error when --semester doesn't match any semester."""
@@ -461,28 +358,19 @@ class TestSemesterNotFound:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+            }
+        }))
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "A"},
-                ],
-            ),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "A"},
+             ]):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "Sem X", "-o", str(output_dir)],
@@ -498,7 +386,6 @@ class TestSemesterNotFound:
 # VAL-SYNC-014: Single course by name or ID
 # ---------------------------------------------------------------------------
 
-
 class TestSingleCourse:
     """Test single course download by name substring or numeric ID."""
 
@@ -508,37 +395,19 @@ class TestSingleCourse:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [
-                {
-                    "ModuleId": 1,
-                    "Title": "Mod",
-                    "Modules": [],
-                    "Topics": [
-                        {
-                            "TopicId": 10,
-                            "Title": "f.pdf",
-                            "TypeIdentifier": "File",
-                            "Url": "",
-                            "LastModifiedDate": "2026-01-01T00:00:00Z",
-                        },
-                    ],
-                }
-            ]
+            "Modules": [{
+                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                    {"TopicId": 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+                ]
+            }]
         }
 
-        with (
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
-            patch.object(
-                LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")
-            ),
-        ):
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
+        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
+             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "signals", "-o", str(output_dir)],
@@ -554,7 +423,6 @@ class TestSingleCourse:
 # VAL-SYNC-035: Ambiguous course name match raises error
 # ---------------------------------------------------------------------------
 
-
 class TestAmbiguousCourseName:
     """Test that ambiguous name matching raises error listing all matches."""
 
@@ -563,14 +431,11 @@ class TestAmbiguousCourseName:
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
 
-        with patch.object(
-            LighthouseClient,
-            "get_courses",
-            return_value=[
-                {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
-                {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
-            ],
-        ):
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
+            {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
+        ]):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "math", "-o", str(output_dir)],
@@ -589,7 +454,6 @@ class TestAmbiguousCourseName:
 # VAL-SYNC-036: Course not found raises error
 # ---------------------------------------------------------------------------
 
-
 class TestCourseNotFound:
     """Test non-existent course produces clear error."""
 
@@ -598,13 +462,10 @@ class TestCourseNotFound:
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
 
-        with patch.object(
-            LighthouseClient,
-            "get_courses",
-            return_value=[
-                {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-            ],
-        ):
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
+        ]):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "nonexistent", "-o", str(output_dir)],
@@ -618,7 +479,6 @@ class TestCourseNotFound:
 # ---------------------------------------------------------------------------
 # VAL-SYNC-013 & VAL-SYNC-038 & VAL-SYNC-039 & VAL-SYNC-057: --also flag
 # ---------------------------------------------------------------------------
-
 
 class TestAlsoFlag:
     """Test --also flag for ad-hoc courses outside semester scope."""
@@ -639,57 +499,34 @@ class TestAlsoFlag:
             {"OrgUnit": {"Id": 333, "Name": "Signals", "Code": "S1"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                        "333": {"name": "Signals", "semester": "Sem I"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+                "333": {"name": "Signals", "semester": "Sem I"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-                    {"OrgUnitId": 333, "Name": "Signals", "Code": "S1"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
+                 {"OrgUnitId": 333, "Name": "Signals", "Code": "S1"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "333", "-o", str(output_dir)],
@@ -718,57 +555,34 @@ class TestAlsoFlag:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             if cid == 99999:
                 raise CourseNotFoundError("Course 99999 not found")
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "99999", "-o", str(output_dir)],
@@ -798,70 +612,37 @@ class TestAlsoFlag:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Signals", "semester": "Sem I"},
-                        "333": {"name": "Physics", "semester": "Sem I"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Signals", "semester": "Sem I"},
+                "333": {"name": "Physics", "semester": "Sem I"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                    {"OrgUnitId": 222, "Name": "Signals", "Code": "S1"},
-                    {"OrgUnitId": 333, "Name": "Physics", "Code": "S1"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
+                 {"OrgUnitId": 222, "Name": "Signals", "Code": "S1"},
+                 {"OrgUnitId": 333, "Name": "Physics", "Code": "S1"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
-                [
-                    "download",
-                    "--also",
-                    "Signals",
-                    "--also",
-                    "Physics",
-                    "--also",
-                    "333",
-                    "-o",
-                    str(output_dir),
-                ],
+                ["download", "--also", "Signals", "--also", "Physics", "--also", "333", "-o", str(output_dir)],
             )
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
@@ -870,9 +651,7 @@ class TestAlsoFlag:
             assert "Signals-222" in course_dirs
             assert "Physics-333" in course_dirs
 
-    def test_also_course_already_in_semester_scope_not_double_downloaded(
-        self, cli_runner, tmp_path
-    ):
+    def test_also_course_already_in_semester_scope_not_double_downloaded(self, cli_runner, tmp_path):
         """VAL-SYNC-057: --also for course already in semester scope downloads it once."""
         output_dir = tmp_path / "downloads"
         output_dir.mkdir()
@@ -886,58 +665,35 @@ class TestAlsoFlag:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "222": {"name": "Signals", "semester": "Sem II"},
-                        "333": {"name": "Physics", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Signals", "semester": "Sem II"},
+                "333": {"name": "Physics", "semester": "Sem II"},
+            }
+        }))
 
         download_calls = []
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             download_calls.append(cid)
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 222, "Name": "Signals", "Code": "S2"},
-                    {"OrgUnitId": 333, "Name": "Physics", "Code": "S2"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 222, "Name": "Signals", "Code": "S2"},
+                 {"OrgUnitId": 333, "Name": "Physics", "Code": "S2"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "Signals", "-o", str(output_dir)],
@@ -946,9 +702,7 @@ class TestAlsoFlag:
             assert result.exit_code == 0
             # Signals (222) is already in Sem II scope, --also should not download it twice
             signals_downloads = [c for c in download_calls if c == 222]
-            assert len(signals_downloads) == 1, (
-                f"Signals should be downloaded once, got {len(signals_downloads)}"
-            )
+            assert len(signals_downloads) == 1, f"Signals should be downloaded once, got {len(signals_downloads)}"
             # Physics (333) should be downloaded once
             physics_downloads = [c for c in download_calls if c == 333]
             assert len(physics_downloads) == 1
@@ -957,7 +711,6 @@ class TestAlsoFlag:
 # ---------------------------------------------------------------------------
 # VAL-CROSS-008: Sync command also supports multi-course scope
 # ---------------------------------------------------------------------------
-
 
 class TestSyncMultiCourseScope:
     """Test that sync command also supports multi-course scope options."""
@@ -977,55 +730,32 @@ class TestSyncMultiCourseScope:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["sync", "-o", str(output_dir)],
@@ -1052,55 +782,32 @@ class TestSyncMultiCourseScope:
             {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
         ]
 
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["sync", "--semester", "Sem I", "-o", str(output_dir)],
@@ -1125,55 +832,32 @@ class TestSyncMultiCourseScope:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "111": {"name": "Course A", "semester": "Sem I"},
-                        "222": {"name": "Signals", "semester": "Sem I"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "111": {"name": "Course A", "semester": "Sem I"},
+                "222": {"name": "Signals", "semester": "Sem I"},
+            }
+        }))
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                    {"OrgUnitId": 222, "Name": "Signals", "Code": "S1"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
+                 {"OrgUnitId": 222, "Name": "Signals", "Code": "S1"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             result = cli_runner.invoke(
                 cli,
                 ["sync", "--also", "Signals", "-o", str(output_dir)],
@@ -1188,7 +872,6 @@ class TestSyncMultiCourseScope:
 # ---------------------------------------------------------------------------
 # BLOCKING FIX: Ambiguous --also match raises error listing all matches
 # ---------------------------------------------------------------------------
-
 
 class TestAlsoAmbiguousMatch:
     """Test that _resolve_also_course raises CourseNotFoundError for ambiguous matches."""
@@ -1207,34 +890,24 @@ class TestAlsoAmbiguousMatch:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
-                    {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
-                ],
-            ),
-            patch.object(
-                LighthouseClient,
-                "get_content_toc",
-                return_value={"Modules": []},
-            ),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
+                 {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
+             ]), patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value={"Modules": []},
+             ):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "math", "-o", str(output_dir)],
@@ -1259,33 +932,23 @@ class TestAlsoAmbiguousMatch:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-                ],
-            ),
-            patch.object(
-                LighthouseClient,
-                "get_content_toc",
-                return_value={"Modules": []},
-            ),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
+             ]), patch.object(
+                 LighthouseClient,
+                 "get_content_toc",
+                 return_value={"Modules": []},
+             ):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "--semester", "200", "--also", "nonexistent", "-o", str(output_dir)],
@@ -1313,78 +976,43 @@ class TestAlsoDuplicateDedup:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         download_calls = []
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             download_calls.append(cid)
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             # Same course specified twice via --also
             result = cli_runner.invoke(
                 cli,
-                [
-                    "download",
-                    "--semester",
-                    "200",
-                    "--also",
-                    "Course B",
-                    "--also",
-                    "Course B",
-                    "-o",
-                    str(output_dir),
-                ],
+                ["download", "--semester", "200", "--also", "Course B", "--also", "Course B", "-o", str(output_dir)],
             )
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
             # Course B should only be downloaded once, not twice
             course_b_downloads = [c for c in download_calls if c == 222]
-            assert len(course_b_downloads) == 1, (
-                f"Course B should be downloaded once, got {len(course_b_downloads)}"
-            )
+            assert len(course_b_downloads) == 1, f"Course B should be downloaded once, got {len(course_b_downloads)}"
 
     def test_also_numeric_id_same_course_twice_deduplicated(self, cli_runner, tmp_path):
         """Duplicate --also with same numeric ID is deduplicated."""
@@ -1399,75 +1027,40 @@ class TestAlsoDuplicateDedup:
         ]
 
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "222": {"name": "Course B", "semester": "Sem II"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "222": {"name": "Course B", "semester": "Sem II"},
+            }
+        }))
 
         download_calls = []
 
         def get_content_toc(cid):
-            return {
-                "Modules": [
-                    {
-                        "ModuleId": 1,
-                        "Title": "Mod",
-                        "Modules": [],
-                        "Topics": [
-                            {
-                                "TopicId": cid * 10,
-                                "Title": "f.pdf",
-                                "TypeIdentifier": "File",
-                                "Url": "",
-                                "LastModifiedDate": "2026-01-01T00:00:00Z",
-                            },
-                        ],
-                    }
-                ]
-            }
+            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+            ]}]}
 
         def download_topic_file(cid, tid):
             download_calls.append(cid)
             return f"content{cid}".encode(), "f.pdf"
 
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_semesters", return_value=semesters),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[
-                    {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-                ],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc),
-            patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+             patch.object(LighthouseClient, "get_courses", return_value=[
+                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
+             ]), \
+             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
+             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+
             # Same course by numeric ID specified twice
             result = cli_runner.invoke(
                 cli,
-                [
-                    "download",
-                    "--semester",
-                    "200",
-                    "--also",
-                    "222",
-                    "--also",
-                    "222",
-                    "-o",
-                    str(output_dir),
-                ],
+                ["download", "--semester", "200", "--also", "222", "--also", "222", "-o", str(output_dir)],
             )
 
             assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
             # Course 222 should only be downloaded once
             course_222_downloads = [c for c in download_calls if c == 222]
-            assert len(course_222_downloads) == 1, (
-                f"Course 222 should be downloaded once, got {len(course_222_downloads)}"
-            )
+            assert len(course_222_downloads) == 1, f"Course 222 should be downloaded once, got {len(course_222_downloads)}"

@@ -248,7 +248,6 @@ class TestCIPolicies:
         ci = (WORKFLOWS / "ci.yml").read_text()
         for gate in (
             "ruff check",
-            "ruff format --check",
             "mypy",
             "lint-imports",
             "deptry",

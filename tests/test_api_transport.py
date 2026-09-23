@@ -97,7 +97,6 @@ class StreamingResponse(FakeResponse):
         self.iterated = True
         return iter(self.chunks)
 
-
 def test_get_raw_streams_and_rejects_actual_bytes_above_limit() -> None:
     response = StreamingResponse([b"abcd", b"efgh"])
     client = LighthouseClient()
@@ -195,15 +194,12 @@ def test_skip_raise_preserves_non_login_redirect_for_submission_handler() -> Non
     response = FakeResponse(302, headers={"Location": "/d2l/other"})
     client, _session = _client_with_session([response])
 
-    assert (
-        client._do_request(
-            "POST",
-            "https://example.test",
-            True,
-            30,
-        )
-        is response
-    )
+    assert client._do_request(
+        "POST",
+        "https://example.test",
+        True,
+        30,
+    ) is response
     assert response.closed is False
 
 
@@ -262,7 +258,9 @@ def test_paginated_next_cycle_raises_clean_network_error() -> None:
 def test_paginated_request_failures_are_url_free() -> None:
     client = LighthouseClient()
     url = "https://example.test/page?token=PAGINATION_URL_SENTINEL"
-    client.get_json = MagicMock(side_effect=requests.ConnectionError(f"request failed for {url}"))
+    client.get_json = MagicMock(
+        side_effect=requests.ConnectionError(f"request failed for {url}")
+    )
 
     with pytest.raises(NetworkError) as exc_info:
         client._paginate_list("/enrollments", "Items")
@@ -416,10 +414,8 @@ def test_post_unauthorized_is_not_auto_refreshed_or_replayed() -> None:
         "d2lSessionVal": "session",
     }
 
-    with (
-        patch.object(api, "refresh_auth_from_browser") as refresh,
-        patch.object(api, "save_cookies") as save,
-    ):
+    with patch.object(api, "refresh_auth_from_browser") as refresh, \
+            patch.object(api, "save_cookies") as save:
         with pytest.raises(api.SessionExpiredError):
             client._request("POST", "https://example.test/resource", data=b"payload")
 
@@ -438,11 +434,9 @@ def test_post_rate_limit_is_not_auto_refreshed_or_replayed() -> None:
         "d2lSessionVal": "session",
     }
 
-    with (
-        patch.object(api, "refresh_auth_from_browser") as refresh,
-        patch.object(api, "save_cookies") as save,
-        patch.object(api.time, "sleep") as sleep,
-    ):
+    with patch.object(api, "refresh_auth_from_browser") as refresh, \
+            patch.object(api, "save_cookies") as save, \
+            patch.object(api.time, "sleep") as sleep:
         response = client._request(
             "POST", "https://example.test/resource", _skip_raise=True, data=b"payload"
         )
@@ -605,7 +599,9 @@ def test_get_topic_html_extracts_bounded_rich_text_as_bytes(
     payload: dict[str, object], expected: bytes
 ) -> None:
     client = LighthouseClient()
-    client.get_raw = MagicMock(return_value=(json.dumps(payload).encode("utf-8"), {}))
+    client.get_raw = MagicMock(
+        return_value=(json.dumps(payload).encode("utf-8"), {})
+    )
 
     content, filename = client.get_topic_html(1, 1)
 
@@ -633,7 +629,9 @@ def test_get_topic_html_rejects_malformed_shapes_with_fixed_error(
     payload: object,
 ) -> None:
     client = LighthouseClient()
-    client.get_raw = MagicMock(return_value=(json.dumps(payload).encode("utf-8"), {}))
+    client.get_raw = MagicMock(
+        return_value=(json.dumps(payload).encode("utf-8"), {})
+    )
 
     with pytest.raises(ContentResponseShapeError) as exc_info:
         client.get_topic_html(1, 1)
@@ -646,7 +644,9 @@ def test_get_topic_html_rejects_deep_rich_text_without_recursion() -> None:
     for _ in range(api._MAX_RICH_TEXT_DEPTH + 1):
         value = {"Text": value}
     client = LighthouseClient()
-    client.get_raw = MagicMock(return_value=(json.dumps({"Body": value}).encode("utf-8"), {}))
+    client.get_raw = MagicMock(
+        return_value=(json.dumps({"Body": value}).encode("utf-8"), {})
+    )
 
     with pytest.raises(ContentResponseShapeError) as exc_info:
         client.get_topic_html(1, 1)
@@ -902,10 +902,14 @@ def test_get_normalizes_same_origin_absolute_https_url() -> None:
     session = FakeSession([FakeResponse(200)])
     client._session = session
 
-    response = client.get("HTTPS://LIGHTHOUSE.MANIPAL.EDU:443/d2l/api/le/1.93/resource?page=2")
+    response = client.get(
+        "HTTPS://LIGHTHOUSE.MANIPAL.EDU:443/d2l/api/le/1.93/resource?page=2"
+    )
 
     assert response.status_code == 200
-    assert session.calls[0][1] == (f"{BASE_URL}/d2l/api/le/1.93/resource?page=2")
+    assert session.calls[0][1] == (
+        f"{BASE_URL}/d2l/api/le/1.93/resource?page=2"
+    )
 
 
 def test_final_rate_limit_response_raises_url_free_http_error() -> None:
@@ -985,7 +989,9 @@ def test_paginated_next_rejects_untrusted_targets_without_echoing_url(
     next_url: str,
 ) -> None:
     client = LighthouseClient()
-    client.get_json = MagicMock(return_value={"Items": [{"id": 1}], "Next": next_url})
+    client.get_json = MagicMock(
+        return_value={"Items": [{"id": 1}], "Next": next_url}
+    )
 
     with pytest.raises(NetworkError, match="Invalid pagination link") as exc_info:
         client._paginate_list("/enrollments", "Items")
@@ -1069,7 +1075,8 @@ def test_extract_filename_preserves_quoted_semicolon() -> None:
 def test_extract_filename_decodes_rfc5987_utf8_and_prefers_it() -> None:
     headers = {
         "content-disposition": (
-            "attachment; filename=legacy.pdf; filename*=UTF-8''caf%C3%A9%20notes.pdf"
+            "attachment; filename=legacy.pdf; "
+            "filename*=UTF-8''caf%C3%A9%20notes.pdf"
         )
     }
 
@@ -1116,10 +1123,8 @@ def test_cdp_rejects_non_loopback_websocket_before_connecting() -> None:
     websocket_call = AsyncMock()
     opener = _fake_cdp_opener(response)
 
-    with (
-        patch.object(urllib.request, "build_opener", return_value=opener),
-        patch.object(api, "_cdp_get_cookies_ws", websocket_call),
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener), \
+            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
         with pytest.raises(NetworkError, match="non-loopback"):
             api._refresh_via_cdp_websocket(9222)
 
@@ -1128,15 +1133,15 @@ def test_cdp_rejects_non_loopback_websocket_before_connecting() -> None:
 
 def test_cdp_rejects_loopback_websocket_on_unexpected_port() -> None:
     response = FakeUrlopenResponse(
-        json.dumps({"webSocketDebuggerUrl": "wss://127.0.0.1:9223/devtools/browser/1"}).encode()
+        json.dumps(
+            {"webSocketDebuggerUrl": "wss://127.0.0.1:9223/devtools/browser/1"}
+        ).encode()
     )
     websocket_call = AsyncMock()
     opener = _fake_cdp_opener(response)
 
-    with (
-        patch.object(urllib.request, "build_opener", return_value=opener),
-        patch.object(api, "_cdp_get_cookies_ws", websocket_call),
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener), \
+            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
         with pytest.raises(NetworkError, match="unexpected port"):
             api._refresh_via_cdp_websocket(9222)
 
@@ -1145,7 +1150,9 @@ def test_cdp_rejects_loopback_websocket_on_unexpected_port() -> None:
 
 def test_cdp_accepts_loopback_wss_on_configured_port() -> None:
     response = FakeUrlopenResponse(
-        json.dumps({"webSocketDebuggerUrl": "wss://localhost:9222/devtools/browser/1"}).encode(),
+        json.dumps(
+            {"webSocketDebuggerUrl": "wss://localhost:9222/devtools/browser/1"}
+        ).encode(),
         status=200,
         final_url="http://127.0.0.1:9222/json/version",
     )
@@ -1154,16 +1161,16 @@ def test_cdp_accepts_loopback_wss_on_configured_port() -> None:
     )
     opener = _fake_cdp_opener(response)
 
-    with (
-        patch.object(urllib.request, "build_opener", return_value=opener),
-        patch.object(api, "_cdp_get_cookies_ws", websocket_call),
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener), \
+            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
         assert api._refresh_via_cdp_websocket(9222) == {
             "d2lSessionVal": "session",
             "d2lSecureSessionVal": "secure",
         }
 
-    websocket_call.assert_awaited_once_with("wss://localhost:9222/devtools/browser/1")
+    websocket_call.assert_awaited_once_with(
+        "wss://localhost:9222/devtools/browser/1"
+    )
 
 
 def test_cdp_discovery_rejects_redirect_without_following_external_target() -> None:
@@ -1175,14 +1182,14 @@ def test_cdp_discovery_rejects_redirect_without_following_external_target() -> N
     opener = _fake_cdp_opener(response)
     websocket_call = AsyncMock()
 
-    with (
-        patch.object(urllib.request, "build_opener", return_value=opener),
-        patch.object(api, "_cdp_get_cookies_ws", websocket_call),
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener), \
+            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
         with pytest.raises(NetworkError, match="redirect") as exc_info:
             api._refresh_via_cdp_websocket(9222)
 
-    opener.open.assert_called_once_with("http://127.0.0.1:9222/json/version", timeout=10)
+    opener.open.assert_called_once_with(
+        "http://127.0.0.1:9222/json/version", timeout=10
+    )
     websocket_call.assert_not_awaited()
     assert "REDIRECT_TOKEN_SENTINEL" not in str(exc_info.value)
     assert "attacker.example" not in str(exc_info.value)
@@ -1197,10 +1204,8 @@ def test_cdp_discovery_rejects_external_final_url_without_websocket_connect() ->
     opener = _fake_cdp_opener(response)
     websocket_call = AsyncMock()
 
-    with (
-        patch.object(urllib.request, "build_opener", return_value=opener),
-        patch.object(api, "_cdp_get_cookies_ws", websocket_call),
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener), \
+            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
         with pytest.raises(NetworkError, match="invalid response") as exc_info:
             api._refresh_via_cdp_websocket(9222)
 
@@ -1228,17 +1233,19 @@ def test_cdp_endpoint_failure_is_wrapped_without_url_details() -> None:
 
 def test_cdp_websocket_failure_is_wrapped_without_url_details() -> None:
     response = FakeUrlopenResponse(
-        json.dumps({"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/1"}).encode()
+        json.dumps(
+            {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/1"}
+        ).encode()
     )
     websocket_call = AsyncMock(
-        side_effect=RuntimeError("websocket failed at ws://127.0.0.1:9222/?token=WS_URL_SENTINEL")
+        side_effect=RuntimeError(
+            "websocket failed at ws://127.0.0.1:9222/?token=WS_URL_SENTINEL"
+        )
     )
     opener = _fake_cdp_opener(response)
 
-    with (
-        patch.object(urllib.request, "build_opener", return_value=opener),
-        patch.object(api, "_cdp_get_cookies_ws", websocket_call),
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener), \
+            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
         with pytest.raises(NetworkError) as exc_info:
             api._refresh_via_cdp_websocket(9222)
 
@@ -1304,12 +1311,16 @@ def test_cdp_cookie_receive_has_an_end_to_end_timeout() -> None:
             close()
         raise TimeoutError
 
-    fake_websockets = types.SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection())
-    with (
-        patch.dict(sys.modules, {"websockets": fake_websockets}),
-        patch("asyncio.wait_for", side_effect=timeout),
-    ):
+    fake_websockets = types.SimpleNamespace(
+        connect=lambda *_args, **_kwargs: FakeConnection()
+    )
+    with patch.dict(sys.modules, {"websockets": fake_websockets}), \
+            patch("asyncio.wait_for", side_effect=timeout):
         with pytest.raises(NetworkError, match="cookie connection failed"):
-            asyncio.run(api._cdp_get_cookies_ws("ws://127.0.0.1:9222/devtools/browser/1"))
+            asyncio.run(
+                api._cdp_get_cookies_ws(
+                    "ws://127.0.0.1:9222/devtools/browser/1"
+                )
+            )
 
     assert observed["timeout"] == api.CDP_RESPONSE_TIMEOUT_SECONDS

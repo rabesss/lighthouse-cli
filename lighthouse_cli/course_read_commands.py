@@ -15,12 +15,7 @@ from .display import JsonOutputCommand
 _READS = (
     ("my-sections", "/d2l/api/lp/1.47/{course_id}/sections/mysections/", (), True),
     ("group-categories", "/d2l/api/lp/1.47/{course_id}/groupcategories/", (), True),
-    (
-        "groups",
-        "/d2l/api/lp/1.47/{course_id}/groupcategories/{category_id}/groups/",
-        ("category_id",),
-        True,
-    ),
+    ("groups", "/d2l/api/lp/1.47/{course_id}/groupcategories/{category_id}/groups/", ("category_id",), True),
     ("surveys", "surveys/", (), True),
     ("survey", "surveys/{survey_id}", ("survey_id",), False),
     ("checklists", "checklists/", (), True),
@@ -28,18 +23,8 @@ _READS = (
     ("checklist-items", "checklists/{checklist_id}/items/", ("checklist_id",), True),
     ("forums", "discussions/forums/", (), True),
     ("topics", "discussions/forums/{forum_id}/topics/", ("forum_id",), True),
-    (
-        "posts",
-        "discussions/forums/{forum_id}/topics/{topic_id}/posts/",
-        ("forum_id", "topic_id"),
-        True,
-    ),
-    (
-        "post",
-        "discussions/forums/{forum_id}/topics/{topic_id}/posts/{post_id}",
-        ("forum_id", "topic_id", "post_id"),
-        False,
-    ),
+    ("posts", "discussions/forums/{forum_id}/topics/{topic_id}/posts/", ("forum_id", "topic_id"), True),
+    ("post", "discussions/forums/{forum_id}/topics/{topic_id}/posts/{post_id}", ("forum_id", "topic_id", "post_id"), False),
 )
 
 
@@ -48,22 +33,13 @@ def register_course_reads(
     run: Callable[[int, bool, Callable[[AssessmentAPI], Any]], None],
 ) -> None:
     for name, path, identifiers, collection in _READS:
-
         def make_command(path: str, collection: bool) -> Callable[..., None]:
             def command(course_id: int, json_output: bool, **ids: int) -> None:
                 def fetch(api: AssessmentAPI) -> Any:
                     formatted = path.format(course_id=api.course_id, **ids)
-                    route = (
-                        formatted if path.startswith("/d2l/") else f"/{api.course_id}/" + formatted
-                    )
-                    return (
-                        api.client._paginate_list(route)
-                        if collection
-                        else api.client.get_json(route)
-                    )
-
+                    route = formatted if path.startswith("/d2l/") else f"/{api.course_id}/" + formatted
+                    return api.client._paginate_list(route) if collection else api.client.get_json(route)
                 run(course_id, json_output, fetch)
-
             return command
 
         cmd = make_command(path, collection)

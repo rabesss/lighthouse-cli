@@ -89,22 +89,14 @@ def form_protection_from_homepage(body: bytes) -> FormProtection:
                 record = json.loads(literal)
             except (ValueError, RecursionError):
                 continue
-            if (
-                not isinstance(record, dict)
-                or record.get("_type") != "func"
-                or record.get("N") != _XSRF_INIT
-            ):
+            if not isinstance(record, dict) or record.get("_type") != "func" or record.get("N") != _XSRF_INIT:
                 continue
             args = record.get("P")
             if not isinstance(args, list) or len(args) != 3 or args[0] != "d2l_referrer":
                 continue
             token, seed = args[1:]
-            if (
-                not isinstance(token, str)
-                or not re.fullmatch(r"[A-Za-z0-9._~+/=\-]{1,4096}", token)
-                or type(seed) is not int
-                or not 0 <= seed < 10**16
-            ):
+            if (not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=\-]{1,4096}", token)
+                    or type(seed) is not int or not 0 <= seed < 10**16):
                 continue
             found.add((token, str(seed)))
     if len(found) != 1:

@@ -121,7 +121,6 @@ def _try_rich() -> tuple[Any, Any, Any] | None:
             from rich.console import Console
             from rich.table import Table
             from rich.text import Text
-
             _RICH_CACHE = (Table, Text, Console())
         except ImportError:
             _RICH_CACHE = None
@@ -251,7 +250,6 @@ def safe_display_text(
     compact = " ".join(candidate.split())
     return compact if compact and len(compact) <= max_len else fallback
 
-
 _SECRET_FIELD_RE = re.compile(
     r"(?i)[\"']?\b(?:password|passwd|passphrase|secret|token|cookie|cookies|"
     r"samlresponse|otp|totp|canary|authorization|bearer|pass|"
@@ -302,7 +300,9 @@ _SAFE_RECOVERY_COMMANDS = (
 _RECOVERY_HINT_RE = re.compile(
     r"(?im)\b(?:run|try|use)\s*:\s*(?P<command>lighthouse(?:\s+[a-z0-9_-]+){0,5})"
 )
-_RECOVERY_LINE_RE = re.compile(r"(?im)\b(?:run|try|use)\s*:\s*lighthouse\b[^\r\n]*")
+_RECOVERY_LINE_RE = re.compile(
+    r"(?im)\b(?:run|try|use)\s*:\s*lighthouse\b[^\r\n]*"
+)
 _TRANSPORT_ERROR_NAMES = frozenset(
     {
         "connectionerror",
@@ -422,7 +422,10 @@ def _safe_local_message(raw: str) -> str | None:
     if re.match(r"(?is)^course\b.*\bnot found\b", normalized):
         return "Course not found. Run: lighthouse courses"
     if "no tracked courses mapped to semester" in lowered:
-        return "No tracked courses mapped to the requested semester. Run: lighthouse config courses"
+        return (
+            "No tracked courses mapped to the requested semester. "
+            "Run: lighthouse config courses"
+        )
     if lowered.startswith("dropbox folder") and " not found" in lowered:
         return "Dropbox folder not found. Run: lighthouse assignments"
     if lowered.startswith("folder ") and " not found" in lowered:
@@ -433,7 +436,8 @@ def _safe_local_message(raw: str) -> str | None:
         return "Permission denied to submit. Check your enrollment and submission rights."
     if lowered.startswith("refusing to submit without --yes"):
         return (
-            "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm."
+            "Refusing to submit without --yes in non-interactive mode. "
+            "Use --yes flag to confirm."
         )
     if lowered.startswith("could not read file") or lowered.startswith("unable to read file"):
         return "Could not read file. Check the path and permissions."
@@ -568,10 +572,7 @@ def format_user_error(error_value: BaseException | str) -> str:
         result = f"{category} (HTTP {status})."
         return f"{result} {hint}" if hint else result
 
-    if (
-        name in _TRANSPORT_ERROR_NAMES
-        or "requests.exceptions" in str(error.__class__.__module__).lower()
-    ):
+    if name in _TRANSPORT_ERROR_NAMES or "requests.exceptions" in str(error.__class__.__module__).lower():
         category = "Network error"
         if name and name not in {"requestexception", "networkerror"}:
             category = f"{category} ({error.__class__.__name__})"
@@ -585,11 +586,7 @@ def format_user_error(error_value: BaseException | str) -> str:
     # A secret-bearing field can be nested in JSON-ish headers, camelCase
     # exception text, or a bare ``password hunter2`` fragment.  Once detected,
     # do not return any portion of the original string.
-    if (
-        _UNSAFE_FIELD_RE.search(raw)
-        or _SECRET_FIELD_RE.search(raw)
-        or _SECRET_SHAPED_VALUE_RE.search(raw)
-    ):
+    if _UNSAFE_FIELD_RE.search(raw) or _SECRET_FIELD_RE.search(raw) or _SECRET_SHAPED_VALUE_RE.search(raw):
         return f"Command failed. {hint}".strip()
 
     if name == "permissionerror":
@@ -639,18 +636,12 @@ def print_table(columns: list[str], rows: list[list[str]], title: str = "") -> N
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     if title:
         print(f"\n{title}")
-    print(
-        fmt.format(*columns)
-        + "\n"
-        + fmt.format(*["-" * w for w in widths])
-        + "\n"
-        + "\n".join(fmt.format(*row) for row in rows)
-    )
+    print(fmt.format(*columns) + "\n" + fmt.format(*["-" * w for w in widths])
+          + "\n" + "\n".join(fmt.format(*row) for row in rows))
 
 
 def output_json(data: Any) -> None:
     """Print raw JSON to stdout (for --json mode / agent consumption)."""
-
     def replace_non_finite(value: Any) -> Any:
         if isinstance(value, float) and not math.isfinite(value):
             return None
@@ -693,7 +684,6 @@ def error(
 # Text formatting utilities
 # ---------------------------------------------------------------------------
 
-
 def short(text: str, max_len: int = 50) -> str:
     """Truncate text with ellipsis."""
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
@@ -712,5 +702,4 @@ def fmt_date(date_str: str | None) -> str:
 def utc_now_iso() -> str:
     """Return current UTC time as ISO 8601 string (e.g. '2026-05-10T14:30:00Z')."""
     from datetime import datetime, timezone
-
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

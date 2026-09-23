@@ -21,7 +21,6 @@ from .display import JsonOutputCommand, JsonOutputGroup
 
 def _lazy_command(module: str, name: str) -> Callable[..., int]:
     """Keep help/version independent of HTTP, crypto and browser dependencies."""
-
     def invoke(*args: Any, **kwargs: Any) -> int:
         command = getattr(import_module(module, package=__package__), name)
         return cast(int, command(*args, **kwargs))
@@ -52,7 +51,6 @@ cmd_config_courses = _lazy_command(".course_config", "cmd_config_courses")
 # Root group
 # ---------------------------------------------------------------------------
 
-
 @click.group()
 @click.version_option(version=__version__, prog_name="lighthouse-cli")
 def cli() -> None:
@@ -72,7 +70,6 @@ class _AssessmentGroup(JsonOutputGroup):
 
     def _implementation(self) -> click.Group:
         from .assessment_commands import instructor, student
-
         return instructor if self.name == "instructor" else student
 
     def list_commands(self, ctx: click.Context) -> list[str]:
@@ -83,26 +80,16 @@ class _AssessmentGroup(JsonOutputGroup):
 
 
 for _role in ("instructor", "student"):
-    cli.add_command(
-        _AssessmentGroup(
-            name=_role,
-            help=f"{_role.capitalize()} assessment workflows and submission records.",
-            params=[
-                click.Option(
-                    ["--site"],
-                    type=click.Choice(["lighthouse", "trial"]),
-                    default="lighthouse",
-                    show_default=True,
-                )
-            ],
-        )
-    )
+    cli.add_command(_AssessmentGroup(
+        name=_role,
+        help=f"{_role.capitalize()} assessment workflows and submission records.",
+        params=[click.Option(["--site"], type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)],
+    ))
 
 
 # ---------------------------------------------------------------------------
 # Auth subgroup
 # ---------------------------------------------------------------------------
-
 
 @cli.group()
 def auth() -> None:
@@ -115,7 +102,6 @@ def auth() -> None:
 def auth_import_session(site: str, json_output: bool) -> None:
     """Import origin-bound cookies from JSON stdin into encrypted storage."""
     from .session_import import import_session
-
     click.get_current_context().invoke(import_session, site=site, json_output=json_output)
 
 
@@ -142,12 +128,10 @@ def auth_refresh(
     The browser must already be running with a CDP port and signed in to
     lighthouse.manipal.edu. Use ``auth login`` for the pure-HTTP SSO flow.
     """
-    raise SystemExit(
-        cmd_auth_refresh(
-            cdp_port=cdp_port,
-            json_output=json_output,
-        )
-    )
+    raise SystemExit(cmd_auth_refresh(
+        cdp_port=cdp_port,
+        json_output=json_output,
+    ))
 
 
 @auth.command("login", cls=JsonOutputCommand)
@@ -221,17 +205,15 @@ def auth_login(
     pip install lighthouse-cli[credentials]). You still re-authenticate when
     cookies expire.
     """
-    raise SystemExit(
-        cmd_auth_login(
-            username=username,
-            password=None,
-            totp_code=totp,
-            totp_stdin=(totp == "-"),
-            save_credentials=save_credentials,
-            json_output=json_output,
-            mfa_method=mfa_method,
-        )
-    )
+    raise SystemExit(cmd_auth_login(
+        username=username,
+        password=None,
+        totp_code=totp,
+        totp_stdin=(totp == "-"),
+        save_credentials=save_credentials,
+        json_output=json_output,
+        mfa_method=mfa_method,
+    ))
 
 
 @auth.command("verify", cls=JsonOutputCommand)
@@ -259,19 +241,16 @@ def auth_mfa_methods(
     KMSI/session state, but stops before BeginAuth. Reports OneWaySMS (sms),
     TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
     """
-    raise SystemExit(
-        cmd_auth_mfa_methods(
-            username=username,
-            password=None,
-            json_output=json_output,
-        )
-    )
+    raise SystemExit(cmd_auth_mfa_methods(
+        username=username,
+        password=None,
+        json_output=json_output,
+    ))
 
 
 # ---------------------------------------------------------------------------
 # Config subgroup
 # ---------------------------------------------------------------------------
-
 
 @cli.group()
 def config() -> None:
@@ -283,21 +262,9 @@ def config() -> None:
 @click.option("--remove", default=None, help="Stop tracking a course by ID.")
 @click.option("-s", "--semester", default=None, help="Semester label to assign (used with --add).")
 @click.option("--list", "list_courses", is_flag=True, default=False, help="Show tracked courses.")
-@click.option(
-    "--reset",
-    is_flag=True,
-    default=False,
-    help="Clear local course tracking only; keep downloads and LMS data.",
-)
+@click.option("--reset", is_flag=True, default=False, help="Clear local course tracking only; keep downloads and LMS data.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def config_courses(
-    add: str | None,
-    remove: str | None,
-    semester: str | None,
-    list_courses: bool,
-    reset: bool,
-    json_output: bool,
-) -> None:
+def config_courses(add: str | None, remove: str | None, semester: str | None, list_courses: bool, reset: bool, json_output: bool) -> None:
     """Manage course tracking and semester mapping.
 
     Without flags, runs interactive setup: shows all enrolled courses
@@ -313,22 +280,19 @@ def config_courses(
       lighthouse config courses --remove 44347     # Stop tracking a course
       lighthouse config courses --reset            # Clear all tracking
     """
-    raise SystemExit(
-        cmd_config_courses(
-            add=add,
-            remove=remove,
-            semester=semester,
-            list_courses=list_courses,
-            reset=reset,
-            json_output=json_output,
-        )
-    )
+    raise SystemExit(cmd_config_courses(
+        add=add,
+        remove=remove,
+        semester=semester,
+        list_courses=list_courses,
+        reset=reset,
+        json_output=json_output,
+    ))
 
 
 # ---------------------------------------------------------------------------
 # Data commands
 # ---------------------------------------------------------------------------
-
 
 @cli.command(cls=JsonOutputCommand)
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
@@ -338,21 +302,12 @@ def semesters(json_output: bool) -> None:
 
 
 @cli.command(cls=JsonOutputCommand)
-@click.option(
-    "-s",
-    "--semester",
-    default=None,
-    help="Filter by semester label (requires course tracking config).",
-)
-@click.option(
-    "--tracked", "tracked_only", is_flag=True, default=False, help="Show only tracked courses."
-)
+@click.option("-s", "--semester", default=None, help="Filter by semester label (requires course tracking config).")
+@click.option("--tracked", "tracked_only", is_flag=True, default=False, help="Show only tracked courses.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
 def courses(semester: str | None, tracked_only: bool, json_output: bool) -> None:
     """List all courses."""
-    raise SystemExit(
-        cmd_courses(semester=semester, tracked_only=tracked_only, json_output=json_output)
-    )
+    raise SystemExit(cmd_courses(semester=semester, tracked_only=tracked_only, json_output=json_output))
 
 
 @cli.command("content", cls=JsonOutputCommand)
@@ -366,36 +321,13 @@ def content(course_id: str, json_output: bool) -> None:
 @cli.command("download", cls=JsonOutputCommand)
 @click.argument("course_id", required=False)
 @click.option("-o", "--output-dir", default=None, help="Custom download directory.")
-@click.option(
-    "--dry-run", is_flag=True, default=False, help="Preview downloads without changing disk."
-)
+@click.option("--dry-run", is_flag=True, default=False, help="Preview downloads without changing disk.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Replace local manifest metadata and re-download every file.",
-)
-@click.option(
-    "--types",
-    default="file",
-    help="Comma-separated content types to download (file,html). Default: file.",
-)
-@click.option(
-    "-s",
-    "--semester",
-    default=None,
-    help="Filter to a specific semester (requires tracking config).",
-)
-@click.option(
-    "--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID."
-)
-@click.option(
-    "--include-assignments",
-    is_flag=True,
-    default=False,
-    help="Also download assignment attachments.",
-)
+@click.option("--force", is_flag=True, default=False, help="Replace local manifest metadata and re-download every file.")
+@click.option("--types", default="file", help="Comma-separated content types to download (file,html). Default: file.")
+@click.option("-s", "--semester", default=None, help="Filter to a specific semester (requires tracking config).")
+@click.option("--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID.")
+@click.option("--include-assignments", is_flag=True, default=False, help="Also download assignment attachments.")
 @click.option(
     "--assignment",
     "assignment_id",
@@ -463,29 +395,11 @@ def download(
 @click.argument("course_id", required=False)
 @click.option("-o", "--output-dir", default=None, help="Custom download directory.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Replace local manifest metadata and re-download every file.",
-)
-@click.option(
-    "--types",
-    default="file",
-    help="Comma-separated content types to sync (file,html). Default: file.",
-)
-@click.option(
-    "-s",
-    "--semester",
-    default=None,
-    help="Filter to a specific semester (requires tracking config).",
-)
-@click.option(
-    "--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID."
-)
-@click.option(
-    "--include-assignments", is_flag=True, default=False, help="Also sync assignment attachments."
-)
+@click.option("--force", is_flag=True, default=False, help="Replace local manifest metadata and re-download every file.")
+@click.option("--types", default="file", help="Comma-separated content types to sync (file,html). Default: file.")
+@click.option("-s", "--semester", default=None, help="Filter to a specific semester (requires tracking config).")
+@click.option("--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID.")
+@click.option("--include-assignments", is_flag=True, default=False, help="Also sync assignment attachments.")
 def sync(
     course_id: str | None,
     output_dir: str | None,
@@ -593,13 +507,7 @@ def assignments(course_id: str | None, json_output: bool) -> None:
 @click.argument("course_id")
 @click.argument("folder_id")
 @click.option("-f", "--file", "file_path", required=True, help="Path to the file to submit.")
-@click.option(
-    "--yes",
-    "yes",
-    is_flag=True,
-    default=False,
-    help="Skip confirmation prompt and submit immediately.",
-)
+@click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation prompt and submit immediately.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
 def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_output: bool) -> None:
     """REMOTE WRITE: submit a file to a D2L dropbox folder.
@@ -620,12 +528,10 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_outpu
     On success, prints a JSON object with submission_id, folder_id, folder_name,
     course_id, course_name, file info, and submitted_at timestamp.
     """
-    raise SystemExit(
-        cmd_submit(
-            course_id=course_id,
-            folder_id=folder_id,
-            file_path=file_path,
-            yes=yes,
-            json_output=json_output,
-        )
-    )
+    raise SystemExit(cmd_submit(
+        course_id=course_id,
+        folder_id=folder_id,
+        file_path=file_path,
+        yes=yes,
+        json_output=json_output,
+    ))

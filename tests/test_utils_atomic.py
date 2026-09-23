@@ -14,7 +14,6 @@ from lighthouse_cli.utils import atomic_write
 # Round-trip
 # ---------------------------------------------------------------------------
 
-
 class TestAtomicWriteRoundTrip:
     def test_text_round_trip(self, tmp_path: Path) -> None:
         target = tmp_path / "data.txt"
@@ -37,7 +36,6 @@ class TestAtomicWriteRoundTrip:
 # ---------------------------------------------------------------------------
 # Permissions per mode
 # ---------------------------------------------------------------------------
-
 
 class TestAtomicWriteModes:
     def test_explicit_mode_applied(self, tmp_path: Path) -> None:
@@ -117,7 +115,6 @@ class TestAtomicWriteCollisionRetry:
 # Failure cleanup
 # ---------------------------------------------------------------------------
 
-
 class TestAtomicWriteFailureCleanup:
     def test_replace_failure_leaves_target_and_no_temp(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -145,9 +142,10 @@ class TestAtomicWriteFailureCleanup:
 # Concurrent writers
 # ---------------------------------------------------------------------------
 
-
 class TestAtomicWriteConcurrency:
-    def test_concurrent_writers_never_interleave_or_leave_temps(self, tmp_path: Path) -> None:
+    def test_concurrent_writers_never_interleave_or_leave_temps(
+        self, tmp_path: Path
+    ) -> None:
         target = tmp_path / "contended.txt"
         payloads = [f"payload-{i:02d}-" + "x" * 5000 for i in range(8)]
         errors: list[Exception] = []

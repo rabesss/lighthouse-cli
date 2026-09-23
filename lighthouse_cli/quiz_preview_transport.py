@@ -23,68 +23,40 @@ class PreviewSaveUnknownError(NetworkError):
 
 class PreviewStartUnknownError(NetworkError):
     def __init__(self) -> None:
-        super().__init__(
-            "Preview start could not be verified. Inspect quiz attempts before starting again."
-        )
+        super().__init__("Preview start could not be verified. Inspect quiz attempts before starting again.")
 
 
 class PreviewAdvanceUnknownError(NetworkError):
     def __init__(self) -> None:
-        super().__init__(
-            "Preview navigation could not be verified. Inspect the browser before continuing."
-        )
+        super().__init__("Preview navigation could not be verified. Inspect the browser before continuing.")
 
 
-def _start_target(
-    client: LighthouseClient, value: str, filename: str, course_id: int, quiz_id: int
-) -> str:
+def _start_target(client: LighthouseClient, value: str, filename: str, course_id: int, quiz_id: int) -> str:
     url = client.canonical_url(value)
     parsed = urlparse(url)
     query = parse_qs(parsed.query, keep_blank_values=True)
     allowed = {"ou", "qi", "isprv", "dnb", "cfql", "fromQB", "inProgress", "cft", "d2l_body_type"}
-    if (
-        parsed.path != f"/d2l/lms/quizzing/user/attempt/{filename}"
-        or set(query) - allowed
-        or any(
-            query.get(key) != [str(value)]
-            for key, value in {
-                "ou": course_id,
-                "qi": quiz_id,
-                "isprv": 1,
-                "fromQB": 0,
-                "inProgress": 0,
-            }.items()
-        )
-    ):
+    if (parsed.path != f"/d2l/lms/quizzing/user/attempt/{filename}"
+            or set(query) - allowed
+            or any(query.get(key) != [str(value)] for key, value in {"ou": course_id, "qi": quiz_id, "isprv": 1, "fromQB": 0, "inProgress": 0}.items())):
         raise NetworkError("Preview start form has an unexpected identity.")
     return url
 
 
-def start_preview(
-    client: LighthouseClient, *, course_id: int, quiz_id: int, bypass_availability: bool = False
-) -> PreviewPage:
+def start_preview(client: LighthouseClient, *, course_id: int, quiz_id: int, bypass_availability: bool = False) -> PreviewPage:
     """Start an instructor preview once; availability bypass is explicit."""
     # Reuse strict identity validation before any request.
     page_path(course_id, quiz_id, 1, 1)
     if type(bypass_availability) is not bool:
         raise ValueError("Invalid preview settings.")
-    summary = "/d2l/lms/quizzing/user/quiz_summary.d2l?" + urlencode(
-        {
-            "bp": int(bypass_availability),
-            "isprv": 1,
-            "qi": quiz_id,
-            "ou": course_id,
-        }
-    )
+    summary = "/d2l/lms/quizzing/user/quiz_summary.d2l?" + urlencode({
+        "bp": int(bypass_availability), "isprv": 1, "qi": quiz_id, "ou": course_id,
+    })
     body, _ = client.get_raw(summary, max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
     soup = BeautifulSoup(body, "html.parser")
-    if not any(
-        button.get_text(" ", strip=True) == "Start Quiz!" and not button.has_attr("disabled")
-        for button in soup.find_all("button")
-    ):
-        raise NetworkError(
-            "Preview start is not available to this account or under the current quiz restrictions."
-        )
+    if not any(button.get_text(" ", strip=True) == "Start Quiz!" and not button.has_attr("disabled")
+               for button in soup.find_all("button")):
+        raise NetworkError("Preview start is not available to this account or under the current quiz restrictions.")
     form, fields = hidden_form(body)
     if form.select('input[type="password"]') or fields.get("hps"):
         raise NetworkError("This preview requires an additional browser authorization step.")
@@ -104,22 +76,12 @@ def start_preview(
         # Mark it before dispatch because a session expiry can arrive after
         # Brightspace has already created the pending preview state.
         start_dispatched = True
-        response = client._request(
-            "POST",
-            post_url,
-            _skip_raise=True,
-            files=[(key, (None, value)) for key, value in fields.items()],
-            headers={"Referer": client.canonical_url(summary)},
-        )
+        response = client._request("POST", post_url, _skip_raise=True,
+                                   files=[(key, (None, value)) for key, value in fields.items()],
+                                   headers={"Referer": client.canonical_url(summary)})
         if response.status_code != 302:
             raise PreviewStartUnknownError()
-        root_url = _start_target(
-            client,
-            response.headers.get("Location", ""),
-            "quiz_start_frame_auto.d2l",
-            course_id,
-            quiz_id,
-        )
+        root_url = _start_target(client, response.headers.get("Location", ""), "quiz_start_frame_auto.d2l", course_id, quiz_id)
         _close_response(response)
         response = None
         root, _ = client.get_raw(root_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
@@ -148,26 +110,19 @@ def start_preview(
         )
         # This legacy GET creates server state: it is deliberately not replayed.
         state_created = True
-        result, _ = client.get_raw(
-            process_url,
-            max_bytes=MAX_PAGE_BYTES,
-            _replay_safe=False,
-            headers={"Referer": client.canonical_url(frame_path)},
-        )
+        result, _ = client.get_raw(process_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
+                                  headers={"Referer": client.canonical_url(frame_path)})
         matches: set[tuple[int, int]] = set()
         for script in BeautifulSoup(result, "html.parser").find_all("script"):
             for match in re.finditer(
                 r"^\s*parent\.GoToAttemptQuizAuto\(\s*([0-9]{1,18})\s*,\s*([0-9]{1,6})\s*,\s*0\s*\)\s*;?\s*$",
-                script.get_text(),
-                re.MULTILINE,
+                script.get_text(), re.MULTILINE,
             ):
                 matches.add((int(match[1]), int(match[2])))
         if len(matches) != 1:
             raise PreviewStartUnknownError()
         attempt_id, page = matches.pop()
-        return read_current_preview(
-            client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page
-        )
+        return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     except SessionExpiredError:
         if state_created:
             raise PreviewStartUnknownError() from None
@@ -182,51 +137,26 @@ def start_preview(
 
 
 def page_path(course_id: int, quiz_id: int, attempt_id: int, page: int) -> str:
-    if any(
-        type(value) is not int or not 0 < value < 10**18
-        for value in (course_id, quiz_id, attempt_id, page)
-    ):
+    if any(type(value) is not int or not 0 < value < 10**18 for value in (course_id, quiz_id, attempt_id, page)):
         raise ValueError("Invalid preview identity.")
-    return "/d2l/lms/quizzing/user/attempt/quiz_attempt_page_auto.d2l?" + urlencode(
-        {
-            "ou": course_id,
-            "qi": quiz_id,
-            "ai": attempt_id,
-            "pg": page,
-            "isprv": 1,
-            "d2l_body_type": 3,
-            "fromQB": 0,
-        }
-    )
+    return "/d2l/lms/quizzing/user/attempt/quiz_attempt_page_auto.d2l?" + urlencode({
+        "ou": course_id, "qi": quiz_id, "ai": attempt_id, "pg": page,
+        "isprv": 1, "d2l_body_type": 3, "fromQB": 0,
+    })
 
 
 def read_current_preview(
-    client: LighthouseClient,
-    *,
-    course_id: int,
-    quiz_id: int,
-    attempt_id: int,
-    page: int,
+    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
 ) -> PreviewPage:
     """Read the caller's current cursor; never infer or advance that cursor."""
     path = page_path(course_id, quiz_id, attempt_id, page)
-    body, _ = client.get_raw(
-        path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"}
-    )
-    return parse_preview_page(
-        body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page
-    )
+    body, _ = client.get_raw(path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"})
+    return parse_preview_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
 
 
 def save_current_preview_answer(
-    client: LighthouseClient,
-    *,
-    course_id: int,
-    quiz_id: int,
-    attempt_id: int,
-    page: int,
-    question_id: int,
-    choice_id: int,
+    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int,
+    page: int, question_id: int, choice_id: int,
 ) -> PreviewPage:
     """Fetch fresh protection and form state, POST once, verify server state.
 
@@ -250,8 +180,7 @@ def save_current_preview_answer(
         # server may have accepted the answer before returning a login page.
         write_dispatched = True
         response = client._request(
-            "POST",
-            url,
+            "POST", url,
             files=[(key, (None, value)) for key, value in fields.items()],
             headers={"Referer": client.canonical_url(path)},
         )
@@ -277,50 +206,27 @@ def save_current_preview_answer(
 
 
 def advance_current_preview(
-    client: LighthouseClient,
-    *,
-    course_id: int,
-    quiz_id: int,
-    attempt_id: int,
-    page: int,
+    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
 ) -> PreviewPage:
     homepage, _ = client.get_raw("/d2l/home", max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
     protection = form_protection_from_homepage(homepage)
-    current = read_current_preview(
-        client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page
-    )
+    current = read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     fields = current.advance_fields(protection)
-    url = client.canonical_url(
-        "/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?"
-        + urlencode(
-            {
-                "cfql": 0,
-                "fromQB": 0,
-                "d2l_body_type": 3,
-                "ou": course_id,
-            }
-        )
-    )
+    url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({
+        "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,
+    }))
     response = None
     write_dispatched = False
     try:
         # Treat an auth failure from this request as post-dispatch unknown;
         # the navigation may already have moved the remote cursor.
         write_dispatched = True
-        response = client._request(
-            "POST",
-            url,
-            files=[(key, (None, value)) for key, value in fields.items()],
-            headers={
-                "Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))
-            },
-        )
+        response = client._request("POST", url, files=[(key, (None, value)) for key, value in fields.items()],
+                                   headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
         if response.status_code != 200:
             raise PreviewAdvanceUnknownError()
         try:
-            return read_current_preview(
-                client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1
-            )
+            return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
         except SessionExpiredError:
             # The navigation POST completed before the readback lost auth.
             raise PreviewAdvanceUnknownError() from None

@@ -84,7 +84,9 @@ _AUTH_SECRET_SHAPED_RE = re.compile(
     r"cookie|cookies|samlresponse|samlrequest|otp|totp|canary|session)"
     r"[a-z0-9_-]*\b\s*[:=]"
 )
-_AUTH_SECRET_FLAG_RE = re.compile(r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;{}\[\]]+")
+_AUTH_SECRET_FLAG_RE = re.compile(
+    r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;{}\[\]]+"
+)
 _AUTH_CODE_RE = re.compile(r"(?:^|:\s*)\[(\d{3,8})\]\s*")
 _AUTH_UNSAFE_BRACKET_RE = re.compile(r"[{}]|\[(?!\d{3,8}\])|(?<!\])\]")
 _AUTH_SAFE_TYPE_RE = re.compile(r"^Unexpected error \([A-Za-z0-9_.]+\)\.")
@@ -100,14 +102,12 @@ _SAFE_MFA_RECOVERY_COMMANDS = (
     "lighthouse auth verify <current-app-code>",
     "lighthouse auth verify ok",
 )
-_SAFE_BROWSER_NETWORK_ERRORS = frozenset(
-    {
-        "Could not run the local browser cookie helper.",
-        "The local browser cookie helper failed.",
-        "The local browser cookie helper returned invalid data.",
-        "No usable Lighthouse cookies were found in the browser.",
-    }
-)
+_SAFE_BROWSER_NETWORK_ERRORS = frozenset({
+    "Could not run the local browser cookie helper.",
+    "The local browser cookie helper failed.",
+    "The local browser cookie helper returned invalid data.",
+    "No usable Lighthouse cookies were found in the browser.",
+})
 _SAFE_FIRST_PARTY_AUTH_PREFIXES = (
     ("2fa verification timed out", "2FA verification timed out waiting for approval."),
     ("d2l acs redirect limit exceeded", "D2L ACS redirect limit exceeded."),
@@ -240,12 +240,16 @@ def _safe_auth_error_message(msg: object) -> str:
     for prefix, safe_message in _SAFE_FIRST_PARTY_AUTH_PREFIXES:
         if lowered.startswith(prefix):
             return safe_message
-    if not text or len(text) > 512 or any(not char.isprintable() for char in text):
+    if (
+        not text
+        or len(text) > 512
+        or any(not char.isprintable() for char in text)
+    ):
         return _AUTH_ERROR_FALLBACK
     code_match = _AUTH_CODE_RE.search(text)
     code = code_match.group(1) if code_match else None
     if code_match:
-        text = text[: code_match.start()] + text[code_match.end() :]
+        text = text[:code_match.start()] + text[code_match.end():]
     if (
         _AUTH_UNSAFE_BRACKET_RE.search(text)
         or _AUTH_SECRET_FIELD_RE.search(text)
@@ -319,7 +323,6 @@ def _clean_auth_command(fn: Callable[..., int]) -> Callable[..., int]:
 # ---------------------------------------------------------------------------
 # Interactive credential prompts (the only I/O in credential resolution)
 # ---------------------------------------------------------------------------
-
 
 def _is_interactive() -> bool:
     """Check if stdin is a TTY."""
@@ -497,7 +500,9 @@ def plan_login(
         and mfa_method == _pending_selected_method(pending)
     ):
         return LoginPlan("resume", totp_code, False, False)
-    defer_mfa_to_pending = not interactive and totp_code is None and not read_totp_after_challenge
+    defer_mfa_to_pending = (
+        not interactive and totp_code is None and not read_totp_after_challenge
+    )
     mode = "defer" if defer_mfa_to_pending else "fresh"
     return LoginPlan(mode, totp_code, read_totp_after_challenge, defer_mfa_to_pending)
 
@@ -505,7 +510,6 @@ def plan_login(
 # ---------------------------------------------------------------------------
 # Shared success tail
 # ---------------------------------------------------------------------------
-
 
 def _print_command_guide() -> None:
     """Print a small map of the CLI without running another command."""
@@ -575,7 +579,8 @@ def _persist_check_report(
             CredentialStore().save(stored_username, stored_password)
         except CredentialStoreError as exc:
             print(
-                f"Warning: Could not save credentials: {_safe_auth_error_message(str(exc))}",
+                "Warning: Could not save credentials: "
+                f"{_safe_auth_error_message(str(exc))}",
                 file=sys.stderr,
             )
 
@@ -583,7 +588,11 @@ def _persist_check_report(
     if json_output:
         print(json.dumps({"success": True, "cookies": reported_cookie_names}))
     else:
-        suffix = f" Cookies: {', '.join(reported_cookie_names)}" if include_cookie_names else ""
+        suffix = (
+            f" Cookies: {', '.join(reported_cookie_names)}"
+            if include_cookie_names
+            else ""
+        )
         print(f"{success_message}{suffix}")
         if show_next_steps:
             _print_login_next_steps()
@@ -593,7 +602,6 @@ def _persist_check_report(
 # ---------------------------------------------------------------------------
 # Command entry points
 # ---------------------------------------------------------------------------
-
 
 @_clean_auth_command
 def cmd_auth_refresh(
@@ -632,7 +640,6 @@ def cmd_auth_refresh(
     if exit_code == 0:
         clear_mfa_pending()
     return exit_code
-
 
 @_clean_auth_command
 def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
@@ -678,7 +685,8 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
         return _auth_error(str(exc), json_output)
     except (KeyError, TypeError, ValueError) as exc:
         return _auth_error(
-            f"Pending MFA session is corrupted: {exc}. Run: lighthouse auth login --mfa-method sms",
+            f"Pending MFA session is corrupted: {exc}. "
+            "Run: lighthouse auth login --mfa-method sms",
             json_output,
         )
     finally:
@@ -780,7 +788,10 @@ def cmd_auth_mfa_methods(
             if method is not None
             else "no supported --mfa-method selector"
         )
-        print(f"  • {format_user_proof(proof)} — {safe_auth_method_id(proof)}; {advice}{marker}")
+        print(
+            f"  • {format_user_proof(proof)} — "
+            f"{safe_auth_method_id(proof)}; {advice}{marker}"
+        )
     return 0
 
 
@@ -860,13 +871,18 @@ def cmd_auth_login(
         resolved_mfa_method = MFA_METHOD_AUTO
     if resolved_mfa_method not in VALID_MFA_METHODS:
         return _auth_error(
-            f"Invalid MFA method {resolved_mfa_method!r}. Use: {', '.join(VALID_MFA_METHODS)}",
+            f"Invalid MFA method {resolved_mfa_method!r}. "
+            f"Use: {', '.join(VALID_MFA_METHODS)}",
             json_output,
         )
 
     try:
-        validate_totp_usage(totp_code, totp_stdin=totp_stdin, mfa_method=resolved_mfa_method)
-        code, read_totp_after_challenge = normalize_totp(totp_code, totp_stdin=totp_stdin)
+        validate_totp_usage(
+            totp_code, totp_stdin=totp_stdin, mfa_method=resolved_mfa_method
+        )
+        code, read_totp_after_challenge = normalize_totp(
+            totp_code, totp_stdin=totp_stdin
+        )
     except ValueError as exc:
         return _auth_error(str(exc), json_output)
 
@@ -937,16 +953,12 @@ def cmd_auth_login(
         safe_message = _safe_auth_error_message(str(exc))
         safe_recovery = _safe_mfa_recovery(exc.recovery)
         if json_output:
-            print(
-                json.dumps(
-                    {
-                        "success": False,
-                        "mfa_pending": True,
-                        "message": safe_message,
-                        "recovery": safe_recovery,
-                    }
-                )
-            )
+            print(json.dumps({
+                "success": False,
+                "mfa_pending": True,
+                "message": safe_message,
+                "recovery": safe_recovery,
+            }))
             print(f"Error: {safe_message}", file=sys.stderr)
         else:
             print(safe_message, flush=True)

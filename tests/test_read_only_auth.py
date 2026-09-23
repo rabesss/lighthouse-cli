@@ -89,10 +89,8 @@ def test_read_only_client_does_not_refresh_or_save_after_get_401() -> None:
     response = MagicMock(status_code=401, headers={})
     session.request.return_value = response
 
-    with (
-        patch.object(api, "refresh_auth_from_browser") as refresh,
-        patch.object(api, "save_cookies") as save,
-    ):
+    with patch.object(api, "refresh_auth_from_browser") as refresh, \
+            patch.object(api, "save_cookies") as save:
         with pytest.raises(SessionExpiredError):
             client._request("GET", f"{BASE_URL}/d2l/api/versions/")
 
@@ -107,10 +105,8 @@ def test_read_only_client_does_not_refresh_or_save_after_head_401() -> None:
     response = MagicMock(status_code=401, headers={})
     session.request.return_value = response
 
-    with (
-        patch.object(api, "refresh_auth_from_browser") as refresh,
-        patch.object(api, "save_cookies") as save,
-    ):
+    with patch.object(api, "refresh_auth_from_browser") as refresh, \
+            patch.object(api, "save_cookies") as save:
         with pytest.raises(SessionExpiredError):
             client._request("HEAD", f"{BASE_URL}/d2l/api/versions/")
 

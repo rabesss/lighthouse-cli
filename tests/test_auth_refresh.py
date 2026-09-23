@@ -94,7 +94,9 @@ def test_failed_auth_refresh_preserves_pending_checkpoint(monkeypatch) -> None:
     clear.assert_not_called()
 
 
-def test_auth_refresh_missing_cookies_returns_json_without_persisting(monkeypatch, capsys) -> None:
+def test_auth_refresh_missing_cookies_returns_json_without_persisting(
+    monkeypatch, capsys
+) -> None:
     class FakeStore:
         def preflight(self) -> None:
             return None
@@ -118,7 +120,9 @@ def test_auth_refresh_missing_cookies_returns_json_without_persisting(monkeypatc
     persist_mock.assert_not_called()
 
 
-def test_auth_refresh_preserves_safe_network_error_in_json(monkeypatch, capsys) -> None:
+def test_auth_refresh_preserves_safe_network_error_in_json(
+    monkeypatch, capsys
+) -> None:
     class FakeStore:
         def preflight(self) -> None:
             return None

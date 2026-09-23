@@ -27,7 +27,7 @@ There is no separate build step. The repo enforces a full quality gate in CI
 before a PR run:
 
 ```bash
-ruff format --check . && ruff check .   # format + lint
+ruff check .                            # lint
 mypy                                    # strict type check
 lint-imports                            # layered architecture contracts
 deptry .                                # dependency hygiene

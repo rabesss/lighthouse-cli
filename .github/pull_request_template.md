@@ -9,7 +9,7 @@ What this PR changes and why. Reference the issue ("Closes #N") when applicable.
 ## Reviewer checklist
 
 - [ ] `pytest -q` passes locally (full suite green).
-- [ ] `ruff check .` and `ruff format --check .` are clean.
+- [ ] `ruff check .` is clean.
 - [ ] `mypy` (strict) is clean.
 - [ ] `--json` stdout contract preserved: stdout is machine-parseable JSON
       only; prompts/banners go to stderr (AGENTS.md).

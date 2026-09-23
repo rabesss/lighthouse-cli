@@ -40,43 +40,26 @@ def quiz_payload(name: str, layout: str, attempts: int) -> dict[str, Any]:
         raise ValueError("Attempts must be between 1 and 10.")
     text = {"Text": rich_text(""), "IsDisplayed": False}
     return {
-        "Name": name,
-        "IsActive": False,
-        "SortOrder": 0,
-        "AutoExportToGrades": False,
-        "GradeItemId": None,
-        "IsAutoSetGraded": False,
-        "Instructions": text,
-        "Description": text,
-        "StartDate": None,
-        "EndDate": None,
-        "DueDate": None,
-        "DisplayInCalendar": False,
+        "Name": name, "IsActive": False, "SortOrder": 0,
+        "AutoExportToGrades": False, "GradeItemId": None,
+        "IsAutoSetGraded": False, "Instructions": text,
+        "Description": text, "StartDate": None, "EndDate": None,
+        "DueDate": None, "DisplayInCalendar": False,
         "NumberOfAttemptsAllowed": attempts,
         "LateSubmissionInfo": {"LateSubmissionOption": 0, "LateLimitMinutes": None},
         # These creation defaults were accepted by LE 1.93 in the trial.
         # The duration is dormant because IsEnforced remains false.
         "SubmissionTimeLimit": {"IsEnforced": False, "ShowClock": False, "TimeLimitValue": 120},
-        "SubmissionGracePeriod": 0,
-        "Password": None,
-        "Header": text,
-        "Footer": text,
-        "AllowHints": False,
-        "DisableRightClick": False,
-        "DisablePagerAndAlerts": False,
-        "NotificationEmail": None,
-        "CalcTypeId": 1,
-        "RestrictIPAddressRange": None,
-        "CategoryId": None,
-        "PreventMovingBackwards": layout == "one-way",
-        "Shuffle": False,
+        "SubmissionGracePeriod": 0, "Password": None,
+        "Header": text, "Footer": text, "AllowHints": False,
+        "DisableRightClick": False, "DisablePagerAndAlerts": False,
+        "NotificationEmail": None, "CalcTypeId": 1,
+        "RestrictIPAddressRange": None, "CategoryId": None,
+        "PreventMovingBackwards": layout == "one-way", "Shuffle": False,
         "AllowOnlyUsersWithSpecialAccess": False,
-        "IsRetakeIncorrectOnly": False,
-        "PagingTypeId": 1 if layout == "one-way" else 0,
-        "IsSynchronous": False,
-        "DeductionPercentage": None,
-        "HideQuestionPoints": False,
-        "IsSingleSession": False,
+        "IsRetakeIncorrectOnly": False, "PagingTypeId": 1 if layout == "one-way" else 0,
+        "IsSynchronous": False, "DeductionPercentage": None,
+        "HideQuestionPoints": False, "IsSingleSession": False,
     }
 
 
@@ -86,21 +69,13 @@ def assignment_payload(name: str, instructions: str, submission_type: str) -> di
     if submission_type not in {"file", "text"}:
         raise ValueError("Invalid submission type.")
     return {
-        "Name": name,
-        "CategoryId": None,
+        "Name": name, "CategoryId": None,
         "CustomInstructions": rich_text(instructions),
-        "Availability": None,
-        "GroupTypeId": None,
-        "DueDate": None,
-        "DisplayInCalendar": False,
-        "NotificationEmail": None,
-        "IsHidden": True,
-        "Assessment": None,
-        "IsAnonymous": False,
-        "DropboxType": 2,
-        "SubmissionType": 0 if submission_type == "file" else 1,
-        "CompletionType": 0,
-        "GradeItemId": None,
+        "Availability": None, "GroupTypeId": None, "DueDate": None,
+        "DisplayInCalendar": False, "NotificationEmail": None,
+        "IsHidden": True, "Assessment": None, "IsAnonymous": False,
+        "DropboxType": 2, "SubmissionType": 0 if submission_type == "file" else 1,
+        "CompletionType": 0, "GradeItemId": None,
         "AllowOnlyUsersWithSpecialAccess": False,
     }
 
@@ -108,8 +83,7 @@ def assignment_payload(name: str, instructions: str, submission_type: str) -> di
 # Unknown fields, URLs and authentication material never enter CLI output.
 # Keep the projection shared across teacher and learner responses; permission
 # enforcement belongs to Brightspace, not a caller-selected role flag.
-_FIELDS = frozenset(
-    """
+_FIELDS = frozenset("""
 Id QuizId QuestionId QuestionTypeId Name Title Points Difficulty Bonus Mandatory
 QuestionText QuestionInfo SectionId QuestionTemplateId QuestionTemplateVersionId
 Text Html Content Type Answers Answer TextAnswer Weight IsCorrect Options
@@ -145,8 +119,7 @@ Rows Scale Statement Statements Style Texts TrueFeedback TruePartId TrueWeight
 GroupId GroupCategoryId Code Enrollments Groups EnrollmentStyle EnrollmentQuantity
 MaxUsersPerGroup AutoEnroll RandomizeEnrollments AllocateAfterExpiry
 SelfEnrollmentExpiryDate DescriptionsVisibleToEnrolees
-""".split()
-)
+""".split())
 
 
 def project(value: Any) -> Any:
@@ -201,9 +174,7 @@ class AssessmentAPI:
             return self.client.get_json(path + "mysubmissions/")
         return self.client.get_json(path)
 
-    def write(
-        self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None
-    ) -> Any:
+    def write(self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None) -> Any:
         if method not in {"POST", "PUT"}:
             raise ValueError("Unsupported assessment operation.")
         url = self.client.canonical_url(self.path(resource, identifier))
@@ -211,9 +182,7 @@ class AssessmentAPI:
         # assessment write was attempted and callers may safely retry it.
         csrf_token = self.client.get_csrf_token()
         try:
-            response = self.client._request(
-                method, url, json=data, headers={"X-Csrf-Token": csrf_token}
-            )
+            response = self.client._request(method, url, json=data, headers={"X-Csrf-Token": csrf_token})
         except (NetworkError, SessionExpiredError):
             raise AssessmentWriteUnknownError(
                 "Write outcome unknown. Inspect the assessment before retrying."

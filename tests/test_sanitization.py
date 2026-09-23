@@ -11,7 +11,6 @@ from lighthouse_cli.utils import _sanitize_filename
 # _sanitize_filename tests
 # ---------------------------------------------------------------------------
 
-
 class TestSanitizeFilename:
     """Tests for _sanitize_filename — used for course names, module paths, filenames."""
 
@@ -103,7 +102,6 @@ class TestSanitizeFilename:
 # Course name collision handling
 # ---------------------------------------------------------------------------
 
-
 class TestCourseNameCollision:
     """Tests for handling two courses with identical D2L Names."""
 
@@ -136,7 +134,6 @@ class TestCourseNameCollision:
 # Path resolution
 # ---------------------------------------------------------------------------
 
-
 class TestPathResolution:
     """Tests for -o / --output-dir path handling."""
 
@@ -165,7 +162,6 @@ class TestPathResolution:
 # ---------------------------------------------------------------------------
 # Module path sanitization
 # ---------------------------------------------------------------------------
-
 
 class TestModulePathSanitization:
     """Tests for sanitization of module titles used in path construction."""

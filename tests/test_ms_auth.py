@@ -190,7 +190,9 @@ class TestMfaMethodSelection:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        malicious = "FULL-DISPLAY-SENTINEL user@example.com +919876541234\x1b[31m"
+        malicious = (
+            "FULL-DISPLAY-SENTINEL user@example.com +919876541234\x1b[31m"
+        )
         proofs = [
             UserProof("OneWaySMS", malicious, "+919876541234", True),
             UserProof("TwoWayVoiceMobile", malicious, "+919876541234", False),
@@ -207,7 +209,9 @@ class TestMfaMethodSelection:
 
         client = MicrosoftSSOClient()
         try:
-            client._print_mfa_phase_banner(proofs, proofs[0], code_sent_on_begin=False)
+            client._print_mfa_phase_banner(
+                proofs, proofs[0], code_sent_on_begin=False
+            )
         finally:
             client.close()
         banner_output = capsys.readouterr().err
@@ -229,7 +233,9 @@ class TestMfaMethodSelection:
 
         client = MicrosoftSSOClient()
         try:
-            client._print_mfa_phase_banner([proof], proof, code_sent_on_begin=True)
+            client._print_mfa_phase_banner(
+                [proof], proof, code_sent_on_begin=True
+            )
         finally:
             client.close()
         output = capsys.readouterr().err
@@ -269,7 +275,9 @@ class TestMfaMethodSelection:
             probe.MicrosoftSSOClient,
             "probe_mfa_methods",
             lambda _self, _username, _password: (_ for _ in ()).throw(
-                RuntimeError("GET https://login.microsoftonline.com/?token=PROBE_SECRET")
+                RuntimeError(
+                    "GET https://login.microsoftonline.com/?token=PROBE_SECRET"
+                )
             ),
         )
 
@@ -336,7 +344,6 @@ class TestExtractConfigJson:
 # _extract_error_code_and_msg tests
 # ---------------------------------------------------------------------------
 
-
 class TestExtractErrorCode:
     def test_extracts_both_code_and_msg(self) -> None:
         code, msg = _extract_error_code_and_msg(SAMPLE_ERROR_HTML)
@@ -366,7 +373,6 @@ class TestExtractErrorCode:
 # ---------------------------------------------------------------------------
 # MicrosoftSSOClient unit tests
 # ---------------------------------------------------------------------------
-
 
 class TestMicrosoftSSOClientInit:
     def test_default_init(self) -> None:
@@ -408,7 +414,7 @@ class TestIsMfaPage:
         assert is_mfa_page(SAMPLE_MFA_HTML) is True
 
     def test_enter_code_text(self) -> None:
-        assert is_mfa_page("<div>Enter code</div>") is True
+        assert is_mfa_page('<div>Enter code</div>') is True
 
     def test_saml_page_not_mfa(self) -> None:
         assert is_mfa_page(SAMPLE_SAML_HTML) is False
@@ -433,7 +439,9 @@ class TestMicrosoftSSOClientExtractD2lCookies:
         client._session.cookies.set(
             "d2lSecureSessionVal", "sec123", domain="lighthouse.manipal.edu"
         )
-        client._session.cookies.set("d2lSessionVal", "ses123", domain="lighthouse.manipal.edu")
+        client._session.cookies.set(
+            "d2lSessionVal", "ses123", domain="lighthouse.manipal.edu"
+        )
         client._session.cookies.set(
             "d2lSameSiteCanaryA", "canaryA", domain="lighthouse.manipal.edu"
         )
@@ -473,18 +481,15 @@ class TestMicrosoftSSOClientExtractD2lCookies:
 # Full login flow tests with mocked HTTP
 # ---------------------------------------------------------------------------
 
-
 def test_fresh_login_clears_stale_pending_checkpoint_before_network() -> None:
     client = MicrosoftSSOClient()
     try:
-        with (
-            patch("lighthouse_cli.config.clear_mfa_pending") as clear_pending,
-            patch.object(
-                client,
-                "_step_initiate_saml",
-                side_effect=MicrosoftSSOError("stopped", step="test"),
-            ),
-        ):
+        with patch("lighthouse_cli.config.clear_mfa_pending") as clear_pending, \
+                patch.object(
+                    client,
+                    "_step_initiate_saml",
+                    side_effect=MicrosoftSSOError("stopped", step="test"),
+                ):
             with pytest.raises(MicrosoftSSOError, match="stopped"):
                 client.login("user@example.invalid", "not-a-real-password")
     finally:
@@ -526,9 +531,7 @@ class TestFullLoginFlow:
         # Step 4a: POST TOTP → redirect to SAML
         resp_post_totp = make_mock_response(
             302,
-            headers={
-                "Location": "https://lighthouse.manipal.edu/d2l/lp/auth/saml/consume?SAMLResponse=..."
-            },
+            headers={"Location": "https://lighthouse.manipal.edu/d2l/lp/auth/saml/consume?SAMLResponse=..."},
             url="https://login.microsoftonline.com/common/SAS/ProcessAuth",
         )
         responses.append(resp_post_totp)
@@ -557,13 +560,11 @@ class TestFullLoginFlow:
         responses.append(resp_home)
 
         client._session.get = MagicMock(side_effect=responses)
-        client._session.post = MagicMock(
-            side_effect=[
-                responses[2],  # POST credentials
-                responses[3],  # POST TOTP
-                responses[5],  # POST SAML
-            ]
-        )
+        client._session.post = MagicMock(side_effect=[
+            responses[2],  # POST credentials
+            responses[3],  # POST TOTP
+            responses[5],  # POST SAML
+        ])
 
         return responses
 
@@ -579,8 +580,7 @@ class TestFullLoginFlow:
         # Set up cookie jar simulation
         for name in COOKIE_NAMES:
             mock_session.cookies.set(
-                name,
-                f"test-{name}",
+                name, f"test-{name}",
                 domain="lighthouse.manipal.edu",
             )
 
@@ -600,18 +600,18 @@ class TestFullLoginFlow:
 
         # GET sequence: init, config, follow TOTP redirect, ACS redirect follow
         get_responses = [
-            resp_saml_init,  # Step 1: GET SAML init
-            resp_ms_config,  # Step 2: GET MS config
-            resp_saml,  # Step 4a: follow redirect from TOTP POST -> SAML page
-            resp_acs,  # Step 5b: follow ACS redirect
+            resp_saml_init,      # Step 1: GET SAML init
+            resp_ms_config,      # Step 2: GET MS config
+            resp_saml,           # Step 4a: follow redirect from TOTP POST -> SAML page
+            resp_acs,            # Step 5b: follow ACS redirect
         ]
         mock_session.get = MagicMock(side_effect=get_responses)
 
         # POST sequence: credentials, TOTP, SAML
         post_responses = [
-            resp_mfa,  # Step 3: POST credentials -> MFA
+            resp_mfa,            # Step 3: POST credentials -> MFA
             resp_post_totp_redirect,  # Step 4: POST TOTP
-            resp_acs,  # Step 5: POST SAML
+            resp_acs,            # Step 5: POST SAML
         ]
         mock_session.post = MagicMock(side_effect=post_responses)
 
@@ -662,19 +662,15 @@ class TestFullLoginFlow:
         # Wrong 2FA code -> stay on MFA page (200, still shows MFA)
         resp_mfa_again = make_mock_response(200, text=SAMPLE_MFA_HTML)
 
-        mock_session.get = MagicMock(
-            side_effect=[
-                resp_saml_init,
-                resp_ms_config,
-            ]
-        )
+        mock_session.get = MagicMock(side_effect=[
+            resp_saml_init,
+            resp_ms_config,
+        ])
         # POST creds -> MFA; POST wrong TOTP -> MFA page again
-        mock_session.post = MagicMock(
-            side_effect=[
-                resp_mfa,  # POST creds
-                resp_mfa_again,  # POST wrong TOTP -> MFA page again
-            ]
-        )
+        mock_session.post = MagicMock(side_effect=[
+            resp_mfa,        # POST creds
+            resp_mfa_again,  # POST wrong TOTP -> MFA page again
+        ])
 
         # _step_handle_mfa will detect MFA page and raise error
         with patch("requests.Session", return_value=mock_session):
@@ -702,7 +698,9 @@ class TestFullLoginFlow:
         resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
         # Credentials POST returns SAML directly (no MFA)
         resp_saml_direct = make_mock_response(200, text=SAMPLE_SAML_HTML)
-        resp_acs = make_mock_response(302, headers={"Location": f"{BASE_URL}/d2l/home"})
+        resp_acs = make_mock_response(
+            302, headers={"Location": f"{BASE_URL}/d2l/home"}
+        )
 
         mock_session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config, resp_acs])
         mock_session.post = MagicMock(side_effect=[resp_saml_direct, resp_acs])
@@ -900,13 +898,10 @@ def test_endauth_approval_can_complete_after_old_120_second_budget() -> None:
     proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
 
     try:
-        with (
-            patch(
-                "lighthouse_cli.ms_auth.time.monotonic",
-                side_effect=[0.0, 0.0, 0.0, 121.0],
-            ),
-            patch("lighthouse_cli.ms_auth.time.sleep"),
-        ):
+        with patch(
+            "lighthouse_cli.ms_auth.time.monotonic",
+            side_effect=[0.0, 0.0, 0.0, 121.0],
+        ), patch("lighthouse_cli.ms_auth.time.sleep"):
             flow, ctx, data = client._poll_end_auth(
                 MS_SSO_URL,
                 {"urlEndAuth": "/common/SAS/EndAuth"},
@@ -1066,7 +1061,6 @@ class TestClose:
 # ---------------------------------------------------------------------------
 # Config extraction edge cases
 # ---------------------------------------------------------------------------
-
 
 class TestConfigExtractionEdgeCases:
     def test_config_with_escaped_chars(self) -> None:

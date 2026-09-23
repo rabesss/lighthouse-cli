@@ -24,7 +24,6 @@ from lighthouse_cli.credential_store import CredentialStoreError
 # Config helper tests
 # ---------------------------------------------------------------------------
 
-
 class TestConfigHelpers:
     """Tests for _load_course_config / _save_course_config."""
 
@@ -63,17 +62,13 @@ class TestConfigHelpers:
 
     def test_load_skips_malformed_entries_and_normalizes_fields(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": None,
-                        "1002": {"name": "Valid", "semester": "Sem V"},
-                        "1003": {"name": 7, "semester": []},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": None,
+                "1002": {"name": "Valid", "semester": "Sem V"},
+                "1003": {"name": 7, "semester": []},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             assert _load_course_config() == {
                 "1002": {"name": "Valid", "semester": "Sem V"},
@@ -82,16 +77,12 @@ class TestConfigHelpers:
 
     def test_load_canonicalizes_positive_course_id_keys(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        " 001002 ": {"name": "Valid", "semester": "Sem V"},
-                        "not-an-id": {"name": "Ignored", "semester": "Sem V"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                " 001002 ": {"name": "Valid", "semester": "Sem V"},
+                "not-an-id": {"name": "Ignored", "semester": "Sem V"},
+            }
+        }))
 
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             assert _load_course_config() == {
@@ -127,22 +118,17 @@ class TestConfigHelpers:
 # config courses --list / --json / --reset tests
 # ---------------------------------------------------------------------------
 
-
 class TestConfigCoursesList:
     """Tests for lighthouse config courses --list / --json / --reset."""
 
     def test_list_shows_tracked_courses(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": {"name": "Intro to CS", "semester": "Sem IV"},
-                        "1002": {"name": "Linear Algebra", "semester": "Sem III"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": {"name": "Intro to CS", "semester": "Sem IV"},
+                "1002": {"name": "Linear Algebra", "semester": "Sem III"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--list"])
         assert result.exit_code == 0
@@ -158,15 +144,11 @@ class TestConfigCoursesList:
 
     def test_json_output(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": {"name": "Intro to CS", "semester": "Sem IV"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": {"name": "Intro to CS", "semester": "Sem IV"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--json"])
         assert result.exit_code == 0
@@ -200,36 +182,30 @@ class TestConfigCoursesList:
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": None,
-                        "1002": {"name": "Valid", "semester": "Sem V"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": None,
+                "1002": {"name": "Valid", "semester": "Sem V"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--json"])
         assert result.exit_code == 0
-        assert json.loads(result.stdout) == [{"id": "1002", "name": "Valid", "semester": "Sem V"}]
+        assert json.loads(result.stdout) == [
+            {"id": "1002", "name": "Valid", "semester": "Sem V"}
+        ]
 
     def test_list_skips_oversized_id_and_preserves_valid_sibling(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
         oversized_id = "9" * 5000
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        oversized_id: {"name": "must-not-be-echoed", "semester": "bad"},
-                        "1002": {"name": "Valid", "semester": "Sem V"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                oversized_id: {"name": "must-not-be-echoed", "semester": "bad"},
+                "1002": {"name": "Valid", "semester": "Sem V"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             json_result = cli_runner.invoke(cli, ["config", "courses", "--json"])
             human_result = cli_runner.invoke(cli, ["config", "courses", "--list"])
@@ -251,16 +227,12 @@ class TestConfigCoursesList:
         cfg_path = tmp_path / "course-config.json"
         unsafe_name = "password=LOCAL_SECRET"
         unsafe_semester = "Sem V\x1b[31m"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": {"name": unsafe_name, "semester": unsafe_semester},
-                        "1002": {"name": "Valid", "semester": "Sem IV"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": {"name": unsafe_name, "semester": unsafe_semester},
+                "1002": {"name": "Valid", "semester": "Sem IV"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             json_result = cli_runner.invoke(cli, ["config", "courses", "--json"])
             human_result = cli_runner.invoke(cli, ["config", "courses", "--list"])
@@ -283,15 +255,11 @@ class TestConfigCoursesList:
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": {"name": "Intro to CS", "semester": "Sem IV"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": {"name": "Intro to CS", "semester": "Sem IV"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--reset", "--json"])
         assert result.exit_code == 0
@@ -301,9 +269,9 @@ class TestConfigCoursesList:
 
     def test_reset_clears_config(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps({"tracked_courses": {"1001": {"name": "Intro to CS", "semester": "Sem IV"}}})
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {"1001": {"name": "Intro to CS", "semester": "Sem IV"}}
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--reset"])
         assert result.exit_code == 0
@@ -317,25 +285,17 @@ class TestConfigCoursesList:
 # config courses --add / --remove tests
 # ---------------------------------------------------------------------------
 
-
 class TestConfigCoursesAddRemove:
     """Tests for lighthouse config courses --add / --remove."""
 
     def test_add_by_id(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
         enrollments = [
-            {
-                "OrgUnit": {"Id": 1001, "Name": "Intro to CS", "Code": "CS101_2025"},
-                "Access": {"IsActive": True},
-            },
+            {"OrgUnit": {"Id": 1001, "Name": "Intro to CS", "Code": "CS101_2025"}, "Access": {"IsActive": True}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
-            result = cli_runner.invoke(
-                cli, ["config", "courses", "--add", "1001", "--semester", "Sem IV"]
-            )
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
+            result = cli_runner.invoke(cli, ["config", "courses", "--add", "1001", "--semester", "Sem IV"])
         assert result.exit_code == 0
         assert "Tracking" in result.output
         data = json.loads(cfg_path.read_text())
@@ -349,10 +309,8 @@ class TestConfigCoursesAddRemove:
         enrollments = [
             {"OrgUnit": {"Id": 1001, "Name": "Intro to CS", "Code": "CS101"}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
             result = cli_runner.invoke(
                 cli,
                 ["config", "courses", "--add", "  Intro to CS  ", "--json"],
@@ -366,15 +324,10 @@ class TestConfigCoursesAddRemove:
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
         enrollments = [
-            {
-                "OrgUnit": {"Id": 1001, "Name": "Intro to CS", "Code": "CS101_2025"},
-                "Access": {"IsActive": True},
-            },
+            {"OrgUnit": {"Id": 1001, "Name": "Intro to CS", "Code": "CS101_2025"}, "Access": {"IsActive": True}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
             result = cli_runner.invoke(
                 cli,
                 ["config", "courses", "--add", "1001", "--semester", "Sem IV", "--json"],
@@ -395,10 +348,8 @@ class TestConfigCoursesAddRemove:
         enrollments = [
             {"OrgUnit": {"Id": 1001, "Name": unsafe_name, "Code": unsafe_code}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
             result = cli_runner.invoke(
                 cli,
                 ["config", "courses", "--add", "1001", "--json"],
@@ -423,10 +374,8 @@ class TestConfigCoursesAddRemove:
         enrollments = [
             {"OrgUnit": {"Id": 1001, "Name": unsafe_name, "Code": unsafe_code}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
             result = cli_runner.invoke(
                 cli,
                 ["config", "courses"],
@@ -451,22 +400,16 @@ class TestConfigCoursesAddRemove:
         cfg_path = tmp_path / "course-config.json"
         unsafe_name = "password=LOCAL_SECRET"
         unsafe_semester = "Sem V\x1b[31m"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": {"name": unsafe_name, "semester": unsafe_semester},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": {"name": unsafe_name, "semester": unsafe_semester},
+            }
+        }))
         enrollments = [
             {"OrgUnit": {"Id": 1001, "Name": "Valid", "Code": "C101"}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
             result = cli_runner.invoke(
                 cli,
                 ["config", "courses"],
@@ -493,10 +436,8 @@ class TestConfigCoursesAddRemove:
         enrollments = [
             {"OrgUnit": {"Id": 1001, "Name": "Valid", "Code": "C101"}},
         ]
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments):
             result = cli_runner.invoke(
                 cli,
                 ["config", "courses"],
@@ -509,19 +450,17 @@ class TestConfigCoursesAddRemove:
 
     def test_add_not_found(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=[]),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=[]):
             result = cli_runner.invoke(cli, ["config", "courses", "--add", "9999"])
         assert result.exit_code == 1
         assert "not found" in result.output
 
     def test_remove(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps({"tracked_courses": {"1001": {"name": "Intro to CS", "semester": "Sem IV"}}})
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {"1001": {"name": "Intro to CS", "semester": "Sem IV"}}
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--remove", "1001"])
         assert result.exit_code == 0
@@ -533,16 +472,12 @@ class TestConfigCoursesAddRemove:
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "1001": {"name": "Intro to CS", "semester": "Sem IV"},
-                        "1002": {"name": "Linear Algebra", "semester": "Sem III"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "1001": {"name": "Intro to CS", "semester": "Sem IV"},
+                "1002": {"name": "Linear Algebra", "semester": "Sem III"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--remove", "1001", "--json"])
         assert result.exit_code == 0
@@ -558,16 +493,12 @@ class TestConfigCoursesAddRemove:
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
         unsafe_name = "token=LOCAL_TOKEN"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "0001001": {"name": unsafe_name, "semester": "Sem IV"},
-                        "1002": {"name": "Valid", "semester": "Sem V"},
-                    }
-                }
-            )
-        )
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "0001001": {"name": unsafe_name, "semester": "Sem IV"},
+                "1002": {"name": "Valid", "semester": "Sem V"},
+            }
+        }))
         with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path):
             result = cli_runner.invoke(cli, ["config", "courses", "--remove", "1001"])
 
@@ -591,7 +522,6 @@ class TestConfigCoursesAddRemove:
 # courses --semester / --tracked tests (config-based filtering)
 # ---------------------------------------------------------------------------
 
-
 class TestCoursesWithConfig:
     """Tests for courses command using config-based semester filtering."""
 
@@ -599,20 +529,14 @@ class TestCoursesWithConfig:
         self, cli_runner: CliRunner, sample_courses: list, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "44347": {"name": "Signals & Systems", "semester": "Sem IV"},
-                        "44348": {"name": "Eng Math III", "semester": "Sem III"},
-                    }
-                }
-            )
-        )
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses),
-        ):
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "44347": {"name": "Signals & Systems", "semester": "Sem IV"},
+                "44348": {"name": "Eng Math III", "semester": "Sem III"},
+            }
+        }))
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses):
             result = cli_runner.invoke(cli, ["courses", "--semester", "Sem IV", "--json"])
 
         assert result.exit_code == 0
@@ -624,19 +548,13 @@ class TestCoursesWithConfig:
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
         unsafe_semester = "password=LOCAL_SECRET\x1b[31m"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "44347": {"name": "Signals & Systems", "semester": unsafe_semester},
-                    }
-                }
-            )
-        )
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses),
-        ):
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "44347": {"name": "Signals & Systems", "semester": unsafe_semester},
+            }
+        }))
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses):
             json_result = cli_runner.invoke(cli, ["courses", "--json"])
             human_result = cli_runner.invoke(cli, ["courses"])
 
@@ -655,10 +573,8 @@ class TestCoursesWithConfig:
         self, cli_runner: CliRunner, sample_courses: list, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "nocfg.json"
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses):
             result = cli_runner.invoke(cli, ["courses", "--semester", "Sem IV"])
 
         assert result.exit_code == 1
@@ -668,19 +584,13 @@ class TestCoursesWithConfig:
         self, cli_runner: CliRunner, sample_courses: list, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "tracked_courses": {
-                        "44347": {"name": "Signals & Systems", "semester": "Sem IV"},
-                    }
-                }
-            )
-        )
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses),
-        ):
+        cfg_path.write_text(json.dumps({
+            "tracked_courses": {
+                "44347": {"name": "Signals & Systems", "semester": "Sem IV"},
+            }
+        }))
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses):
             result = cli_runner.invoke(cli, ["courses", "--tracked", "--json"])
 
         assert result.exit_code == 0
@@ -692,10 +602,8 @@ class TestCoursesWithConfig:
         self, cli_runner: CliRunner, sample_courses: list, tmp_path: Path
     ) -> None:
         cfg_path = tmp_path / "nocfg.json"
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses):
             result = cli_runner.invoke(cli, ["courses", "--tracked"])
 
         assert result.exit_code == 1
@@ -706,10 +614,8 @@ class TestCoursesWithConfig:
     ) -> None:
         """Without --semester or --tracked, all courses are shown."""
         cfg_path = tmp_path / "nocfg.json"
-        with (
-            patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path),
-            patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses),
-        ):
+        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+             patch.object(LighthouseClient, "get_course_enrollments", return_value=sample_courses):
             result = cli_runner.invoke(cli, ["courses", "--json"])
 
         assert result.exit_code == 0

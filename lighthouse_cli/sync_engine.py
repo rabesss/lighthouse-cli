@@ -164,12 +164,14 @@ def _collision_filename(filename: str, topic_id: int, attempt: int) -> str:
     """Add a bounded topic identity suffix to a colliding filename."""
     path = Path(filename)
     suffix = path.suffix
-    stem = path.name[: -len(suffix)] if suffix else path.name
+    stem = path.name[:-len(suffix)] if suffix else path.name
     topic_token = str(topic_id)
     if len(topic_token) > 20:
         topic_token = hashlib.sha256(topic_token.encode("ascii")).hexdigest()[:16]
     marker = f"--topic-{topic_token}" + (f"-{attempt}" if attempt > 1 else "")
-    max_stem_bytes = MAX_ATOMIC_TARGET_NAME_BYTES - len((marker + suffix).encode("utf-8"))
+    max_stem_bytes = MAX_ATOMIC_TARGET_NAME_BYTES - len(
+        (marker + suffix).encode("utf-8")
+    )
     while stem and len(stem.encode("utf-8")) > max_stem_bytes:
         stem = stem[:-1]
     return f"{stem or 'topic'}{marker}{suffix}"
@@ -193,10 +195,13 @@ def _reserve_topic_path(
     while True:
         key = candidate.absolute()
         owner = path_owners.get(key)
-        if (
-            owner == tid
-            or (allow_unowned_overwrite and key in path_owners and owner is None)
-            or (key not in path_owners and (allow_unowned_overwrite or not candidate.exists()))
+        if owner == tid or (
+            allow_unowned_overwrite
+            and key in path_owners
+            and owner is None
+        ) or (
+            key not in path_owners
+            and (allow_unowned_overwrite or not candidate.exists())
         ):
             path_owners[key] = tid
             return candidate
@@ -332,7 +337,8 @@ def _topic_directory(
         file_dest = course_root / "_Content" / relative_dest
         if warnings is not None:
             warnings.append(
-                "Topic path overlapped the reserved Assignments directory; moved under _Content."
+                "Topic path overlapped the reserved Assignments directory; "
+                "moved under _Content."
             )
 
     if _has_symlink_component(file_dest, course_root):
@@ -349,7 +355,8 @@ def _topic_directory(
     if not lexical_inside or not resolved.is_relative_to(course_root):
         if warnings is not None:
             warnings.append(
-                "Path for topic was resolved outside the course root; clamped to the course root."
+                "Path for topic was resolved outside the course root; "
+                "clamped to the course root."
             )
         file_dest = course_root
     return course_root, file_dest
@@ -381,11 +388,7 @@ def build_entry(
     safe_name = _safe_display_filename(name)
     safe_path = path if isinstance(path, str) else ""
     manifest_entry = content_or_entry if isinstance(content_or_entry, dict) else {}
-    size = (
-        len(content_or_entry)
-        if isinstance(content_or_entry, bytes)
-        else _safe_size(manifest_entry.get("size", 0))
-    )
+    size = len(content_or_entry) if isinstance(content_or_entry, bytes) else _safe_size(manifest_entry.get("size", 0))
     normalized_sha = normalize_sha256(sha)
     if not normalized_sha and isinstance(content_or_entry, bytes):
         normalized_sha = compute_sha256(content_or_entry)
@@ -430,9 +433,7 @@ def download_and_persist_topic(
         raise ValueError(_INVALID_TOPIC_DATA)
     tid = str(topic_id)
     course_root, file_dest = _topic_directory(
-        dest,
-        topic.get("path", ""),
-        warnings=warnings,
+        dest, topic.get("path", ""), warnings=warnings,
     )
     topic_type = topic.get("type", "")
     if isinstance(topic_type, str) and topic_type.lower() == "html":
@@ -458,9 +459,7 @@ def download_and_persist_topic(
         filepath_resolved = filepath.resolve(strict=False)
     except (OSError, RuntimeError):
         raise ValueError("Unable to validate topic file path") from None
-    if not filepath.absolute().is_relative_to(course_root) or not filepath_resolved.is_relative_to(
-        course_root
-    ):
+    if not filepath.absolute().is_relative_to(course_root) or not filepath_resolved.is_relative_to(course_root):
         raise ValueError("Topic file path escapes the course root")
     atomic_write(filepath, content, mode=0o600)
     manifest.add_entry(tid, content=content, filename=sanitized_name, last_modified=last_modified)
@@ -590,9 +589,7 @@ def flatten_all_topics(
             else:
                 _record_topic_data_error(errors)
                 safe_module_title = ""
-            new_prefix = (
-                f"{current_prefix}/{safe_module_title}" if current_prefix else safe_module_title
-            )
+            new_prefix = f"{current_prefix}/{safe_module_title}" if current_prefix else safe_module_title
 
             # The recursive implementation visited child modules before this
             # module's topics. Push in reverse stack order to preserve that.
@@ -624,40 +621,26 @@ def flatten_all_topics(
         topic_path_name = _sanitize_filename(safe_topic_title)
         if raw_topic_title and not safe_topic_title:
             topic_path_name = "Topic"
-        topics.append(
-            {
-                "topic_id": value.get("TopicId"),
-                "title": safe_topic_title,
-                "url": value.get("Url"),
-                "type": safe_topic_type,
-                "path": f"{current_prefix}/{topic_path_name}",
-                "last_modified": value.get("LastModifiedDate", ""),
-            }
-        )
+        topics.append({
+            "topic_id": value.get("TopicId"),
+            "title": safe_topic_title,
+            "url": value.get("Url"),
+            "type": safe_topic_type,
+            "path": f"{current_prefix}/{topic_path_name}",
+            "last_modified": value.get("LastModifiedDate", ""),
+        })
     return topics
 
 
 def _empty_result(org_id: int, mode: Mode) -> dict[str, Any]:
     """Skeleton result dict with every collection present (never printed)."""
     return {
-        "org_id": org_id,
-        "mode": mode,
-        "course_name": "",
-        "dest": None,
-        "manifest_path": None,
-        "topic_count": 0,
-        "planned": [],
-        "downloaded": [],
-        "skipped": [],
-        "updated": [],
-        "duplicates": [],
-        "orphaned": [],
-        "errors": [],
-        "warnings": [],
+        "org_id": org_id, "mode": mode, "course_name": "", "dest": None,
+        "manifest_path": None, "topic_count": 0, "planned": [],
+        "downloaded": [], "skipped": [], "updated": [], "duplicates": [],
+        "orphaned": [], "errors": [], "warnings": [],
         "assignments": {"downloaded": [], "skipped": [], "updated": [], "errors": []},
-        "manifest_total": 0,
-        "saved": False,
-        "empty": False,
+        "manifest_total": 0, "saved": False, "empty": False,
     }
 
 
@@ -720,9 +703,7 @@ def _track_duplicate(
     sha_hashes.setdefault(normalized_hash, []).append({"topic_id": tid, "filename": filename})
 
 
-def _matching_local_topic_file(
-    dest: Path, topic: dict[str, Any], entry: dict[str, Any]
-) -> Path | None:
+def _matching_local_topic_file(dest: Path, topic: dict[str, Any], entry: dict[str, Any]) -> Path | None:
     """Return the manifest path when its local bytes match the manifest.
 
     A matching TOC timestamp alone is not sufficient to skip a topic: the
@@ -796,10 +777,7 @@ def run_course(
         return result
     if assignment_id is not None:
         assignment_folders, assignment_error = _preflight_assignment_selector(
-            client,
-            org_id,
-            assignment_id,
-            assignment_folders,
+            client, org_id, assignment_id, assignment_folders,
         )
         if assignment_error is not None:
             result["assignments"]["errors"].append(assignment_error)
@@ -819,7 +797,9 @@ def run_course(
     # topic is still live in Brightspace.  Using only ``downloadable`` here
     # would report a live file topic as orphaned during ``--types html``.
     all_topics = flatten_all_topics(toc.get("Modules", []), errors=result["errors"])
-    downloadable = [topic for topic in all_topics if topic.get("type", "").lower() in type_set]
+    downloadable = [
+        topic for topic in all_topics if topic.get("type", "").lower() in type_set
+    ]
     valid_downloadable: list[dict[str, Any]] = []
     seen_topic_ids: set[int] = set()
     for topic in downloadable:
@@ -945,7 +925,10 @@ def run_course(
             if existing.get("last_modified") == (topic.get("last_modified") or ""):
                 filename = existing.get("filename", "")
                 matching_file = _matching_local_topic_file(dest, topic, existing)
-                if matching_file is not None and path_owners.get(matching_file.absolute()) == tid:
+                if (
+                    matching_file is not None
+                    and path_owners.get(matching_file.absolute()) == tid
+                ):
                     # Strip a leading separator from display-only skipped paths.
                     # Download writes have their own resolved-path containment clamp.
                     safe_filename = _safe_display_filename(filename)
@@ -975,34 +958,26 @@ def run_course(
             file_hash = entry.get("sha256", "")
             if file_hash:
                 _track_duplicate(sha_hashes, file_hash, tid, sanitized_name)
-            target_list.append(
-                build_entry(tid, sanitized_name, str(filepath.relative_to(dest)), entry, file_hash)
-            )
+            target_list.append(build_entry(tid, sanitized_name, str(filepath.relative_to(dest)), entry, file_hash))
         except ValueError as exc:
             if str(exc) == _INVALID_TOPIC_DATA:
-                errors.append(
-                    {
-                        "topic_id": tid,
-                        "error": _INVALID_TOPIC_DATA,
-                        "type": "topic_data",
-                    }
-                )
+                errors.append({
+                    "topic_id": tid,
+                    "error": _INVALID_TOPIC_DATA,
+                    "type": "topic_data",
+                })
             else:
-                errors.append(
-                    {
-                        "topic_id": tid,
-                        "filename": _safe_label(topic.get("title", "")),
-                        "error": str(exc),
-                    }
-                )
-        except Exception as e:
-            errors.append(
-                {
+                errors.append({
                     "topic_id": tid,
                     "filename": _safe_label(topic.get("title", "")),
-                    "error": str(e),
-                }
-            )
+                    "error": str(exc),
+                })
+        except Exception as e:
+            errors.append({
+                "topic_id": tid,
+                "filename": _safe_label(topic.get("title", "")),
+                "error": str(e),
+            })
 
     assignments = result["assignments"]
     assignment_paths_before = {
@@ -1017,16 +992,10 @@ def run_course(
             if isinstance(manifest.get(tid), dict)
         }
         if include_assignments:
-            downloaded_a, skipped_a, updated_a, errors_a = sync_for_course(
-                client, org_id, dest, manifest
-            )
-            assignments.update(
-                downloaded=downloaded_a, skipped=skipped_a, updated=updated_a, errors=errors_a
-            )
+            downloaded_a, skipped_a, updated_a, errors_a = sync_for_course(client, org_id, dest, manifest)
+            assignments.update(downloaded=downloaded_a, skipped=skipped_a, updated=updated_a, errors=errors_a)
             for entry in skipped_a + updated_a + downloaded_a:
-                live_orphans.pop(
-                    assignment_key(entry.get("folder_id", 0), entry.get("file_id", 0)), None
-                )
+                live_orphans.pop(assignment_key(entry.get("folder_id", 0), entry.get("file_id", 0)), None)
         result["orphaned"] = [
             build_entry(tid, (e or {}).get("filename", ""), "", e or {})
             for tid, e in sorted(live_orphans.items(), key=lambda item: str(item[0]))
@@ -1067,9 +1036,7 @@ def run_course(
         result["saved"] = True
     result["duplicates"] = [
         {"topic_id": e["topic_id"], "filename": e["filename"], "sha256": h}
-        for h, es in sha_hashes.items()
-        if len(es) > 1
-        for e in es
+        for h, es in sha_hashes.items() if len(es) > 1 for e in es
     ]
     result["manifest_total"] = len(manifest)
     return result

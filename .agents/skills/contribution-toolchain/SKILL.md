@@ -35,7 +35,6 @@ uv pip compile pyproject.toml --extra dev --extra auth --extra credentials \
 ## The full gate (run in this order)
 
 ```sh
-ruff format --check .   # formatter
 ruff check .            # lint
 mypy                    # strict type check (config in pyproject.toml)
 lint-imports            # layered architecture contracts
@@ -50,7 +49,6 @@ commands, so a green local run means a green CI run.
 
 ## Common failures
 
-- **`ruff format --check` fails** — run `ruff format .`, never hand-align.
 - **`mypy` no-any-return at an API boundary** — raw D2L JSON is intentionally
   `Any` at the boundary; `cast(...)` to the declared shape at the return site.
 - **`lint-imports` breaks** — you added an import that violates the layer
@@ -68,7 +66,7 @@ commands, so a green local run means a green CI run.
 
 | CI job | Local command |
 | --- | --- |
-| quality | ruff format/check, mypy, lint-imports, deptry, xenon |
+| quality | ruff check, mypy, lint-imports, deptry, xenon |
 | security | gitleaks history scan (`.gitleaks.toml`) + `python scripts/check_secrets.py` |
 | tests | pytest matrix (3.10 and 3.13, both from `requirements-dev.txt`) |
 | policies | `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |

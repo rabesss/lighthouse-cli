@@ -36,10 +36,7 @@ def import_session(site: str, json_output: bool) -> None:
         cookies = document.get("cookies")
         if not isinstance(cookies, dict) or set(cookies) != set(COOKIE_NAMES):
             raise ValueError()
-        if any(
-            not isinstance(v, str) or not v or any(ord(c) < 32 or ord(c) == 127 for c in v)
-            for v in cookies.values()
-        ):
+        if any(not isinstance(v, str) or not v or any(ord(c) < 32 or ord(c) == 127 for c in v) for v in cookies.values()):
             raise ValueError()
         if missing_cookie_names(cookies):
             raise ValueError()

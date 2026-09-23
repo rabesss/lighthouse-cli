@@ -39,22 +39,12 @@ class TestHtmlDownloadEndToEnd:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [
-                {
-                    "ModuleId": 1,
-                    "Title": "Module 1",
-                    "Modules": [],
-                    "Topics": [
-                        {
-                            "TopicId": 500,
-                            "Title": "Lecture Notes",
-                            "TypeIdentifier": "HTML",
-                            "Url": "",
-                            "LastModifiedDate": "2026-04-01T00:00:00Z",
-                        },
-                    ],
-                }
-            ]
+            "Modules": [{
+                "ModuleId": 1, "Title": "Module 1", "Modules": [], "Topics": [
+                    {"TopicId": 500, "Title": "Lecture Notes", "TypeIdentifier": "HTML",
+                     "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
+                ]
+            }]
         }
 
         # Mock HTTP layer — but NOT get_topic_html itself.
@@ -62,13 +52,11 @@ class TestHtmlDownloadEndToEnd:
         def mock_get_raw(path, **_kwargs):
             if "/content/topics/500" in str(path):
                 return (
-                    json.dumps(
-                        {
-                            "Title": "Lecture Notes",
-                            "Body": {"Text": "<html><body><h1>Hello World</h1></body></html>"},
-                            "Html": "",
-                        }
-                    ).encode("utf-8"),
+                    json.dumps({
+                        "Title": "Lecture Notes",
+                        "Body": {"Text": "<html><body><h1>Hello World</h1></body></html>"},
+                        "Html": "",
+                    }).encode("utf-8"),
                     {},
                 )
             raise AssertionError(f"Unexpected get_raw call: {path}")
@@ -76,16 +64,12 @@ class TestHtmlDownloadEndToEnd:
         def mock_cookies():
             return {"d2lSecureSessionVal": "test", "d2lSessionVal": "test"}
 
-        with (
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[{"OrgUnitId": 44347, "Name": "Test Course", "Code": "X"}],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
-            patch.object(LighthouseClient, "get_raw", side_effect=mock_get_raw),
-            patch.object(LighthouseClient, "cookies", property(lambda self: mock_cookies())),
-        ):
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 44347, "Name": "Test Course", "Code": "X"}
+        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
+             patch.object(LighthouseClient, "get_raw", side_effect=mock_get_raw), \
+             patch.object(LighthouseClient, "cookies", property(lambda self: mock_cookies())):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
@@ -115,47 +99,28 @@ class TestHtmlDownloadEndToEnd:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [
-                {
-                    "ModuleId": 1,
-                    "Title": "Mod",
-                    "Modules": [],
-                    "Topics": [
-                        {
-                            "TopicId": 600,
-                            "Title": "Unit 1: Intro <Test>",
-                            "TypeIdentifier": "HTML",
-                            "Url": "",
-                            "LastModifiedDate": "2026-04-01T00:00:00Z",
-                        },
-                    ],
-                }
-            ]
+            "Modules": [{
+                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                    {"TopicId": 600, "Title": "Unit 1: Intro <Test>", "TypeIdentifier": "HTML",
+                     "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
+                ]
+            }]
         }
 
-        with (
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[{"OrgUnitId": 44347, "Name": "Course", "Code": "X"}],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
-            patch.object(
-                LighthouseClient,
-                "get_raw",
-                return_value=(
-                    json.dumps(
-                        {
-                            "Title": "Unit 1: Intro <Test>",
-                            "Body": {"Text": "<p>Content</p>"},
-                            "Html": "",
-                        }
-                    ).encode("utf-8"),
-                    {},
-                ),
-            ),
-            patch.object(LighthouseClient, "cookies", property(lambda self: {})),
-        ):
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 44347, "Name": "Course", "Code": "X"}
+        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
+             patch.object(
+                 LighthouseClient,
+                 "get_raw",
+                 return_value=(json.dumps({
+                     "Title": "Unit 1: Intro <Test>",
+                     "Body": {"Text": "<p>Content</p>"},
+                     "Html": "",
+                 }).encode("utf-8"), {}),
+             ), \
+             patch.object(LighthouseClient, "cookies", property(lambda self: {})):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
@@ -174,47 +139,28 @@ class TestHtmlDownloadEndToEnd:
         output_dir.mkdir()
 
         toc = {
-            "Modules": [
-                {
-                    "ModuleId": 1,
-                    "Title": "Mod",
-                    "Modules": [],
-                    "Topics": [
-                        {
-                            "TopicId": 700,
-                            "Title": "Overview",
-                            "TypeIdentifier": "HTML",
-                            "Url": "",
-                            "LastModifiedDate": "2026-04-01T00:00:00Z",
-                        },
-                    ],
-                }
-            ]
+            "Modules": [{
+                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+                    {"TopicId": 700, "Title": "Overview", "TypeIdentifier": "HTML",
+                     "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
+                ]
+            }]
         }
 
-        with (
-            patch.object(
-                LighthouseClient,
-                "get_courses",
-                return_value=[{"OrgUnitId": 44347, "Name": "Course", "Code": "X"}],
-            ),
-            patch.object(LighthouseClient, "get_content_toc", return_value=toc),
-            patch.object(
-                LighthouseClient,
-                "get_raw",
-                return_value=(
-                    json.dumps(
-                        {
-                            "Title": "Overview",
-                            "Body": {"Text": "<p>Overview content</p>"},
-                            "Html": "",
-                        }
-                    ).encode("utf-8"),
-                    {},
-                ),
-            ),
-            patch.object(LighthouseClient, "cookies", property(lambda self: {})),
-        ):
+        with patch.object(LighthouseClient, "get_courses", return_value=[
+            {"OrgUnitId": 44347, "Name": "Course", "Code": "X"}
+        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
+             patch.object(
+                 LighthouseClient,
+                 "get_raw",
+                 return_value=(json.dumps({
+                     "Title": "Overview",
+                     "Body": {"Text": "<p>Overview content</p>"},
+                     "Html": "",
+                 }).encode("utf-8"), {}),
+             ), \
+             patch.object(LighthouseClient, "cookies", property(lambda self: {})):
+
             result = cli_runner.invoke(
                 cli,
                 ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
@@ -233,7 +179,6 @@ class TestSanitizeFilenameShared:
     def test_sanitize_filename_from_utils(self):
         """_sanitize_filename from utils.py handles forbidden chars."""
         from lighthouse_cli.utils import _sanitize_filename
-
         result = _sanitize_filename("file:name<>test.pdf")
         assert "<" not in result
         assert ">" not in result
@@ -242,7 +187,6 @@ class TestSanitizeFilenameShared:
     def test_sanitize_filename_url_decodes(self):
         """_sanitize_filename URL-decodes before sanitizing."""
         from lighthouse_cli.utils import _sanitize_filename
-
         result = _sanitize_filename("Lecture%201.pdf")
         assert result == "Lecture 1.pdf"
         assert "%20" not in result
@@ -250,6 +194,5 @@ class TestSanitizeFilenameShared:
     def test_sanitize_filename_strips_leading_trailing_spaces_dots(self):
         """_sanitize_filename strips leading/trailing dots and spaces."""
         from lighthouse_cli.utils import _sanitize_filename
-
         result = _sanitize_filename("  ..Lecture 1.pdf..  ")
         assert result == "Lecture 1.pdf"

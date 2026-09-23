@@ -22,9 +22,7 @@ def preview(ctx: click.Context) -> None:
     Supports untimed text/radio questions in all-at-once and one-question,
     no-backtracking layouts. Read page output before choosing answer IDs.
     """
-    ctx.obj = {
-        "preview_site": ctx.parent.params.get("site", "lighthouse") if ctx.parent else "lighthouse"
-    }
+    ctx.obj = {"preview_site": ctx.parent.params.get("site", "lighthouse") if ctx.parent else "lighthouse"}
 
 
 def _emit(value: dict[str, Any], structured: bool) -> None:
@@ -34,42 +32,17 @@ def _emit(value: dict[str, Any], structured: bool) -> None:
         click.echo(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False))
 
 
-def _execute(
-    operation: str,
-    course_id: int,
-    quiz_id: int,
-    json_output: bool,
-    yes: bool = False,
-    dry_run: bool = False,
-    **options: Any,
-) -> None:
+def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
+             yes: bool = False, dry_run: bool = False, **options: Any) -> None:
     site = click.get_current_context().obj["preview_site"]
     if dry_run:
-        _emit(
-            {
-                "site": site,
-                "mode": "preview",
-                "operation": operation,
-                "course_id": course_id,
-                "quiz_id": quiz_id,
-                "dry_run": True,
-                "options": options,
-            },
-            json_output,
-        )
+        _emit({"site": site, "mode": "preview", "operation": operation, "course_id": course_id,
+               "quiz_id": quiz_id, "dry_run": True, "options": options}, json_output)
         return
     writes = operation not in {"page", "status"}
-    if (
-        writes
-        and not yes
-        and (
-            not sys.stdin.isatty()
-            or not click.confirm(
-                f"Run preview {operation} on {site}, course {course_id}, quiz {quiz_id}?",
-                err=True,
-            )
-        )
-    ):
+    if writes and not yes and (not sys.stdin.isatty() or not click.confirm(
+        f"Run preview {operation} on {site}, course {course_id}, quiz {quiz_id}?", err=True,
+    )):
         click.echo("Operation cancelled. Use --yes for non-interactive preview changes.", err=True)
         if json_output:
             output_json({"cancelled": True})
@@ -84,54 +57,23 @@ def _execute(
             result = workflow.run(operation, **options)
         _emit({"site": site, **result}, json_output)
     except Exception as exc:
-        message = (
-            str(exc)
-            if isinstance(exc, (PreviewWorkflowError, *_UNCERTAIN))
-            else format_user_error(exc)
-        )
+        message = str(exc) if isinstance(exc, (PreviewWorkflowError, *_UNCERTAIN)) else format_user_error(exc)
         click.echo(message, err=True)
         if json_output:
-            output_json(
-                {
-                    "site": site,
-                    "mode": "preview",
-                    "course_id": course_id,
-                    "quiz_id": quiz_id,
-                    "error": message,
-                }
-            )
+            output_json({"site": site, "mode": "preview", "course_id": course_id, "quiz_id": quiz_id, "error": message})
         raise SystemExit(1) from None
 
 
 @preview.command("start", cls=JsonOutputCommand)
 @click.argument("course_id", type=_ID)
 @click.argument("quiz_id", type=_ID)
-@click.option(
-    "--bypass-availability",
-    is_flag=True,
-    help="Use the instructor preview's availability-bypass option.",
-)
+@click.option("--bypass-availability", is_flag=True, help="Use the instructor preview's availability-bypass option.")
 @click.option("--yes", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 @click.option("--json", "json_output", is_flag=True)
-def start(
-    course_id: int,
-    quiz_id: int,
-    bypass_availability: bool,
-    yes: bool,
-    dry_run: bool,
-    json_output: bool,
-) -> None:
+def start(course_id: int, quiz_id: int, bypass_availability: bool, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create one preview and seal its cursor. Refuses a second active start."""
-    _execute(
-        "start",
-        course_id,
-        quiz_id,
-        json_output,
-        yes,
-        dry_run,
-        bypass_availability=bypass_availability,
-    )
+    _execute("start", course_id, quiz_id, json_output, yes, dry_run, bypass_availability=bypass_availability)
 
 
 @preview.command("page", cls=JsonOutputCommand)
@@ -164,26 +106,9 @@ def status(course_id: int, quiz_id: int, json_output: bool) -> None:
 @click.option("--yes", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 @click.option("--json", "json_output", is_flag=True)
-def answer(
-    course_id: int,
-    quiz_id: int,
-    question_id: int,
-    choice_id: int,
-    yes: bool,
-    dry_run: bool,
-    json_output: bool,
-) -> None:
+def answer(course_id: int, quiz_id: int, question_id: int, choice_id: int, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Save a current-page radio choice once and verify persisted readback."""
-    _execute(
-        "answer",
-        course_id,
-        quiz_id,
-        json_output,
-        yes,
-        dry_run,
-        question_id=question_id,
-        choice_id=choice_id,
-    )
+    _execute("answer", course_id, quiz_id, json_output, yes, dry_run, question_id=question_id, choice_id=choice_id)
 
 
 @preview.command("next", cls=JsonOutputCommand)
@@ -200,15 +125,11 @@ def next_page(course_id: int, quiz_id: int, yes: bool, dry_run: bool, json_outpu
 @preview.command("submit", cls=JsonOutputCommand)
 @click.argument("course_id", type=_ID)
 @click.argument("quiz_id", type=_ID)
-@click.option(
-    "--retain", is_flag=True, help="Retain this preview in the teacher's Grade Quiz area."
-)
+@click.option("--retain", is_flag=True, help="Retain this preview in the teacher's Grade Quiz area.")
 @click.option("--yes", is_flag=True)
 @click.option("--dry-run", is_flag=True)
 @click.option("--json", "json_output", is_flag=True)
-def submit(
-    course_id: int, quiz_id: int, retain: bool, yes: bool, dry_run: bool, json_output: bool
-) -> None:
+def submit(course_id: int, quiz_id: int, retain: bool, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Submit a fully answered preview and verify its completion receipt."""
     _execute("submit", course_id, quiz_id, json_output, yes, dry_run, retain=retain)
 

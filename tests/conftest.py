@@ -64,7 +64,6 @@ def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> _FakeKeyringModule:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-
 @pytest.fixture(autouse=True)
 def _hermetic_secrets_key(
     monkeypatch: pytest.MonkeyPatch,

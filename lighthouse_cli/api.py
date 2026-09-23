@@ -187,7 +187,9 @@ def _require_safe_submission_filename(value: Any) -> str:
     return value
 
 
-_MIME_TYPE_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+/[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_MIME_TYPE_RE = re.compile(
+    r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+/[!#$%&'*+\-.^_`|~0-9A-Za-z]+"
+)
 
 
 def _require_safe_content_type(value: Any) -> str:
@@ -235,7 +237,9 @@ def _extract_rich_text(value: Any) -> str | None:
         seen.add(object_id)
         depth += 1
 
-        if current and not any(key in current for key in ("Html", "html", "HTML", "Text")):
+        if current and not any(
+            key in current for key in ("Html", "html", "HTML", "Text")
+        ):
             raise ContentResponseShapeError()
 
         html_value: Any = _MISSING
@@ -245,10 +249,8 @@ def _extract_rich_text(value: Any) -> str | None:
                 break
         text_value = current.get("Text", _MISSING)
         for candidate in (html_value, text_value):
-            if (
-                candidate is not _MISSING
-                and candidate is not None
-                and not isinstance(candidate, (str, dict))
+            if candidate is not _MISSING and candidate is not None and not isinstance(
+                candidate, (str, dict)
             ):
                 raise ContentResponseShapeError()
 
@@ -265,7 +267,11 @@ def _extract_rich_text(value: Any) -> str | None:
         # If no scalar was available, follow one nested RichText object.  The
         # HTML key wins over Text to mirror the scalar preference above.
         nested = next(
-            (candidate for candidate in (html_value, text_value) if isinstance(candidate, dict)),
+            (
+                candidate
+                for candidate in (html_value, text_value)
+                if isinstance(candidate, dict)
+            ),
             _MISSING,
         )
         if nested is _MISSING:
@@ -384,7 +390,6 @@ def _submission_response_result(
 # HTTP client
 # ---------------------------------------------------------------------------
 
-
 class LighthouseClient:
     """Stateful HTTP client wrapping requests.Session with D2L auth cookies.
 
@@ -396,7 +401,6 @@ class LighthouseClient:
 
     def __init__(self, read_only_auth: bool = False, *, site: str = "lighthouse") -> None:
         from .connection import connection_for
-
         self.connection = connection_for(site)
         self.base_url = self.connection.origin
         self.api_le = self.connection.api_le
@@ -424,11 +428,7 @@ class LighthouseClient:
         """Load cookies from disk on first use."""
         if not self._loaded:
             self._cookies = (
-                load_cookies(
-                    read_only=True,
-                    config_dir=self.connection.cookie_dir,
-                    expected_origin=self.base_url,
-                )
+                load_cookies(read_only=True, config_dir=self.connection.cookie_dir, expected_origin=self.base_url)
                 if self.connection.cookie_dir is not None
                 else load_cookies(read_only=self._read_only_auth)
             )
@@ -455,15 +455,7 @@ class LighthouseClient:
     # chain must not make a command loop or issue unbounded requests.
     _MAX_PAGINATION_PAGES = 100
 
-    def _request(
-        self,
-        method: str,
-        url: str,
-        _skip_raise: bool = False,
-        _timeout: int = 30,
-        _replay_safe: bool = True,
-        **kwargs: Any,
-    ) -> requests.Response:
+    def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, _replay_safe: bool = True, **kwargs: Any) -> requests.Response:
         """Make an authenticated request with safe retry and auto-refresh.
 
         GET and HEAD requests retry HTTP 429 (Too Many Requests) with
@@ -487,17 +479,13 @@ class LighthouseClient:
         """
         cookies = self.cookies
         if missing_cookie_names(cookies):
-            raise SessionExpiredError(
-                _session_expired_msg("no cookies found"), recovery=_SESSION_EXPIRED_RECOVERY
-            )
+            raise SessionExpiredError(_session_expired_msg("no cookies found"), recovery=_SESSION_EXPIRED_RECOVERY)
 
         retryable = method.upper() in self._RETRYABLE_METHODS and _replay_safe
         refresh_attempted = False
         while True:
             try:
-                return self._do_request(
-                    method, url, _skip_raise, _timeout, _replay_safe=_replay_safe, **kwargs
-                )
+                return self._do_request(method, url, _skip_raise, _timeout, _replay_safe=_replay_safe, **kwargs)
             except SessionExpiredError:
                 if self._read_only_auth or not retryable:
                     # A POST/PUT/etc. may already have been accepted by the
@@ -534,14 +522,9 @@ class LighthouseClient:
                 self._apply_cookies_to_session(new_cookies)
 
     def _do_request(
-        self,
-        method: str,
-        url: str,
+        self, method: str, url: str,
         # skip_raise forwarded from _request._skip_raise
-        skip_raise: bool,
-        timeout: int,
-        _replay_safe: bool = True,
-        **kwargs: Any,
+        skip_raise: bool, timeout: int, _replay_safe: bool = True, **kwargs: Any,
     ) -> requests.Response:
         """Execute the HTTP request with bounded idempotent retries.
 
@@ -566,7 +549,7 @@ class LighthouseClient:
                     raise NetworkError(
                         f"Network request failed after {max_attempts} attempt(s)."
                     ) from None
-                time.sleep(self._RETRY_BACKOFF * (2**attempt))
+                time.sleep(self._RETRY_BACKOFF * (2 ** attempt))
                 continue
 
             # D2L redirects to login page when session is dead
@@ -590,7 +573,7 @@ class LighthouseClient:
 
             # Rate-limit: retry with backoff
             if resp.status_code == 429 and retryable and attempt < max_attempts - 1:
-                fallback = self._RETRY_BACKOFF * (2**attempt)
+                fallback = self._RETRY_BACKOFF * (2 ** attempt)
                 retry_after = resp.headers.get("Retry-After")
                 try:
                     server_delay = float(retry_after) if retry_after is not None else None
@@ -655,7 +638,6 @@ class LighthouseClient:
         """
         if self._csrf_token is None:
             from .request_protection import csrf_from_homepage
-
             body, _headers = self.get_raw("/d2l/home", max_bytes=2 * 1024 * 1024)
             try:
                 self._csrf_token = csrf_from_homepage(body)
@@ -692,7 +674,9 @@ class LighthouseClient:
             # while ``get()`` uses the normalized lowercase HTTPS form.
             parsed = urlparse(url)
             request_url = (
-                canonical_url if parsed.scheme or parsed.netloc or url.startswith("?") else url
+                canonical_url
+                if parsed.scheme or parsed.netloc or url.startswith("?")
+                else url
             )
             try:
                 data = self.get_json(request_url)
@@ -724,10 +708,7 @@ class LighthouseClient:
 
     def canonical_url(self, url: str, **kwargs: Any) -> str:
         return self._canonical_pagination_url(
-            url,
-            origin=self.base_url,
-            api_root=self.api_le,
-            **kwargs,
+            url, origin=self.base_url, api_root=self.api_le, **kwargs,
         )
 
     @staticmethod
@@ -872,19 +853,11 @@ class LighthouseClient:
 
     def get_semesters(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mysemesters (cached)."""
-        return self._cached(
-            "semesters",
-            lambda: self.get_json(f"{self.base_url}/d2l/le/manageCourses/api/mysemesters"),
-        )
+        return self._cached("semesters", lambda: self.get_json(f"{self.base_url}/d2l/le/manageCourses/api/mysemesters"))
 
     def get_courses(self) -> list[dict[str, Any]]:
         """GET /d2l/le/manageCourses/api/mycourses – returns the Courses list (cached)."""
-        return self._cached(
-            "courses",
-            lambda: self.get_json(f"{self.base_url}/d2l/le/manageCourses/api/mycourses").get(
-                "Courses", []
-            ),
-        )
+        return self._cached("courses", lambda: self.get_json(f"{self.base_url}/d2l/le/manageCourses/api/mycourses").get("Courses", []))
 
     def get_content_toc(self, org_unit_id: int) -> dict[str, Any]:
         """GET content table-of-contents for a course."""
@@ -905,7 +878,9 @@ class LighthouseClient:
     def get_my_grades(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET my grade values for a course (handles pagination)."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
-        return self._paginate_list(f"/{course_id}/grades/values/myGradeValues/", "Objects")
+        return self._paginate_list(
+            f"/{course_id}/grades/values/myGradeValues/", "Objects"
+        )
 
     def get_quizzes(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET quizzes for a course (handles pagination)."""
@@ -923,7 +898,6 @@ class LighthouseClient:
 
     def get_course_enrollments(self) -> list[dict[str, Any]]:
         """GET enrollments filtered to Course Offering type only (cached)."""
-
         def _fetch() -> list[dict[str, Any]]:
             return [
                 enrollment
@@ -978,7 +952,9 @@ class LighthouseClient:
         """Download a content topic file. Returns (bytes, filename)."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
         topic_identifier = _require_positive_endpoint_id(topic_id, "topic_id")
-        content, headers = self.get_raw(f"/{course_id}/content/topics/{topic_identifier}/file")
+        content, headers = self.get_raw(
+            f"/{course_id}/content/topics/{topic_identifier}/file"
+        )
         return content, _extract_filename(headers) or f"topic_{topic_identifier}"
 
     def get_topic_html(self, org_unit_id: int, topic_id: int) -> tuple[bytes, str]:
@@ -1104,7 +1080,9 @@ class LighthouseClient:
         dropbox_id = _require_positive_endpoint_id(folder_id, "folder_id")
         safe_filename = _require_safe_submission_filename(filename)
         safe_content_type = (
-            _require_safe_content_type(content_type) if content_type is not None else None
+            _require_safe_content_type(content_type)
+            if content_type is not None
+            else None
         )
 
         import html
@@ -1114,11 +1092,7 @@ class LighthouseClient:
         # Build RichText description (required even if empty)
         text = description or f"Submitted via lighthouse-cli: {safe_filename}"
         rich_text = {"Text": text, "Html": f"<p>{html.escape(text)}</p>"}
-        mime_type = (
-            safe_content_type
-            or mimetypes.guess_type(safe_filename)[0]
-            or "application/octet-stream"
-        )
+        mime_type = safe_content_type or mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
         header_filename = safe_filename.replace('"', '\\"')
 
         # Build multipart/mixed body per D2L spec:
@@ -1259,7 +1233,9 @@ def resolve_course_id(client: LighthouseClient, identifier: str) -> int:
     # Search by name substring (case-insensitive)
     needle = identifier.strip().casefold()
     if not needle:
-        raise CourseNotFoundError("Course identifier cannot be empty. Run: lighthouse courses")
+        raise CourseNotFoundError(
+            "Course identifier cannot be empty. Run: lighthouse courses"
+        )
     courses = get_enrolled_course_catalog(client)
     matches = [
         course
@@ -1272,19 +1248,18 @@ def resolve_course_id(client: LighthouseClient, identifier: str) -> int:
         return int(matches[0]["OrgUnitId"])
     if len(matches) > 1:
         raise CourseNotFoundError(
-            "Ambiguous match '"
-            + identifier
-            + "'. Multiple courses found:\n"
+            "Ambiguous match '" + identifier + "'. Multiple courses found:\n"
             + "\n".join(f"  {c['OrgUnitId']} – {c['Name']}" for c in matches)
             + "\n\nUse the numeric OrgUnitId for an exact match."
         )
-    raise CourseNotFoundError(f"Course '{identifier}' not found. Run: lighthouse courses")
+    raise CourseNotFoundError(
+        f"Course '{identifier}' not found. Run: lighthouse courses"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Auth refresh via browser-harness
 # ---------------------------------------------------------------------------
-
 
 def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
     """Extract fresh D2L cookies from the browser via CDP.
@@ -1372,7 +1347,9 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
                 raise NetworkError("Browser debugging endpoint returned a redirect.")
             if status is not None and status != 200:
                 raise NetworkError("Browser debugging endpoint returned an invalid response.")
-            final_url = resp.geturl() if callable(getattr(resp, "geturl", None)) else discovery_url
+            final_url = (
+                resp.geturl() if callable(getattr(resp, "geturl", None)) else discovery_url
+            )
             if not isinstance(final_url, str) or not final_url:
                 final_url = discovery_url
             _validate_cdp_discovery_url(final_url, expected_port=port)
@@ -1387,7 +1364,6 @@ def _refresh_via_cdp_websocket(port: int) -> dict[str, str]:
 
     try:
         import asyncio
-
         return asyncio.run(_cdp_get_cookies_ws(ws_url))
     except ImportError:
         raise NetworkError(
@@ -1480,7 +1456,6 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
     import websockets
 
     _validate_cdp_websocket_url(ws_url)
-
     async def exchange() -> Any:
         async with websockets.connect(
             ws_url,

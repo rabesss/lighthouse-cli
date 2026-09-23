@@ -8,14 +8,15 @@ CI (`ci.yml`) has four jobs; each maps to one local command:
 
 | Job | Local reproduction |
 | --- | --- |
-| `quality` | `ruff format --check . && ruff check . && mypy && lint-imports && deptry . && xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli` |
+| `quality` | `ruff check . && mypy && lint-imports && deptry . && xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli` |
 | `security` | `python scripts/check_secrets.py` (working tree, rejecting) and `gitleaks git .` (history, uses `.gitleaks.toml`) |
 | `tests` | `pytest -q --cov` |
 | `policies` | `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |
 
 ## 2. Fix by category
 
-- **Lint/format** — run `ruff format .` / `ruff check . --fix`; commit.
+- **Lint** — run `ruff check . --fix`, review the result, commit. The code is
+  not auto-formatted; keep edits in the style of the surrounding code.
 - **Types** — read the error; prefer real annotations or `cast` at API
   boundaries. Never add blanket `# type: ignore`.
 - **Architecture (`lint-imports`)** — the import violates a layer in

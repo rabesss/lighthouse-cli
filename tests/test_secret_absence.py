@@ -56,7 +56,9 @@ def config_html() -> str:
         '"canary": "pub-canary"',
     ]
     return (
-        "<html><body><script>\n$Config = {\n" + ",\n".join(fields) + "\n};\n</script></body></html>"
+        "<html><body><script>\n$Config = {\n"
+        + ",\n".join(fields)
+        + "\n};\n</script></body></html>"
     )
 
 
@@ -74,7 +76,9 @@ def mfa_html() -> str:
         '"arrUserProofs": [{"authMethodId": "PhoneAppOTP", "display": "Android", "data": "+91 ***1234", "isDefault": true}]',
     ]
     return (
-        "<html><body><script>\n$Config = {\n" + ",\n".join(fields) + "\n};\n</script></body></html>"
+        "<html><body><script>\n$Config = {\n"
+        + ",\n".join(fields)
+        + "\n};\n</script></body></html>"
     )
 
 
@@ -163,7 +167,9 @@ def assert_no_sentinels_on_disk(config_dir: Path) -> None:
 
 
 class TestNoSecretsOnDiskOrOutput:
-    def test_full_login_flow_leaves_no_plaintext_secrets(self, sealed_dir: Path) -> None:
+    def test_full_login_flow_leaves_no_plaintext_secrets(
+        self, sealed_dir: Path
+    ) -> None:
         """login() with sentinels everywhere → no sentinel on disk."""
         # Pre-existing artifacts (credentials + cookies) must also stay sealed.
         from lighthouse_cli.auth import CredentialStore
@@ -323,7 +329,9 @@ class TestNoSecretsInErrorsAndOutput:
         # The value itself is still there — only its representation is masked.
         assert plan.totp_code == S_TOTP
 
-    def test_traceback_path_carries_no_secret_values(self, sealed_dir: Path) -> None:
+    def test_traceback_path_carries_no_secret_values(
+        self, sealed_dir: Path
+    ) -> None:
         """Even a raw traceback of the failing call shows no sentinel values."""
         # Create a pending checkpoint first (defer login), then break the network.
         session = ScriptedSession()

@@ -90,7 +90,9 @@ class TestKeySourceMatrix:
         assert "kdf_salt" in doc
         assert CredentialStore().load() == ("user@x.com", "pw-sentinel")
 
-    def test_keyring_source_reuses_existing_entry(self, store_dir: Path, fake_keyring: Any) -> None:
+    def test_keyring_source_reuses_existing_entry(
+        self, store_dir: Path, fake_keyring: Any
+    ) -> None:
         """The pre-existing ('lighthouse-cli', 'credential-key') entry is reused,
         never replaced with a parallel entry or a raw-bytes format."""
         from cryptography.fernet import Fernet
@@ -225,9 +227,7 @@ class TestSealedCookies:
         assert load_cookies() == cookies
 
     def test_disappearing_sealed_file_is_treated_as_absent(
-        self,
-        store_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, store_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         save_cookies({"d2lSecureSessionVal": "sec-sentinel"})
         monkeypatch.setattr(
@@ -399,7 +399,9 @@ class TestMfaPendingCompatibility:
         assert load_mfa_pending() is None
         assert not pending_path(store_dir).exists()
 
-    def test_pending_metadata_control_values_are_not_reintroduced(self, store_dir: Path) -> None:
+    def test_pending_metadata_control_values_are_not_reintroduced(
+        self, store_dir: Path
+    ) -> None:
         save_mfa_pending(
             {
                 "created_at": "2026-01-01T00:00:00+00:00\x1b[31m",
@@ -421,9 +423,7 @@ class TestMfaPendingCompatibility:
         from lighthouse_cli.cli import cli as root_cli
 
         pending_path(store_dir).write_text(json.dumps(LEGACY_V1_PENDING))
-        result = cli_runner.invoke(
-            root_cli, ["auth", "verify", "123456", "--json"], catch_exceptions=False
-        )
+        result = cli_runner.invoke(root_cli, ["auth", "verify", "123456", "--json"], catch_exceptions=False)
 
         assert result.exit_code == 1
         payload = json.loads(result.stdout)  # raises if anything polluted stdout
@@ -438,11 +438,7 @@ class TestMfaPendingRoundtrip:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "mfa_method": "sms",
             "mfa_page_url": "https://login.microsoftonline.com/common/SAS/ProcessAuth?x=1",
-            "mfa_config": {
-                "sFT": "ft-sentinel",
-                "sCtx": "ctx-sentinel",
-                "urlPost": "/SAS/ProcessAuth",
-            },
+            "mfa_config": {"sFT": "ft-sentinel", "sCtx": "ctx-sentinel", "urlPost": "/SAS/ProcessAuth"},
             "begin": {"Success": True, "SessionId": "sid"},
             "selected_proof": {
                 "auth_method_id": "OneWaySMS",
@@ -471,11 +467,9 @@ class TestMfaPendingRoundtrip:
         assert loaded["mfa_method"] == "sms"  # metadata preserved
 
         # Resumable phase 2: KMSI page checkpoint.
-        update_mfa_pending(
-            {
-                "kmsi_checkpoint": {"url": "https://x/kmsi", "html": "<html>kmsi</html>"},
-            }
-        )
+        update_mfa_pending({
+            "kmsi_checkpoint": {"url": "https://x/kmsi", "html": "<html>kmsi</html>"},
+        })
         loaded = load_mfa_pending()
         assert loaded["kmsi_checkpoint"]["url"] == "https://x/kmsi"
 
@@ -484,9 +478,7 @@ class TestMfaPendingRoundtrip:
         assert not pending_path(store_dir).exists()
 
     def test_disappearing_sealed_file_is_treated_as_absent(
-        self,
-        store_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, store_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         save_mfa_pending(self._sample_payload())
         monkeypatch.setattr(
@@ -506,13 +498,7 @@ class TestMfaPendingRoundtrip:
         # Plaintext allowlist only: version/created_at/mfa_method (+ envelope).
         assert doc["mfa_method"] == "sms"
         assert "created_at" in doc
-        for forbidden in (
-            "ft-sentinel",
-            "ctx-sentinel",
-            "cookie-sentinel",
-            "flow-sentinel",
-            "ctx2-sentinel",
-        ):
+        for forbidden in ("ft-sentinel", "ctx-sentinel", "cookie-sentinel", "flow-sentinel", "ctx2-sentinel"):
             assert forbidden not in raw
         for secret_key in ("mfa_config", "begin", "cookies", "end_auth_flow", "kmsi_checkpoint"):
             assert secret_key not in doc

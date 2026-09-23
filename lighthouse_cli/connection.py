@@ -33,6 +33,4 @@ def connection_for(site: str) -> Connection:
     if site != "trial":
         raise ValueError("Unknown connection. Choose lighthouse or trial.")
     root = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
-    return Connection(
-        "https://hetrynow.brightspace.com", root / "sites" / "hetrynow.brightspace.com"
-    )
+    return Connection("https://hetrynow.brightspace.com", root / "sites" / "hetrynow.brightspace.com")

@@ -37,10 +37,8 @@ API_LE = f"{BASE_URL}/d2l/api/le/1.93"
 
 # Cookie names we care about
 COOKIE_NAMES = (
-    "d2lSameSiteCanaryA",
-    "d2lSameSiteCanaryB",
-    "d2lSecureSessionVal",
-    "d2lSessionVal",
+    "d2lSameSiteCanaryA", "d2lSameSiteCanaryB",
+    "d2lSecureSessionVal", "d2lSessionVal",
 )
 
 # Paths (defaults; storage functions resolve LIGHTHOUSE_CONFIG_DIR per call)
@@ -86,11 +84,9 @@ def _trusted_iso_timestamp(value: object) -> str | None:
         return None
     return value
 
-
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
-
 
 def ensure_config_dir() -> Path:
     """Create the config directory if it doesn't exist with 0700 permissions."""
@@ -153,16 +149,18 @@ def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
         domain = str(entry.get("domain") or "")
         if not cookie_domain_accepted(domain):
             continue
-        target = host_only if domain.lstrip(".").lower() == COOKIE_SETTING_HOST else domain_scoped
+        target = (
+            host_only
+            if domain.lstrip(".").lower() == COOKIE_SETTING_HOST
+            else domain_scoped
+        )
         target[name] = value
     merged = dict(domain_scoped)
     merged.update(host_only)
     return merged
 
 
-def load_cookies(
-    *, read_only: bool = False, config_dir: Path | None = None, expected_origin: str | None = None
-) -> dict[str, str]:
+def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, expected_origin: str | None = None) -> dict[str, str]:
     """Load cookies from disk. Returns empty dict if file is missing.
 
     Sealed v2 documents are decrypted with their recorded key source; an
@@ -202,9 +200,7 @@ def load_cookies(
         if artifact is None:
             return {}
         _meta, secret = artifact
-        if (expected_origin is not None or "origin" in secret) and secret.get("origin") != (
-            expected_origin or BASE_URL
-        ):
+        if (expected_origin is not None or "origin" in secret) and secret.get("origin") != (expected_origin or BASE_URL):
             return {}
         return _filter_cookie_names(secret.get("cookies", {}))
 
@@ -256,7 +252,8 @@ def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) ->
         store.cookie_file,
         metadata={
             "extracted_at": (
-                _trusted_iso_timestamp(extracted_at) or datetime.now(timezone.utc).isoformat()
+                _trusted_iso_timestamp(extracted_at)
+                or datetime.now(timezone.utc).isoformat()
             )
         },
         secret={"cookies": filtered},
