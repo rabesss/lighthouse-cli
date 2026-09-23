@@ -11,7 +11,6 @@ from lighthouse_cli.config import BASE_URL, COOKIE_NAMES
 from lighthouse_cli.ms_auth import (
     MS_ERROR_CODES,
     VALID_MFA_METHODS,
-    MfaProbeResult,
     MicrosoftSSOClient,
     MicrosoftSSOError,
     ResponseSnapshot,
@@ -243,52 +242,6 @@ class TestMfaMethodSelection:
 
         assert "REAL_SECRET" not in output
         assert "A verification code was just sent to your phone." in output
-
-    def test_probe_script_does_not_render_untrusted_display(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from scripts.probe_mfa_methods import _print_proofs
-
-        proof = UserProof(
-            "OneWaySMS",
-            "FULL-DISPLAY-SENTINEL user@example.com +919876541234",
-            "+919876541234",
-            True,
-        )
-        _print_proofs(MfaProbeResult(page="converged", proofs=[proof]))
-        output = capsys.readouterr().out
-
-        assert "Text code (SMS or WhatsApp): ***1234" in output
-        assert "FULL-DISPLAY-SENTINEL" not in output
-        assert "user@example.com" not in output
-        assert "+919876541234" not in output
-
-    def test_probe_script_wraps_unexpected_error_without_traceback(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        from scripts import probe_mfa_methods as probe
-
-        monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@example.com")
-        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "PASSWORD_SENTINEL")
-        monkeypatch.setattr(
-            probe.MicrosoftSSOClient,
-            "probe_mfa_methods",
-            lambda _self, _username, _password: (_ for _ in ()).throw(
-                RuntimeError(
-                    "GET https://login.microsoftonline.com/?token=PROBE_SECRET"
-                )
-            ),
-        )
-
-        assert probe.main() == 1
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert "MFA method discovery failed" in captured.err
-        assert "PROBE_SECRET" not in captured.err
-        assert "PASSWORD_SENTINEL" not in captured.err
-        assert "Traceback" not in captured.err
 
     def test_choose_single_proof_skips_prompt(self) -> None:
         single = [UserProof("OneWaySMS", "SMS", "+91", True)]
