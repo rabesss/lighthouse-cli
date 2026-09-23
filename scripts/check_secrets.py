@@ -51,6 +51,7 @@ def main() -> int:
                 "detect_secrets.pre_commit_hook",
                 "--baseline",
                 str(scratch),
+                "--",  # a tracked path starting with "-" must not parse as an option
                 *files,
             ],
             cwd=root,

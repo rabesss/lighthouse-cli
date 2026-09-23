@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,10 @@ import pytest
 from scripts import generate_cli_reference as gen
 
 SCRIPT = Path(gen.__file__).resolve()
-LIGHTHOUSE = Path(sys.executable).parent / "lighthouse"
+# Prefer the console script next to this interpreter; fall back to PATH (e.g. a
+# --user install puts it in ~/.local/bin while python lives elsewhere).
+_LOCAL = Path(sys.executable).parent / "lighthouse"
+LIGHTHOUSE = _LOCAL if _LOCAL.exists() else Path(shutil.which("lighthouse") or _LOCAL)
 
 # Fake CLI: prints a deterministic help per path; fails for any path containing "preview".
 FAKE_CLI = """\

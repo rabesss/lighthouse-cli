@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 _REQUIREMENT_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)(\[[^\]]*\])?==([^\s;#]+)")
-_BARE_CALLABLE = re.compile(r"(?::|->)\s*Callable\b(?!\[)")
+_BARE_CALLABLE = re.compile(r"\bCallable\b(?!\s*\[)")
 _FULL_SHA_USES = re.compile(r"^[^@\s]+@[0-9a-f]{40}(?:\s+#.*)?$")
 
 
@@ -49,7 +49,8 @@ def _typing_offenders(source: str) -> list[int]:
     return [
         lineno
         for lineno, line in enumerate(source.splitlines(), start=1)
-        if re.search(r"\bOptional\[", line) or _BARE_CALLABLE.search(line)
+        if re.search(r"\bOptional\[", line)
+        or (not re.match(r"\s*(from|import)\b", line) and _BARE_CALLABLE.search(line))
     ]
 
 
@@ -113,6 +114,8 @@ class TestPythonModulePolicies:
             "def f(cb: Callable) -> None: ...",
             "def f() -> Callable: ...",
             "handler: Callable = print",
+            "handlers: dict[str, Callable] = {}",
+            "def f(x: list[Callable] | None) -> None: ...",
         ],
     )
     def test_typing_checker_rejects(self, line: str) -> None:
@@ -232,7 +235,7 @@ class TestCIPolicies:
     def test_every_workflow_action_is_sha_pinned(self) -> None:
         unpinned = {
             path.name: refs
-            for path in sorted(WORKFLOWS.glob("*.yml"))
+            for path in sorted(WORKFLOWS.glob("*.y*ml"))
             if (refs := _unpinned_actions(path.read_text()))
         }
         assert unpinned == _VENDOR_MANAGED_ACTIONS, f"mutable action refs: {unpinned}"

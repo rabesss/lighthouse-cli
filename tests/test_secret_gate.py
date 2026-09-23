@@ -93,3 +93,17 @@ def test_stale_baseline_fails_without_being_rewritten(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert (tmp_path / ".secrets.baseline").read_bytes() == baseline
+
+
+def test_dash_prefixed_tracked_path_is_scanned_not_parsed_as_option(tmp_path: Path) -> None:
+    _make_repo(tmp_path, {"clean.py": "x = 1\n"})
+    baseline = _baseline_for(tmp_path)
+    (tmp_path / "-leak.py").write_text(f"key = {CANARY!r}\n")
+    _run(tmp_path, "git", "add", "--", "-leak.py")
+
+    result = _gate(tmp_path)
+
+    assert result.returncode != 0
+    # A real finding, not an argparse "unrecognized arguments" failure.
+    assert "Location:    -leak.py:1" in result.stdout + result.stderr
+    assert (tmp_path / ".secrets.baseline").read_bytes() == baseline

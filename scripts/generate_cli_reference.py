@@ -132,7 +132,13 @@ def write_atomic(dest: Path, content: str) -> None:
 
 
 def load_root() -> click.Command:
-    from lighthouse_cli.cli import cli
+    try:
+        from lighthouse_cli.cli import cli
+    except ImportError as exc:
+        raise HelpError(
+            f"cannot import lighthouse_cli in {sys.executable} ({exc}); "
+            "install the project into this interpreter"
+        ) from exc
 
     return cli
 
