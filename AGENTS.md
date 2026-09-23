@@ -31,6 +31,8 @@ ruff format --check . && ruff check .   # format + lint
 mypy                                    # strict type check
 lint-imports                            # layered architecture contracts
 deptry .                                # dependency hygiene
+xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli   # average/module complexity
+python scripts/check_secrets.py         # rejecting secret scan (never edits the baseline)
 pytest -q                               # full suite must stay green
 ```
 

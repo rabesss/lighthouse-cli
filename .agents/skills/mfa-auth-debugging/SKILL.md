@@ -23,15 +23,19 @@ description: >-
 ## Triage flow
 
 ```sh
-lighthouse auth status --json      # cookie presence/age, no network
-lighthouse auth login --json       # starts SSO; may return mfa_pending
-lighthouse auth verify --json --totp <code>   # completes server-sent codes
-lighthouse auth mfa-methods --json           # lists methods, triggers nothing
+lighthouse auth status --json        # validates stored cookies against the API
+lighthouse auth login --json         # starts SSO; may return mfa_pending
+lighthouse auth verify CODE --json   # positional CODE completes server-sent codes
+lighthouse auth mfa-methods --json   # lists methods; real sign-in, stops before BeginAuth
 ```
 
-- **`SessionExpiredError` mid-flow**: cookies are origin-bound; check
-  `~/.config/lighthouse/cookies.json` age via `auth status`. Never print cookie
-  values.
+- **`SessionExpiredError` mid-flow**: cookies are origin-bound. Stored state
+  lives in `~/.config/lighthouse-cli/` (override: `LIGHTHOUSE_CONFIG_DIR`);
+  `auth status` makes a live API call to confirm the cookies still work. Never
+  print cookie values.
+- **`auth mfa-methods` is not side-effect free**: it performs a real sign-in
+  through the post-password stage and may advance KMSI/session state, but it
+  never calls BeginAuth, so no SMS/call/push is sent.
 - **Loop between KMSI/SAML pages**: the state machine lives in
   `ms_auth.py` (`_step_*` methods); reproduce with the recorded fixtures in
   `tests/test_ms_auth*.py` before touching logic.

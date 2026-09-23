@@ -40,7 +40,8 @@ ruff check .            # lint
 mypy                    # strict type check (config in pyproject.toml)
 lint-imports            # layered architecture contracts
 deptry .                # unused/undeclared dependency scan
-xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli   # complexity ratchet
+xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli   # average/module complexity
+python scripts/check_secrets.py   # rejecting secret scan (never edits the baseline)
 pytest -q --durations=10 --cov --cov-report=term
 ```
 
@@ -56,14 +57,18 @@ commands, so a green local run means a green CI run.
   contract in `pyproject.toml` ([tool.importlinter]); the layers mirror the real
   dependency graph, so either move the code down or hoist the helper into a
   lower layer. Do not edit the contract to make an import legal.
-- **`xenon` fails** — new block exceeds the ratchet; extract helpers. The
-  `ms_auth.py` SSO state machine is a known, deliberately excluded hotspot.
+- **`xenon` fails** — the average or a module rank regressed; extract helpers.
+  `-b F` does not block individual rank-F functions, so check new code for
+  them yourself. The `ms_auth.py` SSO state machine is a known, deliberately
+  excluded hotspot.
+- **`check_secrets.py` fails** — see the Secrets row of
+  `docs/runbooks/ci-red-triage.md`; never regenerate the baseline to pass.
 
 ## CI mapping
 
 | CI job | Local command |
 | --- | --- |
 | quality | ruff format/check, mypy, lint-imports, deptry, xenon |
-| security | gitleaks history scan + detect-secrets baseline scan |
-| tests | pytest matrix (3.10 pinned, 3.13 latest) |
-| policies | `pytest tests/test_repo_policies.py -q` |
+| security | gitleaks history scan (`.gitleaks.toml`) + `python scripts/check_secrets.py` |
+| tests | pytest matrix (3.10 and 3.13, both from `requirements-dev.txt`) |
+| policies | `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |

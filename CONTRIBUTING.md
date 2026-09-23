@@ -21,10 +21,12 @@ playwright install chromium
 
 CI runs on every PR and push to `main` (`.github/workflows/ci.yml`): formatting,
 linting (`ruff`), strict type checking (`mypy`), architecture layers
-(`import-linter`), dependency hygiene (`deptry`), a complexity ratchet
-(`xenon`), secret scanning (gitleaks + `detect-secrets` baseline), the test
-matrix (Python 3.10 pinned / 3.13 latest), and repository policy tests
-(`tests/test_repo_policies.py`).
+(`import-linter`), dependency hygiene (`deptry`), a complexity gate
+(`xenon`: average and per-module ranks only; it does not block individual
+worst-case functions), secret scanning (gitleaks history scan plus a rejecting
+`detect-secrets` check against the audited baseline), the test matrix (Python
+3.10 and 3.13, both from the pinned lockfile), and repository policy tests
+(`tests/test_repo_policies.py`, `tests/test_secret_gate.py`).
 
 Install the pinned toolchain and reproduce any job locally:
 

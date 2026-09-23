@@ -3,10 +3,10 @@
 # CLI reference
 
 Verbatim `--help` output for every command (top level, groups, and leaf
-commands). Regenerate after changing commands:
+commands, at any nesting depth). Regenerate after changing commands:
 
 ```sh
-python scripts/generate_cli_reference.py > docs/cli-reference.md
+python scripts/generate_cli_reference.py
 ```
 
 ## `lighthouse`
@@ -588,6 +588,109 @@ Commands:
   start    Create one preview and seal its cursor.
   status   Read the local cursor status without contacting Brightspace.
   submit   Submit a fully answered preview and verify its completion...
+```
+
+##### `lighthouse instructor preview abandon`
+
+```text
+Usage: lighthouse instructor preview abandon [OPTIONS] COURSE_ID QUIZ_ID
+
+  Forget the local active cursor; does not delete the remote attempt.
+
+  Inspect uncertain outcomes in the browser first. Starting another preview
+  can invalidate an older unretained preview of the same quiz.
+
+Options:
+  --yes
+  --json
+  --help  Show this message and exit.
+```
+
+##### `lighthouse instructor preview answer`
+
+```text
+Usage: lighthouse instructor preview answer [OPTIONS] COURSE_ID QUIZ_ID
+                                            QUESTION_ID CHOICE_ID
+
+  Save a current-page radio choice once and verify persisted readback.
+
+Options:
+  --yes
+  --dry-run
+  --json
+  --help     Show this message and exit.
+```
+
+##### `lighthouse instructor preview next`
+
+```text
+Usage: lighthouse instructor preview next [OPTIONS] COURSE_ID QUIZ_ID
+
+  Advance after all current answers are saved. No backward command exists.
+
+Options:
+  --yes
+  --dry-run
+  --json
+  --help     Show this message and exit.
+```
+
+##### `lighthouse instructor preview page`
+
+```text
+Usage: lighthouse instructor preview page [OPTIONS] COURSE_ID QUIZ_ID
+
+  Read the current page; verify answer saves and completed submissions.
+
+  An uncertain navigation outcome requires browser inspection before
+  continuing or abandoning the preview.
+
+Options:
+  --json
+  --help  Show this message and exit.
+```
+
+##### `lighthouse instructor preview start`
+
+```text
+Usage: lighthouse instructor preview start [OPTIONS] COURSE_ID QUIZ_ID
+
+  Create one preview and seal its cursor. Refuses a second active start.
+
+Options:
+  --bypass-availability  Use the instructor preview's availability-bypass
+                         option.
+  --yes
+  --dry-run
+  --json
+  --help                 Show this message and exit.
+```
+
+##### `lighthouse instructor preview status`
+
+```text
+Usage: lighthouse instructor preview status [OPTIONS] COURSE_ID QUIZ_ID
+
+  Read the local cursor status without contacting Brightspace.
+
+Options:
+  --json
+  --help  Show this message and exit.
+```
+
+##### `lighthouse instructor preview submit`
+
+```text
+Usage: lighthouse instructor preview submit [OPTIONS] COURSE_ID QUIZ_ID
+
+  Submit a fully answered preview and verify its completion receipt.
+
+Options:
+  --retain   Retain this preview in the teacher's Grade Quiz area.
+  --yes
+  --dry-run
+  --json
+  --help     Show this message and exit.
 ```
 
 #### `lighthouse instructor quiz`
