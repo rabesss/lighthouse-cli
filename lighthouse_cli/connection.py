@@ -1,8 +1,7 @@
-"""Explicit sandbox connection settings; production remains the default."""
+"""The Lighthouse (MAHE Manipal) connection the CLI talks to."""
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,15 +21,19 @@ class Connection:
         return f"{self.origin}/d2l/api/le/1.93"
 
 
-def connection_for(site: str) -> Connection:
-    """Keep alternate-site cookies out of the default authentication files.
+LIGHTHOUSE = Connection("https://lighthouse.manipal.edu", None)
 
-    An explicit site is deliberately limited to the two inspected tenants.
-    Adding other tenants requires verifying their authentication contract.
-    """
-    if site == "lighthouse":
-        return Connection("https://lighthouse.manipal.edu", None)
-    if site != "trial":
-        raise ValueError("Unknown connection. Choose lighthouse or trial.")
-    root = Path(os.getenv("LIGHTHOUSE_CONFIG_DIR", "~/.config/lighthouse-cli")).expanduser()
-    return Connection("https://hetrynow.brightspace.com", root / "sites" / "hetrynow.brightspace.com")
+# Private seam for out-of-repository test harnesses only. When set, it must
+# name its own cookie directory; clients built for it never refresh or
+# migrate authentication (see LighthouseClient).
+_override: Connection | None = None
+
+
+def active_connection() -> Connection:
+    """Return the connection for this process: Lighthouse unless overridden."""
+    override = _override
+    if override is None:
+        return LIGHTHOUSE
+    if not override.origin.startswith("https://") or override.cookie_dir is None:
+        raise ValueError("An overriding connection needs an HTTPS origin and its own cookie directory.")
+    return override
