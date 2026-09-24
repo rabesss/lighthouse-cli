@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import click
 
@@ -30,22 +30,12 @@ def _emit(data: Any, json_output: bool) -> None:
         click.echo(json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False))
 
 
-def _site() -> str:
-    context: click.Context | None = click.get_current_context()
-    while context is not None:
-        if "site" in context.params:
-            return cast(str, context.params["site"])
-        context = context.parent
-    return "lighthouse"
-
-
 def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], Any]) -> None:
     client = None
-    site = _site()
     try:
-        client = LighthouseClient(site=site)
+        client = LighthouseClient()
         data = project(action(AssessmentAPI(client, course_id)))
-        _emit({"site": site, "course_id": course_id, "data": data}, json_output)
+        _emit({"course_id": course_id, "data": data}, json_output)
     except Exception as exc:
         message = (
             "Write outcome unknown. Inspect the assessment before retrying."
@@ -54,7 +44,7 @@ def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], An
         )
         click.echo(message, err=True)
         if json_output:
-            output_json({"site": site, "course_id": course_id, "data": None, "error": message})
+            output_json({"course_id": course_id, "data": None, "error": message})
         raise SystemExit(1) from None
     finally:
         if client is not None:
@@ -62,18 +52,16 @@ def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], An
 
 
 @click.group()
-@click.option("--site", type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)
-def instructor(site: str) -> None:
+def instructor() -> None:
     """Inspect and author assessments with your account's course permissions.
 
-    The trial connection uses separate sealed cookies. Choosing this group
-    does not grant an instructor role or impersonate another user.
+    Choosing this group does not grant an instructor role or impersonate
+    another user; Lighthouse enforces your role in each course.
     """
 
 
 @click.group()
-@click.option("--site", type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)
-def student(site: str) -> None:
+def student() -> None:
     """Read learner assessment details and your own submission history."""
 
 
@@ -92,7 +80,7 @@ class _LazyPreview(JsonOutputGroup):
         return self._implementation().invoke(ctx)
 
 
-instructor.add_command(_LazyPreview(name="preview", help="Experimental trial-only, checkpointed quiz previews."))
+instructor.add_command(_LazyPreview(name="preview", help="Experimental checkpointed instructor quiz previews."))
 
 
 def _register_read(group: click.Group, name: str, resource: str, detail: bool) -> None:
@@ -163,14 +151,13 @@ register_course_reads(instructor, _run)
 
 
 def _create(course_id: int, resource: str, payload: dict[str, Any], yes: bool, dry_run: bool, json_output: bool) -> None:
-    site = _site()
     if dry_run:
-        _emit({"site": site, "course_id": course_id, "dry_run": True,
+        _emit({"course_id": course_id, "dry_run": True,
                "operation": f"create-{resource}", "data": project(payload)}, json_output)
         return
     if not yes:
         if not sys.stdin.isatty() or not click.confirm(
-            f"Create a hidden {resource} on {site}, course {course_id}?", err=True,
+            f"Create a hidden {resource} in course {course_id}?", err=True,
         ):
             click.echo("Creation cancelled. Use --yes for non-interactive creation.", err=True)
             if json_output:

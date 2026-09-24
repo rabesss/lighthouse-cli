@@ -47,7 +47,7 @@ def quiz_payload(name: str, layout: str, attempts: int) -> dict[str, Any]:
         "DueDate": None, "DisplayInCalendar": False,
         "NumberOfAttemptsAllowed": attempts,
         "LateSubmissionInfo": {"LateSubmissionOption": 0, "LateLimitMinutes": None},
-        # These creation defaults were accepted by LE 1.93 in the trial.
+        # These creation defaults were accepted by Brightspace LE 1.93.
         # The duration is dormant because IsEnforced remains false.
         "SubmissionTimeLimit": {"IsEnforced": False, "ShowClock": False, "TimeLimitValue": 120},
         "SubmissionGracePeriod": 0, "Password": None,

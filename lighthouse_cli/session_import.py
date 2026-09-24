@@ -7,24 +7,23 @@ import sys
 import click
 
 from .config import COOKIE_NAMES, missing_cookie_names
-from .connection import connection_for
+from .connection import active_connection
 from .credential_store import CredentialStore
 from .display import JsonOutputCommand, output_json, utc_now_iso
 from .utils import _loads_strict_json
 
 
 @click.command("import-session", cls=JsonOutputCommand)
-@click.option("--site", type=click.Choice(["lighthouse", "trial"]), required=True)
 @click.option("--json", "json_output", is_flag=True)
-def import_session(site: str, json_output: bool) -> None:
+def import_session(json_output: bool) -> None:
     """Seal a session supplied as JSON on stdin; never supply cookies in argv.
 
-    Input shape: {"origin": "https://the-selected-site", "cookies": {...}}.
-    The origin must exactly match the selected site. This does not extract
-    browser cookies or prove the imported session is still authenticated.
+    Input shape: {"origin": "https://lighthouse.manipal.edu", "cookies": {...}}.
+    The origin must match exactly. This does not extract browser cookies or
+    prove the imported session is still authenticated.
     """
     try:
-        connection = connection_for(site)
+        connection = active_connection()
         if sys.stdin.isatty():
             raise ValueError()
         raw = sys.stdin.read(65537)
@@ -53,6 +52,6 @@ def import_session(site: str, json_output: bool) -> None:
             output_json({"imported": False, "error": message})
         raise SystemExit(1) from None
     if json_output:
-        output_json({"imported": True, "site": site, "verified": False})
+        output_json({"imported": True, "verified": False})
     else:
-        click.echo(f"Session sealed for {site}; authentication has not been verified.")
+        click.echo("Session sealed; authentication has not been verified.")
