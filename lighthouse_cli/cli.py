@@ -508,8 +508,10 @@ def assignments(course_id: str | None, json_output: bool) -> None:
 @click.argument("folder_id")
 @click.option("-f", "--file", "file_path", required=True, help="Path to the file to submit.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation prompt and submit immediately.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="Resolve and print the destination without reading or uploading the file.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_output: bool) -> None:
+def submit(course_id: str, folder_id: str, file_path: str, yes: bool, dry_run: bool, json_output: bool) -> None:
     """REMOTE WRITE: submit a file to a D2L dropbox folder.
 
     COURSE_ID is the course identifier (numeric OrgUnitId or name substring).
@@ -520,10 +522,13 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_outpu
     Example:
       lighthouse submit "signals" "Assignment 1" --file solution.pdf
       lighthouse submit signals "Assignment 1" --file solution.pdf --yes
+      lighthouse submit signals "Assignment 1" --file solution.pdf --dry-run --json
 
     This command changes remote LMS state. The command prompts
     for confirmation before submitting (course name, folder name, file path).
     Use --yes to skip the prompt (required for agent/automation use).
+    --dry-run only resolves the course and folder (read-only) and prints the
+    destination; it needs no --yes and never uploads.
 
     On success, prints a JSON object with submission_id, folder_id, folder_name,
     course_id, course_name, file info, and submitted_at timestamp.
@@ -534,4 +539,5 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, json_outpu
         file_path=file_path,
         yes=yes,
         json_output=json_output,
+        dry_run=dry_run,
     ))
