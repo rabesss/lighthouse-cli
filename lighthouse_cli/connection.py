@@ -29,11 +29,18 @@ LIGHTHOUSE = Connection("https://lighthouse.manipal.edu", None)
 _override: Connection | None = None
 
 
+def _is_plain_https_origin(origin: str) -> bool:
+    """``https://host`` exactly: no credentials, port, path, query or fragment."""
+    parts = urlsplit(origin)
+    return (parts.scheme == "https" and bool(parts.hostname) and parts.port is None
+            and "@" not in parts.netloc and origin == f"https://{parts.hostname}")
+
+
 def active_connection() -> Connection:
     """Return the connection for this process: Lighthouse unless overridden."""
     override = _override
     if override is None:
         return LIGHTHOUSE
-    if not override.origin.startswith("https://") or override.cookie_dir is None:
-        raise ValueError("An overriding connection needs an HTTPS origin and its own cookie directory.")
+    if not _is_plain_https_origin(override.origin) or override.cookie_dir is None:
+        raise ValueError("An overriding connection needs a plain HTTPS origin and its own cookie directory.")
     return override

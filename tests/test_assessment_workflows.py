@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -68,11 +69,28 @@ def test_lighthouse_is_the_only_built_in_connection():
 @pytest.mark.parametrize("override", [
     Connection("http://sandbox.example", None),
     Connection("https://sandbox.example", None),
+    Connection("https://", Path("/sandbox")),
+    Connection("https://sandbox.example/extra/path", Path("/sandbox")),
+    Connection("https://user@sandbox.example", Path("/sandbox")),
+    Connection("https://sandbox.example:8443", Path("/sandbox")),
+    Connection("https://Sandbox.Example", Path("/sandbox")),
 ])
 def test_override_needs_https_and_its_own_cookie_directory(monkeypatch, override):
     monkeypatch.setattr(connection, "_override", override)
     with pytest.raises(ValueError):
         active_connection()
+
+
+def test_only_the_built_in_lighthouse_object_may_refresh_auth(monkeypatch, tmp_path):
+    # Even a value-identical copy of the Lighthouse connection (which the
+    # override validation cannot produce today) must not gain refresh rights.
+    copy = Connection(LIGHTHOUSE.origin, None)
+    assert copy == LIGHTHOUSE and copy is not LIGHTHOUSE
+    monkeypatch.setattr(connection, "active_connection", lambda: copy)
+    assert LighthouseClient()._read_only_auth
+    monkeypatch.setattr(connection, "_override", Connection(LIGHTHOUSE.origin, tmp_path / "copy"))
+    monkeypatch.setattr(connection, "active_connection", active_connection)
+    assert LighthouseClient()._read_only_auth
 
 
 def test_override_urls_cookies_and_pagination_are_origin_scoped(sandbox):

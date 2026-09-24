@@ -139,7 +139,7 @@ load credentials, make requests, or write local files.
 ### Student and instructor course tools
 
 The `student` and `instructor` groups add role-oriented views without changing
-your account's permissions. Both default to Lighthouse. Use numeric course and
+your account's permissions. Use numeric course and
 resource IDs; the existing top-level commands continue to accept course names.
 
 ```bash

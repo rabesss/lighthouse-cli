@@ -410,8 +410,9 @@ class LighthouseClient:
         self._loaded = False
         self._cache: dict[str, Any] = {}
         self._csrf_token: str | None = None
-        # Only the real Lighthouse connection may refresh or migrate auth.
-        self._read_only_auth = bool(read_only_auth) or self.connection != LIGHTHOUSE
+        # Only the built-in Lighthouse connection object may refresh or
+        # migrate auth; any override is read-only, even one naming Lighthouse.
+        self._read_only_auth = bool(read_only_auth) or self.connection is not LIGHTHOUSE
 
     # -- cookie management --------------------------------------------------
 
