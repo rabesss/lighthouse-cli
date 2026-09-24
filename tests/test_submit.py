@@ -1890,3 +1890,94 @@ class TestSubmissionIntegration:
         assert len(captured) == 2
         boundaries = [request["headers"]["Content-Type"] for request in captured]
         assert boundaries[0] != boundaries[1]
+
+
+class TestSubmitDryRun:
+    """`submit --dry-run` resolves the destination read-only and never uploads."""
+
+    @staticmethod
+    def _client(detail: object = None) -> MagicMock:
+        client = MagicMock()
+        client.get_courses.return_value = [{"OrgUnitId": 44347, "Name": "Signals & Systems"}]
+        client.get_dropbox_folders.return_value = [{"Id": 789, "Name": "Assignment 1 - Signals"}]
+        client.get_dropbox_folder_detail.return_value = (
+            {"Name": "Assignment 1 - Signals"} if detail is None else detail
+        )
+        return client
+
+    def test_dry_run_reports_destination_without_reading_or_uploading(
+        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    ) -> None:
+        from lighthouse_cli.cli import cli
+
+        client = self._client()
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client) as client_cls, \
+                patch.object(Path, "read_bytes", side_effect=AssertionError("must not read the file")):
+            result = cli_runner.invoke(
+                cli, ["submit", "44347", "789", "--file", str(temp_pdf_file), "--dry-run", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        data = json_module.loads(result.stdout)
+        assert data == {
+            "dry_run": True, "course_id": 44347, "course_name": "Signals & Systems",
+            "folder_id": 789, "folder_name": "Assignment 1 - Signals", "folder_verified": True,
+            "file": {"name": "test.pdf", "size_bytes": temp_pdf_file.stat().st_size},
+        }
+        client_cls.assert_called_once_with(read_only_auth=True)
+        client.submit_file.assert_not_called()
+
+    def test_dry_run_needs_no_yes_in_non_interactive_mode(
+        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    ) -> None:
+        from lighthouse_cli.cli import cli
+
+        client = self._client()
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = cli_runner.invoke(
+                cli, ["submit", "44347", "789", "--file", str(temp_pdf_file), "--dry-run"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Would submit to 'Assignment 1 - Signals' in 'Signals & Systems'" in result.output
+        client.submit_file.assert_not_called()
+
+    def test_dry_run_flags_an_unverified_folder_name(
+        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    ) -> None:
+        from lighthouse_cli.cli import cli
+
+        client = self._client(detail={"Name": ""})
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = cli_runner.invoke(
+                cli, ["submit", "44347", "789", "--file", str(temp_pdf_file), "--dry-run", "--json"],
+            )
+        assert result.exit_code == 0
+        data = json_module.loads(result.stdout)
+        assert data["folder_verified"] is False
+        assert "No submission was sent" in data["warning"]
+        client.submit_file.assert_not_called()
+
+    def test_dry_run_still_reports_resolution_errors(
+        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    ) -> None:
+        from lighthouse_cli.cli import cli
+
+        client = self._client()
+        client.get_courses.return_value = []
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = cli_runner.invoke(
+                cli, ["submit", "nope", "789", "--file", str(temp_pdf_file), "--dry-run", "--json"],
+            )
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout)["error"]
+        client.submit_file.assert_not_called()
+
+    def test_real_submit_still_requires_yes_when_non_interactive(
+        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    ) -> None:
+        from lighthouse_cli.cli import cli
+
+        with patch("lighthouse_cli.submit.LighthouseClient") as client_cls:
+            result = cli_runner.invoke(cli, ["submit", "44347", "789", "--file", str(temp_pdf_file)])
+        assert result.exit_code == 1
+        assert "--yes" in result.output
+        client_cls.assert_not_called()
