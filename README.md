@@ -887,7 +887,7 @@ For a single course with no grade items, human output says
 
 ---
 
-### `lighthouse submit -f FILE COURSE_ID FOLDER_ID [--yes] [--json]`
+### `lighthouse submit -f FILE COURSE_ID FOLDER_ID [--yes] [--dry-run] [--json]`
 
 Submit a file to a D2L dropbox folder.
 
@@ -909,6 +909,7 @@ courses` affect local state only.
 |------|-------------|
 | `-f`, `--file` | Path to the file to submit (required) |
 | `--yes` | Skip confirmation prompt; required in non-TTY mode |
+| `--dry-run` | Resolve the course and folder read-only and print the destination; never reads the file body or uploads, and needs no `--yes` |
 | `--json` | Output structured JSON result |
 
 **API call:** `POST /d2l/api/le/1.93/{orgId}/dropbox/folders/{folderId}/submissions/mysubmissions/`
@@ -951,6 +952,22 @@ Submitted successfully. Submission ID: 5001
   "submitted_at": "2025-05-10T15:30:00Z"
 }
 ```
+
+**JSON output (`--json`, `--dry-run`):**
+```json
+{
+  "dry_run": true,
+  "course_id": 1001,
+  "course_name": "Introduction to CS",
+  "folder_id": 101,
+  "folder_name": "Homework 1",
+  "folder_verified": true,
+  "file": {"name": "homework.pdf", "size_bytes": 24576}
+}
+```
+
+`folder_verified` is `false`, with a `warning`, when the folder's details
+could not be read; check the folder ID before submitting.
 
 ---
 
