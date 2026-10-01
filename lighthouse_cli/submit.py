@@ -23,6 +23,9 @@ _DEFAULT_COURSE_NAME = "Unknown course"
 _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
+_DRY_RUN_UNVERIFIED_WARNING = (
+    "The folder name could not be read; check the folder ID. No submission was sent."
+)
 
 
 def cmd_submit(
@@ -31,6 +34,7 @@ def cmd_submit(
     file_path: str,
     yes: bool = False,
     json_output: bool = False,
+    dry_run: bool = False,
 ) -> int:
     """Submit a file to a dropbox folder.
 
@@ -45,6 +49,9 @@ def cmd_submit(
     folder_name, course_id, course_name, file, submitted_at).
 
     Non-interactive / agent-friendly: --yes + --json = only JSON on stdout.
+
+    ``dry_run`` resolves the same destination with a read-only client and
+    prints the plan without reading the file body or uploading anything.
     """
     # Validate the local input before constructing a client or resolving any
     # remote identifiers. A declined submission should not read the file body,
@@ -64,14 +71,14 @@ def cmd_submit(
 
     # Keep the explicit confirmation requirement for non-interactive callers.
     # This check happens after local validation, but before any API work.
-    if not yes and not sys.stdin.isatty():
+    if not dry_run and not yes and not sys.stdin.isatty():
         return _submit_error(
             "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
             json_output,
         )
 
     try:
-        client = LighthouseClient()
+        client = LighthouseClient(read_only_auth=dry_run)
     except Exception:
         return _submit_error(_CLIENT_INIT_ERROR, json_output)
 
@@ -82,7 +89,12 @@ def cmd_submit(
     except Exception as e:
         return _submit_error(e, json_output)
 
-    folder_name = _get_folder_name(client, org_id, folder_id_int)
+    folder_name, folder_verified = _get_folder_name(client, org_id, folder_id_int)
+    if dry_run:
+        return _submit_dry_run(
+            org_id, course_name, folder_id_int, folder_name, folder_verified,
+            file_path_obj, display_filename, json_output,
+        )
 
     # Confirmation prompt (skip with --yes). JSON-mode prompts must not pollute
     # stdout; ``input`` is called without a prompt because input() writes its
@@ -154,6 +166,35 @@ def cmd_submit(
               f"  Course: {course_name}\n  File: {output_filename}\n"
               f"  Submitted at: {submitted_at}")
 
+    return 0
+
+
+def _submit_dry_run(
+    org_id: int, course_name: str, folder_id: int, folder_name: str, verified: bool,
+    file_path: Path, display_filename: str, json_output: bool,
+) -> int:
+    """Report the resolved destination; reads only the file's size."""
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        return _submit_error("Could not read file.", json_output)
+    if json_output:
+        payload: dict[str, object] = {
+            "dry_run": True,
+            "course_id": org_id,
+            "course_name": course_name,
+            "folder_id": folder_id,
+            "folder_name": folder_name,
+            "folder_verified": verified,
+            "file": {"name": display_filename, "size_bytes": file_size},
+        }
+        if not verified:
+            payload["warning"] = _DRY_RUN_UNVERIFIED_WARNING
+        _output_json(payload)
+    else:
+        print(f"Would submit to '{folder_name}' in '{course_name}'.\n  File: {display_filename} ({file_size} bytes)")
+        if not verified:
+            print(f"Warning: {_DRY_RUN_UNVERIFIED_WARNING}")
     return 0
 
 
@@ -309,15 +350,16 @@ def _positive_folder_id(value: object) -> int | None:
     return None
 
 
-def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> str:
-    """Get the name of a dropbox folder by ID."""
+def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> tuple[str, bool]:
+    """Get a dropbox folder's display name and whether it was read and usable."""
     try:
         detail = client.get_dropbox_folder_detail(org_id, folder_id)
     except Exception:
-        return _DEFAULT_FOLDER_NAME
+        return _DEFAULT_FOLDER_NAME, False
     if not isinstance(detail, dict):
-        return _DEFAULT_FOLDER_NAME
-    return _safe_display_name(detail.get("Name"), _DEFAULT_FOLDER_NAME)
+        return _DEFAULT_FOLDER_NAME, False
+    name = _safe_display_name(detail.get("Name"), "")
+    return (name, True) if name else (_DEFAULT_FOLDER_NAME, False)
 
 
 def _safe_display_name(value: object, fallback: str) -> str:
