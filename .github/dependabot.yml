@@ -8,6 +8,11 @@ updates:
     # them, which filters most yanked/patch-on-patch churn.
     cooldown:
       default-days: 7
+    ignore:
+      # radon 6.0.1 (via xenon) requires mando<0.8; a newer pin is
+      # unresolvable and fails every CI install.
+      - dependency-name: "mando"
+        versions: [">=0.8"]
     # requirements.txt files carry no dev/production metadata, so
     # `dependency-type` cannot split them; group by explicit package names.
     # Dependabot assigns each update to the first matching group.
