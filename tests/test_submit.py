@@ -537,7 +537,7 @@ class TestSubmitCommand:
         }
         assert result.stdout.count('"error"') == 1
         assert "CLIENT_SECRET_SENTINEL" not in result.output
-        mock_client_cls.assert_called_once_with()
+        mock_client_cls.assert_called_once_with(read_only_auth=False)
         read_bytes_mock.assert_not_called()
 
     def test_submit_success_with_yes_flag_json_output(
@@ -1940,12 +1940,13 @@ class TestSubmitDryRun:
         assert "Would submit to 'Assignment 1 - Signals' in 'Signals & Systems'" in result.output
         client.submit_file.assert_not_called()
 
-    def test_dry_run_flags_an_unverified_folder_name(
+    def test_dry_run_flags_a_folder_whose_details_could_not_be_read(
         self, cli_runner: CliRunner, temp_pdf_file: Path,
     ) -> None:
         from lighthouse_cli.cli import cli
 
-        client = self._client(detail={"Name": ""})
+        client = self._client()
+        client.get_dropbox_folder_detail.side_effect = RuntimeError("lookup failed")
         with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
             result = cli_runner.invoke(
                 cli, ["submit", "44347", "789", "--file", str(temp_pdf_file), "--dry-run", "--json"],
@@ -1955,6 +1956,21 @@ class TestSubmitDryRun:
         assert data["folder_verified"] is False
         assert "No submission was sent" in data["warning"]
         client.submit_file.assert_not_called()
+
+    def test_dry_run_verifies_a_folder_literally_named_like_the_fallback(
+        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    ) -> None:
+        from lighthouse_cli.cli import cli
+
+        client = self._client(detail={"Name": "Unknown folder"})
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = cli_runner.invoke(
+                cli, ["submit", "44347", "789", "--file", str(temp_pdf_file), "--dry-run", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        data = json_module.loads(result.stdout)
+        assert data["folder_verified"] is True
+        assert "warning" not in data
 
     def test_dry_run_still_reports_resolution_errors(
         self, cli_runner: CliRunner, temp_pdf_file: Path,

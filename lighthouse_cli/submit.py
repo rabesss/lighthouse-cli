@@ -24,7 +24,7 @@ _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
 _DRY_RUN_UNVERIFIED_WARNING = (
-    "The folder name could not be verified; check the folder ID. No submission was sent."
+    "The folder details could not be read; check the folder ID. No submission was sent."
 )
 
 
@@ -78,7 +78,7 @@ def cmd_submit(
         )
 
     try:
-        client = LighthouseClient(read_only_auth=True) if dry_run else LighthouseClient()
+        client = LighthouseClient(read_only_auth=dry_run)
     except Exception:
         return _submit_error(_CLIENT_INIT_ERROR, json_output)
 
@@ -89,10 +89,11 @@ def cmd_submit(
     except Exception as e:
         return _submit_error(e, json_output)
 
-    folder_name = _get_folder_name(client, org_id, folder_id_int)
+    folder_name, folder_verified = _get_folder_name(client, org_id, folder_id_int)
     if dry_run:
         return _submit_dry_run(
-            org_id, course_name, folder_id_int, folder_name, file_path_obj, display_filename, json_output,
+            org_id, course_name, folder_id_int, folder_name, folder_verified,
+            file_path_obj, display_filename, json_output,
         )
 
     # Confirmation prompt (skip with --yes). JSON-mode prompts must not pollute
@@ -169,7 +170,7 @@ def cmd_submit(
 
 
 def _submit_dry_run(
-    org_id: int, course_name: str, folder_id: int, folder_name: str,
+    org_id: int, course_name: str, folder_id: int, folder_name: str, verified: bool,
     file_path: Path, display_filename: str, json_output: bool,
 ) -> int:
     """Report the resolved destination; reads only the file's size."""
@@ -177,7 +178,6 @@ def _submit_dry_run(
         file_size = file_path.stat().st_size
     except OSError:
         return _submit_error("Could not read file.", json_output)
-    verified = folder_name != _DEFAULT_FOLDER_NAME
     if json_output:
         payload: dict[str, object] = {
             "dry_run": True,
@@ -350,15 +350,15 @@ def _positive_folder_id(value: object) -> int | None:
     return None
 
 
-def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> str:
-    """Get the name of a dropbox folder by ID."""
+def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> tuple[str, bool]:
+    """Get a dropbox folder's display name and whether its detail was read."""
     try:
         detail = client.get_dropbox_folder_detail(org_id, folder_id)
     except Exception:
-        return _DEFAULT_FOLDER_NAME
+        return _DEFAULT_FOLDER_NAME, False
     if not isinstance(detail, dict):
-        return _DEFAULT_FOLDER_NAME
-    return _safe_display_name(detail.get("Name"), _DEFAULT_FOLDER_NAME)
+        return _DEFAULT_FOLDER_NAME, False
+    return _safe_display_name(detail.get("Name"), _DEFAULT_FOLDER_NAME), True
 
 
 def _safe_display_name(value: object, fallback: str) -> str:
