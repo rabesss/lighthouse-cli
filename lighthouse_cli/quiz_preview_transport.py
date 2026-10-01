@@ -220,7 +220,7 @@ def read_server_current_preview(
     """Read-only recovery: return the attempt's server-side current page.
 
     Only for reconciling a start whose cursor is uncertain, never before a
-    write. Observed on the trial tenant (2026-09-23): for a forward-only quiz
+    write. Observed on Brightspace (2026-09-23): for a forward-only quiz
     already on page 2, requesting page 1 returns page 2 with ``pg=2``, and a
     page beyond the cursor redirects. An all-at-once quiz has a single page.
     The reported page is used only after the complete preview identity
@@ -297,7 +297,7 @@ def advance_current_preview(
     current = read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     # advance_fields requires a Next control, so the page + 1 readback below
     # always exists. Never request a page beyond the quiz's last page: on the
-    # trial tenant (2026-09-23) that permanently breaks the preview attempt
+    # Brightspace (observed 2026-09-23) that permanently breaks the attempt
     # (every later read redirects to /d2l/error/500).
     fields = current.advance_fields(protection)
     url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({

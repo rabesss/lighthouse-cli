@@ -139,7 +139,7 @@ load credentials, make requests, or write local files.
 ### Student and instructor course tools
 
 The `student` and `instructor` groups add role-oriented views without changing
-your account's permissions. Both default to Lighthouse. Use numeric course and
+your account's permissions. Use numeric course and
 resource IDs; the existing top-level commands continue to accept course names.
 
 ```bash
@@ -166,7 +166,7 @@ lighthouse instructor assignment-create COURSE_ID --name 'Practice' --submission
 
 Both groups also provide `quiz`, `quizzes`, `assignment`, `assignments`, and
 the shared course reads above. Their JSON envelope is
-`{"site": "lighthouse", "course_id": 123, "data": ...}`. Responses use a
+`{"course_id": 123, "data": ...}`. Responses use a
 bounded field allowlist; unknown fields and credential-bearing properties are
 not returned. Classlists currently omit email and login identifiers.
 
@@ -183,58 +183,54 @@ cookie-only endpoint; they reuse a token already held in memory without adding
 a homepage request. Tokens are held only in memory. Writes are not
 automatically replayed after network errors.
 
-For the inspected Brightspace trial, put `--site trial` immediately after
-`student` or `instructor`. Its cookies live in a separate encrypted directory
-under `LIGHTHOUSE_CONFIG_DIR/sites/hetrynow.brightspace.com`. There is no
-automatic fallback to Lighthouse cookies or to its browser-refresh mechanism.
-
-`lighthouse auth import-session --site trial --json` accepts an origin-bound
-JSON object on **piped stdin**, shaped as `{"origin": "https://hetrynow.brightspace.com",
+`lighthouse auth import-session --json` accepts an origin-bound JSON object on
+**piped stdin**, shaped as `{"origin": "https://lighthouse.manipal.edu",
 "cookies": {...}}`, and seals it through `CredentialStore`. The cookie map
 must contain exactly the four required D2L session-cookie names. Do not put
 cookie values in arguments, shell history, or plaintext files. Import does not
 verify login; this command is not a browser-extension cookie-export tool.
 `LIGHTHOUSE_SECRETS_PASSPHRASE` or a supported OS keyring is required as usual.
 
-An experimental **trial-only instructor preview** driver now supports start,
-current-page reads, radio-answer saves with persisted readback, forward-only
-navigation, and submission with a verified receipt:
+An experimental **instructor quiz preview** driver (for accounts that can
+preview a quiz) supports start, current-page reads, radio-answer saves with
+persisted readback, forward-only navigation, and submission with a verified
+receipt. Previews are not graded learner attempts:
 
 ```bash
-lighthouse instructor --site trial preview start 22985 54488 --yes --json
-lighthouse instructor --site trial preview page 22985 54488 --json
+lighthouse instructor preview start COURSE_ID QUIZ_ID --yes --json
+lighthouse instructor preview page COURSE_ID QUIZ_ID --json
 # Use question and choice IDs returned by page:
-lighthouse instructor --site trial preview answer 22985 54488 QUESTION_ID CHOICE_ID --yes --json
-# For the one-question/no-backtracking fixture (54489), use next after saving:
-lighthouse instructor --site trial preview next 22985 54489 --yes --json
-lighthouse instructor --site trial preview submit 22985 54488 --retain --yes --json
+lighthouse instructor preview answer COURSE_ID QUIZ_ID QUESTION_ID CHOICE_ID --yes --json
+# One question per page: advance after saving every answer on the page:
+lighthouse instructor preview next COURSE_ID QUIZ_ID --yes --json
+lighthouse instructor preview submit COURSE_ID QUIZ_ID --retain --yes --json
 ```
 
-These commands require a separately authenticated trial CLI session. They accept
-untimed text/radio previews only. A sealed, account-bound cursor permits one
-active preview per quiz; uncertain answer saves and completed submissions can
-be verified with `page`, while uncertain navigation requires browser inspection
-before continuing or abandoning. `status` reads the local cursor; `abandon`
-forgets it without deleting the remote attempt. Starting another preview in the
-browser can invalidate an unretained CLI preview. Write commands also support
-`--dry-run`. A hidden quiz needs `start --bypass-availability`.
+It accepts untimed text/radio previews only. A sealed, account-bound cursor
+permits one active preview per quiz; uncertain answer saves and completed
+submissions can be verified with `page`, while uncertain navigation requires
+browser inspection before continuing or abandoning. `status` reads the local
+cursor; `abandon` forgets it without deleting the remote attempt. Starting
+another preview in the browser can invalidate an unretained CLI preview. Write
+commands also support `--dry-run`. A hidden quiz needs
+`start --bypass-availability`.
 
 If a start's outcome is uncertain, starting again is refused (even after
 `abandon`) until it is resolved with the read-only `reconcile` command:
 
 ```bash
 # Verify and resume a start that is bound to a known attempt, or list candidates:
-lighthouse instructor --site trial preview reconcile 22985 54489 --json
+lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --json
 # Bind one listed candidate (checked for account, quiz, in-progress and preview mode):
-lighthouse instructor --site trial preview reconcile 22985 54489 --attempt-id ATTEMPT_ID --json
+lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --attempt-id ATTEMPT_ID --json
 # Only after the browser shows no preview was created and none is listed:
-lighthouse instructor --site trial preview reconcile 22985 54489 --confirm-no-remote-attempt --json
+lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --confirm-no-remote-attempt --json
 ```
 
 Real learner quiz attempts, question authoring, teacher grading and full
-course-administration parity are **not implemented** by these additions.
-Instructor question definitions must not be treated as a student's currently
-accessible attempt page. See [trial evidence and remaining coverage](docs/assessment-coverage.md).
+course-administration parity are **not implemented** yet. Instructor question
+definitions must not be treated as a student's currently accessible attempt
+page. See [Brightspace assessment protocol notes](docs/quiz-protocol.md).
 
 ---
 

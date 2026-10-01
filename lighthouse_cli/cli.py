@@ -83,7 +83,6 @@ for _role in ("instructor", "student"):
     cli.add_command(_AssessmentGroup(
         name=_role,
         help=f"{_role.capitalize()} assessment workflows and submission records.",
-        params=[click.Option(["--site"], type=click.Choice(["lighthouse", "trial"]), default="lighthouse", show_default=True)],
     ))
 
 
@@ -97,12 +96,11 @@ def auth() -> None:
 
 
 @auth.command("import-session", cls=JsonOutputCommand)
-@click.option("--site", type=click.Choice(["lighthouse", "trial"]), required=True)
 @click.option("--json", "json_output", is_flag=True)
-def auth_import_session(site: str, json_output: bool) -> None:
+def auth_import_session(json_output: bool) -> None:
     """Import origin-bound cookies from JSON stdin into encrypted storage."""
     from .session_import import import_session
-    click.get_current_context().invoke(import_session, site=site, json_output=json_output)
+    click.get_current_context().invoke(import_session, json_output=json_output)
 
 
 @auth.command("status", cls=JsonOutputCommand)

@@ -42,9 +42,9 @@ def _attempt(attempt_id: int, *, quiz_id: int = 20, actor_id: int = 7, completed
 @pytest.fixture
 def remote():
     client = Mock()
-    client.base_url = "https://hetrynow.brightspace.com"
+    client.base_url = "https://lighthouse.manipal.edu"
     state = {"actor": 7, "completed": None, "attempts": [], "records": {}, "listing": None}
-    client.canonical_url.side_effect = LighthouseClient(site="trial").canonical_url
+    client.canonical_url.side_effect = LighthouseClient(read_only_auth=True).canonical_url
     def read(path, **kwargs):
         if path.endswith("users/whoami"):
             return {"Identifier": state["actor"]}
@@ -71,7 +71,7 @@ def start_local(workflow):
 
 
 def test_one_active_preview_per_quiz_and_sealed_cursor(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     assert workflow.status()["status"] == "active"
     raw = workflow.path.read_text()
@@ -100,7 +100,7 @@ def saved(workflow):
 def test_start_seals_account_bound_baseline_before_dispatch(remote):
     _, state = remote
     state["attempts"] = [_attempt(5), _attempt(6, completed="2026-09-01T00:00:00Z"), _attempt(9, actor_id=8)]
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     seen = {}
     def fake_start(client, **kwargs):
         seen.update(saved(workflow))
@@ -122,7 +122,7 @@ def test_start_is_refused_before_dispatch_when_listing_fails(remote):
     def fail(path):
         raise NetworkError("listing failed")
     state["listing"] = fail
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
         with pytest.raises(PreviewWorkflowError, match="nothing was started"):
             workflow.run("start")
@@ -131,7 +131,7 @@ def test_start_is_refused_before_dispatch_when_listing_fails(remote):
 
 
 def test_identity_is_sealed_before_page_readback(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     status = workflow.status()
     assert (status["status"], status["attempt_id"], status["page"]) == ("uncertain", 31, 1)
@@ -139,7 +139,7 @@ def test_identity_is_sealed_before_page_readback(remote):
 
 
 def test_identity_survives_an_interrupted_start_after_it_is_sealed(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     def interrupted(client, *, on_identity=None, **kwargs):
         on_identity(31, 1)
         raise KeyboardInterrupt  # e.g. the process is stopped during readback
@@ -150,7 +150,7 @@ def test_identity_survives_an_interrupted_start_after_it_is_sealed(remote):
 
 
 def test_exception_carried_identity_is_sealed_for_page_recovery(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     with patch("lighthouse_cli.quiz_preview_session.start_preview",
                side_effect=PreviewStartUnknownError(attempt_id=30, page=1)):
         with pytest.raises(PreviewStartUnknownError):
@@ -164,7 +164,7 @@ def test_exception_carried_identity_is_sealed_for_page_recovery(remote):
 
 def test_unknown_start_without_identity_never_binds_from_listing(remote):
     client, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     state["attempts"] = []
     unknown_start(workflow)
     state["attempts"] = [_attempt(31)]
@@ -175,7 +175,7 @@ def test_unknown_start_without_identity_never_binds_from_listing(remote):
 
 @pytest.mark.parametrize("identity", [None, (31, 1)])
 def test_unresolved_start_never_allows_a_fresh_start(remote, identity):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=identity)
     with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
         with pytest.raises(PreviewWorkflowError, match="reconcile"):
@@ -185,7 +185,7 @@ def test_unresolved_start_never_allows_a_fresh_start(remote, identity):
 
 @pytest.mark.parametrize("identity", [None, (31, 1)])
 def test_abandon_is_local_and_keeps_the_unresolved_start_guard(remote, identity):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=identity)
     for _ in range(2):  # repeated abandonment keeps the guard
         result = workflow.abandon()
@@ -197,7 +197,7 @@ def test_abandon_is_local_and_keeps_the_unresolved_start_guard(remote, identity)
 
 
 def test_abandoning_a_verified_preview_still_allows_a_new_start(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     assert workflow.abandon()["unresolved_start"] is False
     start_local(workflow)
@@ -206,7 +206,7 @@ def test_abandoning_a_verified_preview_still_allows_a_new_start(remote):
 def test_reconcile_without_attempt_id_only_lists_candidates(remote):
     _, state = remote
     state["attempts"] = [_attempt(5)]
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     state["attempts"] = [
@@ -223,7 +223,7 @@ def test_reconcile_without_attempt_id_only_lists_candidates(remote):
 
 
 def test_reconcile_with_an_empty_listing_stays_uncertain(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     result = workflow.reconcile()
     assert result["candidates"] == []
@@ -238,7 +238,7 @@ def test_reconcile_with_an_empty_listing_stays_uncertain(remote):
 def test_reconcile_refuses_an_attempt_that_is_not_a_candidate(remote, attempt_id):
     _, state = remote
     state["attempts"] = [_attempt(5)]
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     state["attempts"] = [_attempt(5), _attempt(33, actor_id=8)]
@@ -252,7 +252,7 @@ def test_reconcile_refuses_an_attempt_that_is_not_a_candidate(remote, attempt_id
 @pytest.mark.parametrize("layout_page", [1, 2])
 def test_reconcile_binds_a_chosen_candidate_at_the_server_page(remote, layout_page):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     workflow.abandon()
     state["attempts"] = [_attempt(31)]
@@ -269,7 +269,7 @@ def test_reconcile_binds_a_chosen_candidate_at_the_server_page(remote, layout_pa
 
 
 def test_reconcile_keeps_a_bound_identity_and_cursor(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     before = saved(workflow)
     with pytest.raises(PreviewWorkflowError, match="different attempt"):
@@ -286,7 +286,7 @@ def test_reconcile_keeps_a_bound_identity_and_cursor(remote):
 
 
 def test_reconcile_keeps_a_bound_cursor_beyond_page_one(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 2))
     with patch("lighthouse_cli.quiz_preview_session.read_current_preview",
                return_value=page(2, attempt_id=31)) as strict, \
@@ -299,7 +299,7 @@ def test_reconcile_keeps_a_bound_cursor_beyond_page_one(remote):
 
 def test_reconcile_refuses_an_unbound_candidate_whose_record_is_completed(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     state["attempts"] = [_attempt(31)]  # listed as incomplete...
@@ -314,7 +314,7 @@ def test_reconcile_refuses_an_unbound_candidate_whose_record_is_completed(remote
 
 def test_reconcile_refuses_an_unbound_candidate_on_an_unsupported_layout(remote):
     client, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     state["attempts"] = [_attempt(31)]
@@ -332,11 +332,11 @@ def test_reconcile_refuses_an_unbound_candidate_on_an_unsupported_layout(remote)
     lambda first: first.replace("/quizzes/20/", "/quizzes/99/") + "?bookmark=x",
     lambda first: first + "?bookmark=x&extra=1",
     lambda first: first + "?page=2",
-    lambda first: first.replace("https://hetrynow.brightspace.com", "https://evil.test") + "?bookmark=x",
+    lambda first: first.replace("https://lighthouse.manipal.edu", "https://evil.test") + "?bookmark=x",
 ])
 def test_attempt_paging_never_leaves_the_attempts_route(remote, make_next):
     client, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     requested = []
     def listing(path):
@@ -360,7 +360,7 @@ def test_oversized_attempt_listing_refuses_start_before_dispatch(remote, plain):
             return many[5000:]  # a wrapped page followed by a plain list
         return {"Objects": many[:5000], "Next": path + "?bookmark=abc"}
     state["listing"] = listing
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     with patch("lighthouse_cli.quiz_preview_session.start_preview") as start:
         with pytest.raises(PreviewWorkflowError, match="Too many attempts"):
             workflow.run("start")
@@ -370,7 +370,7 @@ def test_oversized_attempt_listing_refuses_start_before_dispatch(remote, plain):
 
 def test_attempt_paging_follows_bookmarks_on_the_same_route(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     def listing(path):
         if "bookmark=" in path:
@@ -382,7 +382,7 @@ def test_attempt_paging_follows_bookmarks_on_the_same_route(remote):
 
 def test_candidate_output_never_echoes_server_text(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     workflow.store.write_artifact(workflow.path, metadata={}, secret={
         "version": 1, "origin": workflow.connection.origin, "mode": "preview", "actor_id": 7,
         "course_id": 10, "quiz_id": 20, "status": "uncertain", "operation": "start",
@@ -399,7 +399,7 @@ def test_candidate_output_never_echoes_server_text(remote):
 
 def test_legacy_abandoned_start_without_identity_stays_guarded(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     workflow.store.write_artifact(workflow.path, metadata={}, secret={
         "version": 1, "origin": workflow.connection.origin, "mode": "preview", "actor_id": 7,
         "course_id": 10, "quiz_id": 20, "status": "abandoned", "operation": None,
@@ -416,7 +416,7 @@ def test_legacy_abandoned_start_without_identity_stays_guarded(remote):
 
 def test_confirmed_no_remote_attempt_releases_the_guard_only_without_candidates(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     state["attempts"] = [_attempt(31)]
     with pytest.raises(PreviewWorkflowError, match="Candidate attempts exist"):
@@ -430,7 +430,7 @@ def test_confirmed_no_remote_attempt_releases_the_guard_only_without_candidates(
 
 
 def test_confirmed_no_remote_attempt_is_refused_for_a_bound_start(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     with pytest.raises(PreviewWorkflowError, match="bound to a known attempt"):
         workflow.reconcile(confirm_no_remote_attempt=True)
@@ -440,7 +440,7 @@ def test_confirmed_no_remote_attempt_is_refused_for_a_bound_start(remote):
 
 
 def test_reconcile_resumes_a_bound_start_advanced_in_the_browser(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     with patch("lighthouse_cli.quiz_preview_session.read_current_preview", side_effect=PreviewPageError()), \
             patch("lighthouse_cli.quiz_preview_session.read_server_current_preview",
@@ -452,7 +452,7 @@ def test_reconcile_resumes_a_bound_start_advanced_in_the_browser(remote):
 
 def test_bound_start_fallback_is_refused_on_an_unsupported_layout(remote):
     client, _ = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     before = saved(workflow)
     client.get_quiz_detail.return_value = {"PagingTypeId": 1, "PreventMovingBackwards": False,
@@ -472,14 +472,14 @@ def test_bound_start_fallback_is_refused_on_an_unsupported_layout(remote):
 def test_local_cursor_refusals_come_before_authentication(operation, message):
     with patch("lighthouse_cli.quiz_preview_session.LighthouseClient",
                side_effect=AssertionError("must not authenticate")) as client:
-        workflow = PreviewWorkflow("trial", 10, 20)
+        workflow = PreviewWorkflow(10, 20)
         with pytest.raises(PreviewWorkflowError, match=message):
             workflow.run(operation, question_id=1, choice_id=2)
     client.assert_not_called()
 
 
 def test_unresolved_start_blocks_start_before_authentication(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     with patch("lighthouse_cli.quiz_preview_session.LighthouseClient",
                side_effect=AssertionError("must not authenticate")) as client:
@@ -492,7 +492,7 @@ def test_unresolved_start_blocks_start_before_authentication(remote):
 
 def test_reconcile_of_a_completed_bound_attempt_verifies_the_receipt(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     state["records"][31] = _attempt(31, completed="2999-01-01T00:05:00Z")
     receipt = {"submitted": True, "receipt_verified": True, "attempt_id": 31}
@@ -505,7 +505,7 @@ def test_reconcile_of_a_completed_bound_attempt_verifies_the_receipt(remote):
 @pytest.mark.parametrize("record", [_attempt(31, actor_id=8), _attempt(31, quiz_id=99)])
 def test_reconcile_identity_mismatch_leaves_the_checkpoint_unchanged(remote, record):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     state["attempts"] = [_attempt(31)]
@@ -517,7 +517,7 @@ def test_reconcile_identity_mismatch_leaves_the_checkpoint_unchanged(remote, rec
 
 def test_reconcile_unverified_preview_page_leaves_the_checkpoint_unchanged(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     state["attempts"] = [_attempt(31)]
@@ -530,7 +530,7 @@ def test_reconcile_unverified_preview_page_leaves_the_checkpoint_unchanged(remot
 
 def test_reconcile_listing_failure_leaves_the_checkpoint_unchanged(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     before = saved(workflow)
     def forbidden(path):
@@ -543,7 +543,7 @@ def test_reconcile_listing_failure_leaves_the_checkpoint_unchanged(remote):
 
 def test_reconcile_refuses_another_signed_in_account(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow, identity=(31, 1))
     state["actor"] = 8
     with pytest.raises(PreviewWorkflowError, match="different signed-in account"):
@@ -551,14 +551,14 @@ def test_reconcile_refuses_another_signed_in_account(remote):
 
 
 def test_reconcile_refuses_a_resolved_checkpoint(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     with pytest.raises(PreviewWorkflowError, match="unresolved start"):
         workflow.reconcile()
 
 
 def test_reconcile_respects_the_single_writer_lock(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     unknown_start(workflow)
     with workflow._locked(), pytest.raises(PreviewWorkflowError, match="Another operation"):
         workflow.reconcile()
@@ -566,7 +566,7 @@ def test_reconcile_respects_the_single_writer_lock(remote):
 
 def test_legacy_checkpoint_without_baseline_requires_explicit_selection(remote):
     _, state = remote
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     workflow.store.write_artifact(workflow.path, metadata={}, secret={
         "version": 1, "origin": workflow.connection.origin, "mode": "preview", "actor_id": 7,
         "course_id": 10, "quiz_id": 20, "status": "uncertain", "operation": "start",
@@ -588,7 +588,7 @@ def test_legacy_checkpoint_without_baseline_requires_explicit_selection(remote):
     {"start_intent_at": "yesterday"},
 ])
 def test_invalid_optional_checkpoint_fields_fail_closed(remote, extra):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     workflow.store.write_artifact(workflow.path, metadata={}, secret={
         "version": 1, "origin": workflow.connection.origin, "mode": "preview", "actor_id": 7,
         "course_id": 10, "quiz_id": 20, "status": "uncertain", "operation": "start",
@@ -599,7 +599,7 @@ def test_invalid_optional_checkpoint_fields_fail_closed(remote, extra):
 
 
 def test_changed_account_cannot_mutate_saved_attempt(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     remote[1]["actor"] = 8
     with patch("lighthouse_cli.quiz_preview_session.advance_current_preview") as advance:
@@ -609,7 +609,7 @@ def test_changed_account_cannot_mutate_saved_attempt(remote):
 
 
 def test_uncertain_save_blocks_writes_and_recovers_by_readback(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     with patch("lighthouse_cli.quiz_preview_session.save_current_preview_answer", side_effect=PreviewSaveUnknownError()) as save:
         with pytest.raises(PreviewSaveUnknownError):
@@ -625,7 +625,7 @@ def test_uncertain_save_blocks_writes_and_recovers_by_readback(remote):
 
 
 def test_uncertain_advance_stays_blocked_without_authoritative_cursor(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     with patch("lighthouse_cli.quiz_preview_session.advance_current_preview", side_effect=PreviewAdvanceUnknownError()) as advance:
         with pytest.raises(PreviewAdvanceUnknownError):
@@ -638,7 +638,7 @@ def test_uncertain_advance_stays_blocked_without_authoritative_cursor(remote):
 
 
 def test_commit_failure_after_advance_never_restores_old_active_cursor(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     original = workflow.store.write_artifact
     calls = 0
@@ -660,7 +660,7 @@ def test_commit_failure_after_advance_never_restores_old_active_cursor(remote):
 
 
 def test_completed_remote_attempt_is_not_submitted_again(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     start_local(workflow)
     remote[1]["completed"] = "2026-09-17T15:00:00Z"
     receipt = {"submitted": True, "receipt_verified": True, "attempt_id": 30}
@@ -672,23 +672,30 @@ def test_completed_remote_attempt_is_not_submitted_again(remote):
 
 
 def test_lock_contention_fails_without_waiting(remote):
-    workflow = PreviewWorkflow("trial", 10, 20)
+    workflow = PreviewWorkflow(10, 20)
     with workflow._locked():
         with pytest.raises(PreviewWorkflowError, match="Another operation"):
             workflow.status()
 
 
-def test_production_site_is_not_enabled_by_the_prototype():
-    with pytest.raises(PreviewWorkflowError, match="requires --site trial"):
-        PreviewWorkflow("lighthouse", 10, 20)
+def test_preview_checkpoint_is_bound_to_the_lighthouse_origin(remote):
+    workflow = PreviewWorkflow(10, 20)
+    assert workflow.connection.origin == "https://lighthouse.manipal.edu"
+    workflow.store.write_artifact(workflow.path, metadata={}, secret={
+        "version": 1, "origin": "https://sandbox.example", "mode": "preview", "actor_id": 7,
+        "course_id": 10, "quiz_id": 20, "status": "active", "operation": None,
+        "attempt_id": 30, "page": 1,
+    })
+    with pytest.raises(PreviewWorkflowError, match="invalid"):
+        workflow.status()
 
 
 def test_cli_dry_run_and_declined_write_do_not_open_credentials():
     with patch("lighthouse_cli.quiz_preview_commands.PreviewWorkflow") as workflow:
-        result = CliRunner().invoke(cli, ["instructor", "--site", "trial", "preview", "start", "10", "20", "--dry-run", "--json"])
+        result = CliRunner().invoke(cli, ["instructor", "preview", "start", "10", "20", "--dry-run", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.stdout)["dry_run"] is True
-        declined = CliRunner().invoke(cli, ["instructor", "--site", "trial", "preview", "start", "10", "20", "--json"])
+        declined = CliRunner().invoke(cli, ["instructor", "preview", "start", "10", "20", "--json"])
         assert declined.exit_code == 1
         assert json.loads(declined.stdout) == {"cancelled": True}
     workflow.assert_not_called()
@@ -696,7 +703,7 @@ def test_cli_dry_run_and_declined_write_do_not_open_credentials():
 
 def test_cli_error_is_json_only_and_secret_safe():
     with patch("lighthouse_cli.quiz_preview_commands.PreviewWorkflow", side_effect=RuntimeError("cookie=SECRET_SENTINEL")):
-        result = CliRunner().invoke(cli, ["instructor", "--site", "trial", "preview", "page", "10", "20", "--json"])
+        result = CliRunner().invoke(cli, ["instructor", "preview", "page", "10", "20", "--json"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]
     assert "SECRET_SENTINEL" not in result.stdout + result.stderr
@@ -709,7 +716,7 @@ def test_cli_reconcile_is_read_only_and_keeps_json_on_stdout():
         }
         result = CliRunner().invoke(
             cli,
-            ["instructor", "--site", "trial", "preview", "reconcile", "10", "20", "--json"],
+            ["instructor", "preview", "reconcile", "10", "20", "--json"],
         )
     assert result.exit_code == 0
     assert json.loads(result.stdout)["candidates"] == []
@@ -723,7 +730,7 @@ def test_cli_shows_fixed_refusal_messages_verbatim():
         workflow.return_value.run.side_effect = PreviewRefusedError(REFUSE_NOT_ON_PAGE)
         result = CliRunner().invoke(
             cli,
-            ["instructor", "--site", "trial", "preview", "answer", "10", "20", "1", "2", "--yes", "--json"],
+            ["instructor", "preview", "answer", "10", "20", "1", "2", "--yes", "--json"],
         )
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"] == REFUSE_NOT_ON_PAGE

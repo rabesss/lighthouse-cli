@@ -23,7 +23,7 @@ def test_bad_bootstrap_fails_without_echoing_content(body):
 
 
 def test_bootstrap_cached_for_same_client():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(b"<script>localStorage.setItem('XSRF.Token','synthetic-csrf')</script>", {}))
     assert client.get_csrf_token() == "synthetic-csrf"
     assert client.get_csrf_token() == "synthetic-csrf"

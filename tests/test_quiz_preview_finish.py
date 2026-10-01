@@ -18,7 +18,7 @@ from tests.test_quiz_attempt_page import bootstrap, html, question
 
 
 def client_for_submit(*, rpc_result: str | None = None, secure_browser: str = "0"):
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     confirmation = f'''<form><input type="hidden" name="d2l_referrer" value="SESSION_SENTINEL">
     <input type="hidden" name="HDN_isRldbUse" value="False">
     <input type="hidden" name="HDN_isUsingRldb" value="{secure_browser}">
@@ -87,7 +87,7 @@ def test_wrong_identity_mode_or_extra_script_is_not_executed_or_accepted(result)
 
 
 def test_success_heading_without_completed_attempt_record_is_not_a_receipt():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(b'<h2>Your work has been saved and submitted</h2>', {}))
     client.get_json = Mock(return_value={"AttemptId": 30, "QuizId": 20, "UserId": 7, "Completed": None})
     with pytest.raises(PreviewSubmitUnknownError):
@@ -95,7 +95,7 @@ def test_success_heading_without_completed_attempt_record_is_not_a_receipt():
 
 
 def test_completed_attempt_record_verifies_localized_receipt_heading():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(b"<h2>Arbeit gespeichert</h2>", {}))
     client.get_json = Mock(return_value={"AttemptId": 30, "QuizId": 20, "UserId": 7, "Completed": "2026-09-17T15:00:00Z", "Score": 1})
     result = verify_receipt(client, course_id=10, quiz_id=20, attempt_id=30, actor_id=7)
@@ -104,7 +104,7 @@ def test_completed_attempt_record_verifies_localized_receipt_heading():
 
 
 def test_receipt_session_expiry_is_not_masked_as_unknown_submission():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(SessionExpiredError):
         verify_receipt(client, course_id=10, quiz_id=20, attempt_id=30, actor_id=7)

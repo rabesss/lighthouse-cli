@@ -224,7 +224,7 @@ def bootstrap() -> bytes:
 
 
 def test_save_transport_requires_persisted_readback_and_posts_once():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1, selected=False, saved="False")), {}), (html(question(1)), {})])
     response = Mock(status_code=200)
     client._request = Mock(return_value=response)
@@ -239,7 +239,7 @@ def test_save_transport_requires_persisted_readback_and_posts_once():
 
 
 def test_http_200_without_persisted_answer_is_unknown_not_success():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     unchanged = html(question(1, selected=False, saved="False"))
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (unchanged, {}), (unchanged, {})])
     client._request = Mock(return_value=Mock(status_code=200))
@@ -249,7 +249,7 @@ def test_http_200_without_persisted_answer_is_unknown_not_success():
 
 
 def test_save_readback_auth_expiry_is_unknown_after_post_dispatch():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {}), SessionExpiredError("session expired")])
     client._request = Mock(return_value=Mock(status_code=200))
     with pytest.raises(PreviewSaveUnknownError):
@@ -258,7 +258,7 @@ def test_save_readback_auth_expiry_is_unknown_after_post_dispatch():
 
 
 def test_save_post_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {})])
     client._request = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(PreviewSaveUnknownError):
@@ -267,7 +267,7 @@ def test_save_post_auth_expiry_is_unknown_after_dispatch():
 
 
 def test_advance_readback_auth_expiry_is_unknown_after_post_dispatch():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {}), SessionExpiredError("session expired")])
     client._request = Mock(return_value=Mock(status_code=200))
     with pytest.raises(PreviewAdvanceUnknownError):
@@ -276,7 +276,7 @@ def test_advance_readback_auth_expiry_is_unknown_after_post_dispatch():
 
 
 def test_advance_post_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {})])
     client._request = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(PreviewAdvanceUnknownError):
@@ -285,7 +285,7 @@ def test_advance_post_auth_expiry_is_unknown_after_dispatch():
 
 
 def test_uncertain_post_is_not_replayed_or_echoed():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {})])
     client._request = Mock(side_effect=RuntimeError("cookie=SESSION_SENTINEL"))
     with pytest.raises(PreviewSaveUnknownError) as exc:
@@ -295,7 +295,7 @@ def test_uncertain_post_is_not_replayed_or_echoed():
 
 
 def test_start_follows_typed_callback_without_executing_scripts():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
     root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
     inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
@@ -316,7 +316,7 @@ def test_start_follows_typed_callback_without_executing_scripts():
 
 
 def test_start_rejects_missing_button_without_creating_attempt():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(b'<h1>Quiz Summary</h1>', {}))
     client._request = Mock()
     with pytest.raises(PreviewRefusedError, match="--bypass-availability"):
@@ -326,7 +326,7 @@ def test_start_rejects_missing_button_without_creating_attempt():
 
 
 def start_client(readback):
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
     root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
     inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
@@ -363,7 +363,7 @@ def test_start_identity_callback_failure_is_unknown_with_identity():
 
 
 def test_server_current_page_is_used_only_for_the_same_preview_attempt():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(html(question(2, page=2), page=2), {}))
     result = read_server_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
     assert result.page == 2 and result.questions[0]["question_id"] == 102
@@ -376,14 +376,14 @@ def test_server_current_page_rejects_another_attempt_or_a_learner_page(field, va
     original = {"ai": "30", "isprv": "1", "qi": "20"}[field]
     body = body.replace(f'name="{field}" type="hidden" value="{original}"'.encode(),
                         f'name="{field}" type="hidden" value="{value}"'.encode())
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(body, {}))
     with pytest.raises(PreviewPageError):
         read_server_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
 
 
 def test_start_readback_auth_expiry_is_unknown_after_state_creation():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
     root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
     inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
@@ -403,7 +403,7 @@ def test_start_readback_auth_expiry_is_unknown_after_state_creation():
 
 
 def test_start_process_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
     root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
     inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
@@ -420,7 +420,7 @@ def test_start_process_auth_expiry_is_unknown_after_dispatch():
 
 
 def test_start_summary_post_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(html("", extra="<button>Start Quiz!</button>") + bootstrap(), {}))
     client._request = Mock(side_effect=SessionExpiredError("session expired"))
     with pytest.raises(PreviewStartUnknownError):
@@ -428,7 +428,7 @@ def test_start_summary_post_auth_expiry_is_unknown_after_dispatch():
     client.get_raw.assert_called_once()
     client._request.assert_called_once()
 def test_ambiguous_start_does_not_retry_or_trust_script_strings():
-    client = LighthouseClient(site="trial")
+    client = LighthouseClient(read_only_auth=True)
     process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
     root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
     inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')

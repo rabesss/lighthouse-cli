@@ -1,4 +1,4 @@
-"""Explicit, checkpointed instructor-preview commands for the trial tenant."""
+"""Explicit, checkpointed instructor quiz-preview commands."""
 
 from __future__ import annotations
 
@@ -16,14 +16,13 @@ _ID = click.IntRange(min=1, max=10**18 - 1)
 
 
 @click.group()
-@click.pass_context
-def preview(ctx: click.Context) -> None:
-    """Experimental trial-only quiz previews, not real learner attempts.
+def preview() -> None:
+    """Experimental instructor quiz previews, not graded learner attempts.
 
-    Supports untimed text/radio questions in all-at-once and one-question,
-    no-backtracking layouts. Read page output before choosing answer IDs.
+    Needs an account that can preview the quiz. Supports untimed text/radio
+    questions in all-at-once and one-question, no-backtracking layouts. Read
+    page output before choosing answer IDs.
     """
-    ctx.obj = {"preview_site": ctx.parent.params.get("site", "lighthouse") if ctx.parent else "lighthouse"}
 
 
 def _emit(value: dict[str, Any], structured: bool) -> None:
@@ -35,21 +34,20 @@ def _emit(value: dict[str, Any], structured: bool) -> None:
 
 def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
              yes: bool = False, dry_run: bool = False, **options: Any) -> None:
-    site = click.get_current_context().obj["preview_site"]
     if dry_run:
-        _emit({"site": site, "mode": "preview", "operation": operation, "course_id": course_id,
+        _emit({"mode": "preview", "operation": operation, "course_id": course_id,
                "quiz_id": quiz_id, "dry_run": True, "options": options}, json_output)
         return
     writes = operation not in {"page", "status", "reconcile"}
     if writes and not yes and (not sys.stdin.isatty() or not click.confirm(
-        f"Run preview {operation} on {site}, course {course_id}, quiz {quiz_id}?", err=True,
+        f"Run preview {operation} for course {course_id}, quiz {quiz_id}?", err=True,
     )):
         click.echo("Operation cancelled. Use --yes for non-interactive preview changes.", err=True)
         if json_output:
             output_json({"cancelled": True})
         raise SystemExit(1)
     try:
-        workflow = PreviewWorkflow(site, course_id, quiz_id)
+        workflow = PreviewWorkflow(course_id, quiz_id)
         if operation == "status":
             result = workflow.status()
         elif operation == "abandon":
@@ -58,14 +56,14 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
             result = workflow.reconcile(**options)
         else:
             result = workflow.run(operation, **options)
-        _emit({"site": site, **result}, json_output)
+        _emit(result, json_output)
     except Exception as exc:
         # These carry only fixed, local messages; anything else is sanitized.
         fixed = (PreviewWorkflowError, PreviewRefusedError, PreviewPageError, *_UNCERTAIN)
         message = str(exc) if isinstance(exc, fixed) else format_user_error(exc)
         click.echo(message, err=True)
         if json_output:
-            output_json({"site": site, "mode": "preview", "course_id": course_id, "quiz_id": quiz_id, "error": message})
+            output_json({"mode": "preview", "course_id": course_id, "quiz_id": quiz_id, "error": message})
         raise SystemExit(1) from None
 
 

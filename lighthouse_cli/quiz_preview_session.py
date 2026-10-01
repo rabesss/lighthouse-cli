@@ -1,4 +1,4 @@
-"""Encrypted, single-writer cursors for experimental trial previews."""
+"""Encrypted, single-writer cursors for experimental instructor quiz previews."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 from .api import LighthouseClient, _require_positive_endpoint_id
-from .connection import connection_for
+from .connection import active_connection
 from .credential_store import CredentialStore, _validate_credential_path
 from .quiz_attempt_page import PreviewPageError
 from .quiz_preview_finish import PreviewSubmitUnknownError, submit_preview, verify_receipt
@@ -71,12 +71,10 @@ def _utc(value: object) -> datetime | None:
 
 
 class PreviewWorkflow:
-    def __init__(self, site: str, course_id: int, quiz_id: int) -> None:
-        if site != "trial":
-            raise PreviewWorkflowError("The experimental preview workflow currently requires --site trial.")
+    def __init__(self, course_id: int, quiz_id: int) -> None:
         page_path(course_id, quiz_id, 1, 1)
-        self.site, self.course_id, self.quiz_id = site, course_id, quiz_id
-        self.connection = connection_for(site)
+        self.course_id, self.quiz_id = course_id, quiz_id
+        self.connection = active_connection()
         self.store = CredentialStore(config_dir=self.connection.cookie_dir)
         self.path = self.store.config_dir / f"preview-{course_id}-{quiz_id}.json"
         self.lock_path = self.path.with_suffix(".lock")
@@ -315,7 +313,7 @@ class PreviewWorkflow:
             state = self._load()
             if state is None or not self._unresolved_start(state):
                 raise PreviewWorkflowError("Preview reconciliation applies only to an unresolved start.")
-            client = LighthouseClient(read_only_auth=True, site=self.site)
+            client = LighthouseClient(read_only_auth=True)
             try:
                 if self._actor(client) != state["actor_id"]:
                     raise PreviewWorkflowError("The saved preview belongs to a different signed-in account.")
@@ -388,7 +386,7 @@ class PreviewWorkflow:
                         "The preview start is unresolved. Run preview reconcile before another write."
                     )
                 raise PreviewWorkflowError("The last operation is uncertain. Inspect the browser before another write or abandon the preview.")
-            client = LighthouseClient(read_only_auth=True, site=self.site)
+            client = LighthouseClient(read_only_auth=True)
             state: dict[str, Any] | None = None
             try:
                 actor = self._actor(client)

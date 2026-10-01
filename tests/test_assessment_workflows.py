@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 import requests
 from click.testing import CliRunner
 
+from lighthouse_cli import connection
 from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredError
 from lighthouse_cli.assessment_api import (
     AssessmentAPI,
@@ -21,7 +23,7 @@ from lighthouse_cli.assessment_api import (
 )
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES
-from lighthouse_cli.connection import connection_for
+from lighthouse_cli.connection import LIGHTHOUSE, Connection, active_connection
 from lighthouse_cli.credential_store import CredentialStore
 from lighthouse_cli.quiz_rules import navigation_rules
 
@@ -45,32 +47,78 @@ def test_unknown_rules_do_not_grant_navigation(paging, back):
     assert rules["can_revisit_previous_pages"] is None
 
 
-def test_trial_urls_cookies_and_pagination_are_origin_scoped():
-    client = LighthouseClient(site="trial")
-    assert client.canonical_url("/22985/quizzes/") == "https://hetrynow.brightspace.com/d2l/api/le/1.93/22985/quizzes/"
+SANDBOX_ORIGIN = "https://sandbox.example"
+
+
+@pytest.fixture
+def sandbox(tmp_path, monkeypatch):
+    """Install the private test-harness override with its own cookie directory."""
+    override = Connection(SANDBOX_ORIGIN, tmp_path / "sandbox")
+    monkeypatch.setattr(connection, "_override", override)
+    return override
+
+
+def test_lighthouse_is_the_only_built_in_connection():
+    assert active_connection() == LIGHTHOUSE
+    assert LIGHTHOUSE.origin == "https://lighthouse.manipal.edu"
+    client = LighthouseClient()
+    assert client.base_url == LIGHTHOUSE.origin
+    assert not client._read_only_auth
+
+
+@pytest.mark.parametrize("override", [
+    Connection("http://sandbox.example", None),
+    Connection("https://sandbox.example", None),
+    Connection("https://", Path("/sandbox")),
+    Connection("https://sandbox.example/extra/path", Path("/sandbox")),
+    Connection("https://user@sandbox.example", Path("/sandbox")),
+    Connection("https://sandbox.example:8443", Path("/sandbox")),
+    Connection("https://Sandbox.Example", Path("/sandbox")),
+])
+def test_override_needs_https_and_its_own_cookie_directory(monkeypatch, override):
+    monkeypatch.setattr(connection, "_override", override)
+    with pytest.raises(ValueError):
+        active_connection()
+
+
+def test_only_the_built_in_lighthouse_object_may_refresh_auth(monkeypatch, tmp_path):
+    # Even a value-identical copy of the Lighthouse connection (which the
+    # override validation cannot produce today) must not gain refresh rights.
+    copy = Connection(LIGHTHOUSE.origin, None)
+    assert copy == LIGHTHOUSE and copy is not LIGHTHOUSE
+    monkeypatch.setattr(connection, "active_connection", lambda: copy)
+    assert LighthouseClient()._read_only_auth
+    monkeypatch.setattr(connection, "_override", Connection(LIGHTHOUSE.origin, tmp_path / "copy"))
+    monkeypatch.setattr(connection, "active_connection", active_connection)
+    assert LighthouseClient()._read_only_auth
+
+
+def test_override_urls_cookies_and_pagination_are_origin_scoped(sandbox):
+    client = LighthouseClient()
+    assert client.canonical_url("/22985/quizzes/") == "https://sandbox.example/d2l/api/le/1.93/22985/quizzes/"
     assert client.canonical_url("?page=2", base_url="/22985/quizzes/").endswith("/22985/quizzes/?page=2")
     with pytest.raises(NetworkError):
         client.get("https://lighthouse.manipal.edu/d2l/api/versions/")
     with pytest.raises(NetworkError):
-        client.get("https://hetrynow.brightspace.com.evil.invalid/d2l/api/versions/")
+        client.get("https://sandbox.example.evil.invalid/d2l/api/versions/")
     client._apply_cookies_to_session(dict.fromkeys(COOKIE_NAMES, "test"))
-    assert {cookie.domain for cookie in client._session.cookies} == {"hetrynow.brightspace.com"}
-    assert client._read_only_auth
+    assert {cookie.domain for cookie in client._session.cookies} == {"sandbox.example"}
+    assert client._read_only_auth  # never refreshes or migrates auth
 
 
-def test_trial_does_not_read_production_session():
+def test_override_does_not_read_the_lighthouse_session(sandbox):
     with patch("lighthouse_cli.api.load_cookies", return_value={}) as load:
-        client = LighthouseClient(site="trial")
+        client = LighthouseClient()
         assert client.cookies == {}
     kwargs = load.call_args.kwargs
-    assert kwargs["config_dir"] == connection_for("trial").cookie_dir
-    assert kwargs["expected_origin"] == connection_for("trial").origin
+    assert kwargs["config_dir"] == sandbox.cookie_dir
+    assert kwargs["expected_origin"] == SANDBOX_ORIGIN
     assert kwargs["read_only"] is True
 
 
 def test_dry_run_does_not_construct_client_or_write():
     with patch("lighthouse_cli.assessment_commands.LighthouseClient") as client:
-        result = CliRunner().invoke(cli, ["instructor", "--site", "trial", "quiz-create", "22985", "--name", "Practice", "--layout", "one-way", "--dry-run", "--json"])
+        result = CliRunner().invoke(cli, ["instructor", "quiz-create", "22985", "--name", "Practice", "--layout", "one-way", "--dry-run", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.stdout)["data"]["PagingTypeId"] == 1
     client.assert_not_called()
@@ -132,48 +180,54 @@ def test_projection_has_resource_limits():
         project([None] * 20001)
 
 
-def test_session_import_is_sealed_origin_bound_and_separate():
+def test_session_import_is_sealed_and_origin_bound():
     document = {
-        "origin": "https://hetrynow.brightspace.com",
+        "origin": "https://lighthouse.manipal.edu",
         "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
     }
-    result = CliRunner().invoke(
-        cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document)
-    )
+    result = CliRunner().invoke(cli, ["auth", "import-session", "--json"], input=json.dumps(document))
     assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"imported": True, "verified": False}
     assert "SYNTHETIC_SESSION" not in result.output
-    store = CredentialStore(config_dir=connection_for("trial").cookie_dir)
+    store = CredentialStore()
     assert "SYNTHETIC_SESSION" not in store.cookie_file.read_text()
-    assert not CredentialStore().cookie_file.exists()
-    assert LighthouseClient(site="trial").cookies == document["cookies"]
-    store.write_artifact(store.cookie_file, metadata={}, secret={"origin": "https://lighthouse.manipal.edu", "cookies": document["cookies"]})
-    assert LighthouseClient(site="trial").cookies == {}
+    assert LighthouseClient(read_only_auth=True).cookies == document["cookies"]
 
 
-def test_session_import_rejects_wrong_origin_without_writes():
-    document = {
-        "origin": "https://wrong.invalid",
-        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
-    }
-    result = CliRunner().invoke(
-        cli, ["auth", "import-session", "--site", "trial", "--json"], input=json.dumps(document)
-    )
+@pytest.mark.parametrize("origin", ["https://wrong.invalid", SANDBOX_ORIGIN, "http://lighthouse.manipal.edu"])
+def test_session_import_rejects_another_origin_without_writes(origin):
+    document = {"origin": origin, "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION")}
+    result = CliRunner().invoke(cli, ["auth", "import-session", "--json"], input=json.dumps(document))
     assert result.exit_code == 1
     assert "SYNTHETIC_SESSION" not in result.output
-    assert not CredentialStore(config_dir=connection_for("trial").cookie_dir).cookie_file.exists()
+    assert not CredentialStore().cookie_file.exists()
 
 
-def test_trial_artifact_cannot_be_used_from_production_cookie_path():
+def test_session_import_no_longer_accepts_a_site_option():
+    result = CliRunner().invoke(cli, ["auth", "import-session", "--site", "lighthouse", "--json"], input="{}")
+    assert result.exit_code != 0
+
+
+def test_foreign_origin_artifact_cannot_be_used_from_the_lighthouse_cookie_path():
     store = CredentialStore()
     store.write_artifact(
         store.cookie_file,
         metadata={},
         secret={
-            "origin": "https://hetrynow.brightspace.com",
+            "origin": SANDBOX_ORIGIN,
             "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
         },
     )
     assert LighthouseClient(read_only_auth=True).cookies == {}
+
+
+def test_lighthouse_artifact_cannot_be_used_from_an_override_cookie_path(sandbox):
+    store = CredentialStore(config_dir=sandbox.cookie_dir)
+    store.write_artifact(store.cookie_file, metadata={}, secret={
+        "origin": "https://lighthouse.manipal.edu",
+        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+    })
+    assert LighthouseClient().cookies == {}
 
 
 @pytest.mark.parametrize("submission_type,expected", [("file", 0), ("text", 1)])
@@ -194,7 +248,7 @@ def test_bad_create_input_has_json_error_and_no_side_effects():
 
 
 def test_role_group_usage_errors_preserve_json_contract():
-    result = CliRunner().invoke(cli, ["instructor", "--site", "bogus", "quizzes", "12", "--json"])
+    result = CliRunner().invoke(cli, ["instructor", "--bogus", "quizzes", "12", "--json"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]
 
