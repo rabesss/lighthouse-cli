@@ -142,7 +142,7 @@ secretstorage==3.5.0
     # via keyring
 six==1.17.0
     # via mando
-soupsieve==2.9.2
+soupsieve==2.10
     # via beautifulsoup4
 tomli==2.4.1
     # via
