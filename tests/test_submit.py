@@ -1940,13 +1940,17 @@ class TestSubmitDryRun:
         assert "Would submit to 'Assignment 1 - Signals' in 'Signals & Systems'" in result.output
         client.submit_file.assert_not_called()
 
-    def test_dry_run_flags_a_folder_whose_details_could_not_be_read(
-        self, cli_runner: CliRunner, temp_pdf_file: Path,
+    @pytest.mark.parametrize("detail", [RuntimeError("lookup failed"), {"Name": ""}, {}, {"Name": "x" * 300}])
+    def test_dry_run_flags_a_folder_whose_name_could_not_be_read(
+        self, cli_runner: CliRunner, temp_pdf_file: Path, detail: object,
     ) -> None:
         from lighthouse_cli.cli import cli
 
         client = self._client()
-        client.get_dropbox_folder_detail.side_effect = RuntimeError("lookup failed")
+        if isinstance(detail, Exception):
+            client.get_dropbox_folder_detail.side_effect = detail
+        else:
+            client.get_dropbox_folder_detail.return_value = detail
         with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
             result = cli_runner.invoke(
                 cli, ["submit", "44347", "789", "--file", str(temp_pdf_file), "--dry-run", "--json"],
@@ -1954,6 +1958,7 @@ class TestSubmitDryRun:
         assert result.exit_code == 0
         data = json_module.loads(result.stdout)
         assert data["folder_verified"] is False
+        assert data["folder_name"] == "Unknown folder"
         assert "No submission was sent" in data["warning"]
         client.submit_file.assert_not_called()
 

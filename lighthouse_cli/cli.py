@@ -531,7 +531,7 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, dry_run: b
     On success, prints a JSON object with submission_id, folder_id, folder_name,
     course_id, course_name, file info, and submitted_at timestamp. A --dry-run
     instead prints dry_run, course_id, course_name, folder_id, folder_name,
-    folder_verified and file info (plus a warning when the folder details
+    folder_verified and file info (plus a warning when the folder name
     could not be read).
     """
     raise SystemExit(cmd_submit(

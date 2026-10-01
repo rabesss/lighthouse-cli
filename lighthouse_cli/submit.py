@@ -24,7 +24,7 @@ _DEFAULT_FOLDER_NAME = "Unknown folder"
 _DEFAULT_FILE_NAME = "Unknown file"
 _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
 _DRY_RUN_UNVERIFIED_WARNING = (
-    "The folder details could not be read; check the folder ID. No submission was sent."
+    "The folder name could not be read; check the folder ID. No submission was sent."
 )
 
 
@@ -351,14 +351,15 @@ def _positive_folder_id(value: object) -> int | None:
 
 
 def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> tuple[str, bool]:
-    """Get a dropbox folder's display name and whether its detail was read."""
+    """Get a dropbox folder's display name and whether it was read and usable."""
     try:
         detail = client.get_dropbox_folder_detail(org_id, folder_id)
     except Exception:
         return _DEFAULT_FOLDER_NAME, False
     if not isinstance(detail, dict):
         return _DEFAULT_FOLDER_NAME, False
-    return _safe_display_name(detail.get("Name"), _DEFAULT_FOLDER_NAME), True
+    name = _safe_display_name(detail.get("Name"), "")
+    return (name, True) if name else (_DEFAULT_FOLDER_NAME, False)
 
 
 def _safe_display_name(value: object, fallback: str) -> str:

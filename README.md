@@ -966,7 +966,7 @@ Submitted successfully. Submission ID: 5001
 }
 ```
 
-`folder_verified` is `false`, with a `warning`, when the folder's details
+`folder_verified` is `false`, with a `warning`, when the folder's name
 could not be read; check the folder ID before submitting.
 
 ---
