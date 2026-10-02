@@ -47,17 +47,19 @@ HTML frames and form posts:
    radios named `tAtom<tid>_<tvid>`, multi-select is one checkbox per option
    named `tAtom<tid>_<tvid>_<option>` with value `1`, and fill-in-the-blank
    is one text input per blank named `tAtom<tid>_<tvid>_<blank>`. True/false
-   values were numeric answer ids, but multiple-choice and multi-select
-   options were opaque tokens such as `o9188`, so choice values are not
-   always integers.
+   values were numeric answer ids, but multiple-choice values and the
+   multi-select `<option>` name suffix were opaque tokens such as `o9188`.
+   The preview page parser accepts only integer radio values, so it cannot
+   read these pages as is.
 3. Answer save: multipart POST to `quiz_attempt_save_auto.d2l` with
    `d2l_action=Update`, `d2l_actionparam=3,<page>,<tid>,<tvid>,<question
    number>`, a fresh per-request hit code and the question's
    response-present flag. A learner page has no Save button: it saves on each
    change (text on change or blur) and posts the whole page form, every
-   question's current value included. HTTP 200 alone does not prove the
-   answer persisted; read the page back and check the selected choice and
-   saved marker.
+   question's current value included, with `isFinalAutoSave=false`,
+   `useNewFinalAutoSave=true` and `timeLimitFromQuiz`. HTTP 200 alone does
+   not prove the answer persisted; read the page back and check the selected
+   choice and saved marker.
 4. Forward navigation: the same save endpoint with `d2l_actionparam=2,...`.
    Forward-only quizzes offer no previous-page control. Requesting a page
    number past the quiz's last page permanently breaks that attempt (every
@@ -78,7 +80,8 @@ HTML frames and form posts:
    page 2 (`pg=2`); the preview driver's read-only `reconcile` relies on this
    only after the full attempt identity matches.
 
-Instructor previews carry `isprv=1`; learner frames carry an empty `isprv=`.
+Instructor previews carry `isprv=1`; a learner's start chain, attempt frames
+and confirmation page carry an empty `isprv=`.
 A real graded attempt observed on Lighthouse and a learner attempt on a public
 Brightspace site used the same save, confirmation and submission routes, then
 a receipt at `quiz_submissions_attempt.d2l?isprv=0`. Learner specifics from
@@ -91,18 +94,21 @@ that public-site attempt (untimed, one page):
   saved answers. The learner's fresh-start POST was lost from the capture,
   but the summary script sends `inProgress=false` for it, as previews do.
 - Submission `param1` to `param7` were `"<qi>"`, `"<ai>"`, `false`, `true`,
-  `true`, `false`, `""` (ids as strings). `isRldbUse` was `true` with no
-  LockDown Browser involved, because the script applies `Boolean()` to a
-  non-empty hidden value. The result was
+  `true`, `false`, `""` (ids as strings). The confirmation page had no
+  `CHK_canBeGraded` control, so `canBeGraded` stayed `true`. `isRldbUse` was
+  `true` with no LockDown Browser involved, because the script applies
+  `Boolean()` to the non-empty `HDN_isRldbUse` value. The result was
   `parent.QuizDone(<qi>,<ai>,'0','0','0','gotoSv','')`, and the receipt URL
   added `isInPopup=0&isTimeUp=0`.
 - REST: the quiz list and quiz reads worked, but `/quizzes/{qi}/attempts/`
   and `/attempts/{ai}` returned 403 (`Quizzing.GradeAttempts`) before and
-  after submission. A learner's attempt state comes only from the summary
-  page, `quiz_submissions.d2l` and the receipt.
+  after submission. The learner's attempt state was readable instead from
+  the summary page, the submissions list `quiz_submissions.d2l` and the
+  receipt.
 
 Preview has no resume, as each Start creates a new attempt with a fresh
-timer. A learner's timed attempt has not been observed yet.
+timer. A learner's timed attempt and a learner's multi-page Next have not
+been observed yet.
 
 ## Timed quizzes (observed in timed previews)
 
