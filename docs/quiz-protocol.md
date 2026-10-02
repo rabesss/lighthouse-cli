@@ -49,8 +49,9 @@ HTML frames and form posts:
    is one text input per blank named `tAtom<tid>_<tvid>_<blank>`. True/false
    values were numeric answer ids, but multiple-choice values and the
    multi-select `<option>` name suffix were opaque tokens such as `o9188`.
-   The preview page parser accepts only integer radio values, so it cannot
-   read these pages as is.
+   The preview page parser cannot read learner pages as is: it requires
+   `isprv=1`, marks checkbox and text questions unsupported, and rejects
+   non-integer radio values.
 3. Answer save: multipart POST to `quiz_attempt_save_auto.d2l` with
    `d2l_action=Update`, `d2l_actionparam=3,<page>,<tid>,<tvid>,<question
    number>`, a fresh per-request hit code and the question's
