@@ -66,7 +66,5 @@ commands, so a green local run means a green CI run.
 
 | CI job | Local command |
 | --- | --- |
-| quality | ruff check, mypy, lint-imports, deptry, xenon |
-| security | gitleaks history scan (`.gitleaks.toml`) + `python scripts/check_secrets.py` |
-| tests | pytest matrix (3.10 and 3.13, both from `requirements-dev.txt`) |
-| policies | `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |
+| quality | gitleaks history scan (`.gitleaks.toml`), `python scripts/check_secrets.py`, ruff check, mypy, lint-imports, deptry, xenon |
+| tests | pytest matrix (3.10 with coverage, 3.13 without; both from `requirements-dev.txt`), including the policy tests |
