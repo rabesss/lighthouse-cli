@@ -89,9 +89,10 @@ def test_credentials_file_permissions(
 def test_corrupted_credentials_fallback(
     config_dir: Path,
     credentials_path: Path,
+    fake_keyring: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Corrupted credentials.json raises CredentialStoreError."""
+    """Corrupted credentials fail without probing the real system keyring."""
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
 
     # Write garbage
