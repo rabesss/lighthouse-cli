@@ -23,6 +23,7 @@ _MAIL_HOSTS = frozenset({"outlook.office.com", "outlook.office365.com", "outlook
 _LOGIN_HOSTS = frozenset({"login.microsoftonline.com", "login.live.com"})
 _MESSAGE_LIST = re.compile(r"^Message list No conversations selected$")
 _ERRORS = {
+    "compose_open": "A mail compose or reply window is open. Close it yourself before starting a new selected-message read. No content was returned.",
     "baseline_required": "Start with an unselected message list and no open message body. No content was returned.",
     "selection_timeout": "No eligible already-read message was selected in time. No content was returned.",
     "selection_not_eligible": "Select exactly one message that was already read and visible when the baseline was captured. No content was returned.",
@@ -52,13 +53,18 @@ _POLICY_CODES = {
     "access_blocked": "50131|53000|53001|53002|53003",
     "registration_blocked": "53004",
 }
+_DIAGNOSTIC_STAGES = frozenset({
+    "baseline", "selection", "message_pane", "subject_header", "sender_header",
+    "row_headers", "body_layout",
+})
 
 
 class OutlookWebError(Exception):
     """Fixed diagnostic only; never attach upstream text, URLs, or page data."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, stage: str | None = None) -> None:
         self.code = code if code in _ERRORS else "browser_error"
+        self.stage = stage if type(stage) is str and stage in _DIAGNOSTIC_STAGES else None
         super().__init__(_ERRORS[self.code])
 
 

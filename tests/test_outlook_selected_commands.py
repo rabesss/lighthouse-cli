@@ -92,6 +92,7 @@ def test_parse_errors_never_echo_input(collect: Mock, flag: str) -> None:
 @pytest.mark.parametrize("code", [
     "baseline_required", "selection_timeout", "selection_not_eligible", "view_changed",
     "unsupported_layout", "content_too_large", "browser_closed", "access_blocked",
+    "compose_open",
 ])
 def test_errors_are_static_even_when_exception_mutated(collect: Mock, code: str) -> None:
     error = OutlookWebError(code)
@@ -162,3 +163,29 @@ def test_help_stays_lazy_without_browser_dependency(collect: Mock) -> None:
     assert "best-effort" in result.stdout
     assert "--interactive-login" in result.stdout
     collect.assert_not_called()
+
+
+@pytest.mark.parametrize('stage', [
+    'baseline', 'selection', 'message_pane', 'subject_header', 'sender_header',
+    'row_headers', 'body_layout',
+])
+def test_fixed_layout_stage_is_available_without_page_content(collect: Mock, stage: str) -> None:
+    collect.side_effect = OutlookWebError('unsupported_layout', stage=stage)
+    result = invoke('--interactive-login', '--json')
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload['code'] == 'unsupported_layout'
+    assert payload['stage'] == stage
+    assert f'Diagnostic stage: {stage}.' in result.stderr
+
+
+@pytest.mark.parametrize('stage', ['PRIVATE_SENTINEL', '', [], None])
+def test_mutated_or_unknown_stage_never_reaches_output(collect: Mock, stage: Any) -> None:
+    error = OutlookWebError('unsupported_layout')
+    error.stage = stage
+    collect.side_effect = error
+    result = invoke('--interactive-login', '--json')
+    assert result.exit_code == 1
+    assert 'stage' not in json.loads(result.stdout)
+    assert 'PRIVATE_SENTINEL' not in result.output
+    assert 'Diagnostic stage' not in result.stderr

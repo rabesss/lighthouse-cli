@@ -781,3 +781,118 @@ def test_baseline_rejects_multiple_empty_reading_panes() -> None:
     with pytest.raises(OutlookWebError) as exc:
         selected._baseline(page, login_timeout=30)
     assert exc.value.code == 'baseline_required'
+
+
+@pytest.mark.parametrize("label", ["Send", "Send (Ctrl+Enter)", "Send (⌘+Enter)"])
+@pytest.mark.parametrize("disabled", [False, True])
+def test_visible_compose_send_control_prevents_baseline_without_reading_draft(
+    label: str, disabled: bool,
+) -> None:
+    page = _page()
+    page.soup.append(BeautifulSoup(
+        f'<section><button aria-label="{escape(label)}"'
+        + (' disabled' if disabled else '')
+        + '>Send</button><div contenteditable="true">PRIVATE_DRAFT</div></section>',
+        'html.parser',
+    ))
+    with pytest.raises(OutlookWebError) as exc:
+        selected._baseline(page, login_timeout=30)
+    assert exc.value.code == 'compose_open'
+    assert 'PRIVATE_DRAFT' not in str(exc.value)
+    assert page.text_reads == []
+
+
+def test_hidden_compose_template_does_not_prevent_baseline() -> None:
+    page = _page()
+    page.soup.append(BeautifulSoup(
+        '<section hidden><button aria-label="Send">Send</button></section>', 'html.parser',
+    ))
+    assert selected._baseline(page, login_timeout=30) == _baseline()
+    assert page.text_reads == []
+
+
+@pytest.mark.parametrize("label", ["Send feedback", "Send options", "Sender"])
+def test_other_send_labels_are_not_mistaken_for_compose(label: str) -> None:
+    page = _page()
+    page.soup.append(BeautifulSoup(
+        f'<button aria-label="{escape(label)}">Other</button>', 'html.parser',
+    ))
+    assert selected._baseline(page, login_timeout=30) == _baseline()
+
+
+def test_compose_opened_after_baseline_prevents_body_read() -> None:
+    page = _page(chosen=True, pane=True)
+    page.soup.append(BeautifulSoup('<button aria-label="Send">Send</button>', 'html.parser'))
+    with pytest.raises(OutlookWebError) as exc:
+        _read(page)
+    assert exc.value.code == 'compose_open'
+    assert page.text_reads == []
+
+
+def test_compose_appearing_during_body_read_prevents_output() -> None:
+    page = _page(chosen=True, pane=True)
+
+    def open_compose(_node: Tag) -> None:
+        if not page.soup.select_one('button[aria-label="Send"]'):
+            page.soup.append(BeautifulSoup('<button aria-label="Send">Send</button>', 'html.parser'))
+
+    page.on_text = open_compose
+    with pytest.raises(OutlookWebError) as exc:
+        _read(page)
+    assert exc.value.code == 'compose_open'
+
+
+def test_compose_opened_between_baseline_passes_never_announces_ready() -> None:
+    page = _page()
+
+    def open_compose(_delay: int) -> None:
+        page.soup.append(BeautifulSoup('<button aria-label="Send">Send</button>', 'html.parser'))
+
+    page.on_wait = open_compose
+    with pytest.raises(OutlookWebError) as exc:
+        selected._baseline(page, login_timeout=30)
+    assert exc.value.code == 'compose_open'
+    assert page.text_reads == []
+
+
+@pytest.mark.parametrize("stage,selector,attribute,value", [
+    ('selection', '#row-1', 'aria-selected', 'invalid'),
+    ('message_pane', 'section[aria-label="1 messages"]', 'aria-label', '2 messages'),
+    ('subject_header', '#MSG_1_SUBJECT', 'aria-labelledby', 'missing-heading'),
+    ('row_headers', '#row-1 span:nth-of-type(2)', 'data-test-case', 'replace-text'),
+    ('body_layout', '#portal', 'data-test-id', 'wrong-body-container'),
+])
+def test_unsupported_layout_reports_fixed_diagnostic_stage(
+    stage: str, selector: str, attribute: str, value: str,
+) -> None:
+    page = _page(chosen=True, pane=True)
+    if value == 'replace-text':
+        page.node(selector).string = 'Different synthetic subject'
+    elif stage == 'body_layout':
+        page.node('#placeholder [role="document"]').string = 'Nonempty placeholder'
+    else:
+        page.node(selector)[attribute] = value
+    with pytest.raises(OutlookWebError) as exc:
+        _read(page)
+    assert exc.value.code == 'unsupported_layout'
+    assert exc.value.stage == stage
+
+
+def test_baseline_layout_failure_reports_baseline_stage() -> None:
+    page = _page()
+    page.node('#row-1')['aria-selected'] = 'invalid'
+    with pytest.raises(OutlookWebError) as exc:
+        selected._baseline(page, login_timeout=30)
+    assert exc.value.code == 'unsupported_layout'
+    assert exc.value.stage == 'baseline'
+
+
+def test_sender_layout_failure_keeps_specific_nested_stage() -> None:
+    page = _page(chosen=True, pane=True)
+    page.node('[aria-label="Email message"]').append(BeautifulSoup(
+        '<span role="heading" id="MSG_2_FROM">Another synthetic sender</span>', 'html.parser',
+    ))
+    with pytest.raises(OutlookWebError) as exc:
+        _read(page)
+    assert exc.value.code == 'unsupported_layout'
+    assert exc.value.stage == 'sender_header'

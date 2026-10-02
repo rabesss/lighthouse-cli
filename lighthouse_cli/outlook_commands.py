@@ -37,11 +37,19 @@ def _validate_options(
     return None
 
 
-def _error(code: str, message: str, *, json_output: bool, exit_code: int = 1) -> int:
+def _error(
+    code: str, message: str, *, json_output: bool, exit_code: int = 1,
+    stage: str | None = None,
+) -> int:
     """Emit only fixed diagnostics; never echo browser exceptions or input."""
-    click.echo(f"Error: {message}", err=True)
+    safe_stage = OutlookWebError(code, stage=stage).stage
+    suffix = f" Diagnostic stage: {safe_stage}." if safe_stage else ""
+    click.echo(f"Error: {message}{suffix}", err=True)
     if json_output:
-        output_json({"source": "outlook_web", "code": code, "error": message})
+        payload = {"source": "outlook_web", "code": code, "error": message}
+        if safe_stage:
+            payload["stage"] = safe_stage
+        output_json(payload)
     return exit_code
 
 
@@ -174,8 +182,10 @@ def cmd_outlook_read_selected(
         return _error("interrupted", "Outlook selected-message read interrupted.",
                       json_output=json_output, exit_code=130)
     except OutlookWebError as exc:
-        safe_error = OutlookWebError(exc.code if type(exc.code) is str else "browser_error")
-        return _error(safe_error.code, str(safe_error), json_output=json_output)
+        safe_error = OutlookWebError(
+            exc.code if type(exc.code) is str else "browser_error", stage=exc.stage,
+        )
+        return _error(safe_error.code, str(safe_error), json_output=json_output, stage=safe_error.stage)
     except Exception:
         return _error("outlook_failed", "Outlook selected-message read failed.", json_output=json_output)
     if json_output:

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,7 @@ _LIST = re.compile(r"^Message list(?:\s|$)")
 _BODY = 'div[data-test-id="mailMessageBodyContainer"]'
 _UI = f':not({_BODY} *)'
 _MAX_ROWS = 100
+_SEND_BUTTON = re.compile(r"^Send(?:\s*\([^\n]*\))?$", re.I)
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,27 @@ class RowState:
     dom_id: str
     read: bool
     selected: bool
+
+
+def _assert_no_compose(page: Page) -> None:
+    """Reject the observed English compose/send UI without reading draft text.
+
+    Disabled Send buttons count too. This is a conservative supported-layout
+    guard, not a lock that can prevent the user's own input or mailbox changes.
+    """
+    if page.get_by_role("button", name=_SEND_BUTTON).count():
+        raise OutlookWebError("compose_open")
+
+
+@contextmanager
+def _layout_stage(stage: str) -> Iterator[None]:
+    """Add only a fixed stage label to unsupported-layout diagnostics."""
+    try:
+        yield
+    except OutlookWebError as exc:
+        if exc.code == "unsupported_layout" and exc.stage is None:
+            raise OutlookWebError(exc.code, stage=stage) from None
+        raise
 
 
 def _one(locator: Locator) -> Locator:
@@ -86,6 +109,7 @@ def _mail_list(page: Page) -> Locator:
     _raise_policy_block(page)
     if _host(page.url) not in _MAIL_HOSTS:
         raise OutlookWebError("view_changed")
+    _assert_no_compose(page)
     return _one(page.get_by_role("listbox", name=_LIST))
 
 
@@ -98,6 +122,7 @@ def _wait_for_list(page: Page, timeout: int) -> Locator:
         _raise_policy_block(page)
         if _host(page.url) in _MAIL_HOSTS:
             saw_mailbox = True
+            _assert_no_compose(page)
             message_list = page.get_by_role("listbox", name=_LIST)
             if message_list.count():
                 message_list = _one(message_list)
@@ -108,6 +133,7 @@ def _wait_for_list(page: Page, timeout: int) -> Locator:
 
 
 def _baseline_pass(page: Page, message_list: Locator) -> tuple[RowState, ...]:
+    _assert_no_compose(page)
     # Outlook retains an empty Reading Pane shell after clearing selection.
     # Permit that shell, but reject every observed message/header/body anchor.
     panes = page.get_by_role("main", name="Reading Pane", exact=True)
@@ -127,17 +153,19 @@ def _baseline_pass(page: Page, message_list: Locator) -> tuple[RowState, ...]:
 
 
 def _baseline(page: Page, *, login_timeout: int) -> tuple[RowState, ...]:
-    message_list = _wait_for_list(page, login_timeout)
-    before = _baseline_pass(page, message_list)
-    page.wait_for_timeout(250)
-    if _baseline_pass(page, _mail_list(page)) != before:
-        raise OutlookWebError("view_changed")
-    return before
+    with _layout_stage("baseline"):
+        message_list = _wait_for_list(page, login_timeout)
+        before = _baseline_pass(page, message_list)
+        page.wait_for_timeout(250)
+        if _baseline_pass(page, _mail_list(page)) != before:
+            raise OutlookWebError("view_changed")
+        return before
 
 
 def _selected_row(page: Page, baseline: tuple[RowState, ...]) -> tuple[Locator, RowState] | None:
-    message_list = _mail_list(page)
-    states = _rows(message_list)
+    with _layout_stage("selection"):
+        message_list = _mail_list(page)
+        states = _rows(message_list)
     if [(row.dom_id, row.read) for row in states] != [(row.dom_id, row.read) for row in baseline]:
         raise OutlookWebError("selection_not_eligible")
     selected = [(index, row) for index, row in enumerate(states) if row.selected]
@@ -203,12 +231,24 @@ def _pane_text(page: Page, row: Locator) -> dict[str, str] | None:
         raise OutlookWebError("unsupported_layout")
     if pane.locator(f'span[role="heading"][id$="_SUBJECT"]{_UI}').count() < 2:
         return None
-    subject = _subject(pane)
+    with _layout_stage("subject_header"):
+        subject = _subject(pane)
     sender_heading = email.locator(f'span[role="heading"][id$="_FROM"]{_UI}')
     if sender_heading.count() == 0:
         return None
-    sender = _bounded_text(_one(sender_heading), 512)
-    _match_row_headers(row, subject, sender)
+    with _layout_stage("sender_header"):
+        sender = _bounded_text(_one(sender_heading), 512)
+    with _layout_stage("row_headers"):
+        _match_row_headers(row, subject, sender)
+    with _layout_stage("body_layout"):
+        body = _body_text(page, group, email)
+    if body is None:
+        return None
+    return {"subject": subject, "sender": sender, "body": body}
+
+
+def _body_text(page: Page, group: Locator, email: Locator) -> str | None:
+    """Read the supported placeholder/portal body pair only."""
     bodies = group.locator(_BODY)
     if bodies.count() < 2:
         return None
@@ -227,7 +267,7 @@ def _pane_text(page: Page, row: Locator) -> dict[str, str] | None:
     body = _bounded_text(_one(portal).get_by_role("document", name="Message body", exact=True), 50000)
     if not body.strip():
         return None
-    return {"subject": subject, "sender": sender, "body": body}
+    return body
 
 
 def _read_after_selection(
@@ -240,7 +280,8 @@ def _read_after_selection(
             page.wait_for_timeout(250)
             continue
         row, identity = selected
-        first = _pane_text(page, row)
+        with _layout_stage("message_pane"):
+            first = _pane_text(page, row)
         if first is None:
             page.wait_for_timeout(250)
             continue
@@ -251,7 +292,8 @@ def _read_after_selection(
         second = _selected_row(page, baseline)
         if second is None or second[1] != identity:
             raise OutlookWebError("view_changed")
-        second_text = _pane_text(page, second[0])
+        with _layout_stage("message_pane"):
+            second_text = _pane_text(page, second[0])
         final = _selected_row(page, baseline)
         if first != second_text or final is None or final[1] != identity:
             raise OutlookWebError("view_changed")
