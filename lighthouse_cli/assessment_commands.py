@@ -5,20 +5,15 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
-from .api import LighthouseClient
-from .assessment_api import (
-    AssessmentAPI,
-    AssessmentWriteUnknownError,
-    assignment_payload,
-    project,
-    quiz_payload,
-)
 from .course_read_commands import register_course_reads
 from .display import JsonOutputCommand, JsonOutputGroup, format_user_error, output_json
+
+if TYPE_CHECKING:
+    from .assessment_api import AssessmentAPI
 
 _ID = click.IntRange(min=1)
 
@@ -31,6 +26,10 @@ def _emit(data: Any, json_output: bool) -> None:
 
 
 def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], Any]) -> None:
+    # Imported here, not at module level, so role --help skips the HTTP stack.
+    from .api import LighthouseClient
+    from .assessment_api import AssessmentAPI, AssessmentWriteUnknownError, project
+
     client = None
     try:
         client = LighthouseClient()
@@ -152,6 +151,7 @@ register_course_reads(instructor, _run)
 
 def _create(course_id: int, resource: str, payload: dict[str, Any], yes: bool, dry_run: bool, json_output: bool) -> None:
     if dry_run:
+        from .assessment_api import project
         _emit({"course_id": course_id, "dry_run": True,
                "operation": f"create-{resource}", "data": project(payload)}, json_output)
         return
@@ -192,6 +192,7 @@ def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool
     question definitions but not creating them. one-way means one question
     per page and no backward navigation. all means all questions together.
     """
+    from .assessment_api import quiz_payload
     payload = _settings(lambda: quiz_payload(name, layout, attempts), json_output)
     _create(course_id, "quiz", payload, yes, dry_run, json_output)
 
@@ -206,5 +207,6 @@ def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool
 @click.option("--json", "json_output", is_flag=True)
 def assignment_create(course_id: int, name: str, instructions: str, submission_type: str, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create a hidden individual assignment, with no gradebook link."""
+    from .assessment_api import assignment_payload
     payload = _settings(lambda: assignment_payload(name, instructions, submission_type), json_output)
     _create(course_id, "assignment", payload, yes, dry_run, json_output)
