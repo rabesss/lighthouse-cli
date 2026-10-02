@@ -13,8 +13,7 @@ coverage, 3.13 without). Each step maps to one local command:
 | `quality`: lint / types / layers / deps / complexity | `ruff check . && mypy && lint-imports && deptry . && xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli` |
 | `tests` | `pytest -q -n auto --cov`; policy tests alone: `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |
 
-CI skips draft PRs (it runs once the PR is marked ready) and changes that only
-touch `docs/`, `droid-wiki/` or `README.md`.
+CI skips draft PRs; it runs once the PR is marked ready.
 
 ## 2. Fix by category
 

@@ -19,9 +19,8 @@ playwright install chromium
 
 ## Quality Gates
 
-CI runs on every non-draft PR and push to `main` (`.github/workflows/ci.yml`),
-except changes that only touch `docs/`, `droid-wiki/` or `README.md`: linting
-(`ruff`), strict type checking (`mypy`), architecture layers
+CI runs on every non-draft PR and push to `main` (`.github/workflows/ci.yml`):
+linting (`ruff`), strict type checking (`mypy`), architecture layers
 (`import-linter`), dependency hygiene (`deptry`), a complexity gate
 (`xenon`: average and per-module ranks only; it does not block individual
 worst-case functions), secret scanning (gitleaks history scan plus a rejecting

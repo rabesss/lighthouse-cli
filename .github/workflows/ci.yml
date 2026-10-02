@@ -2,14 +2,14 @@ name: CI
 
 # Kept to three short jobs: every job repeats checkout, Python setup and the
 # lockfile install, so splitting cheap checks into more jobs only adds overhead.
+# Job names are required checks in the protect-main ruleset; rename them there
+# too. No path filters: a skipped workflow leaves required checks pending, and
+# the secret scans cover docs as well.
 on:
   push:
     branches: [main]
-    # Nothing in the suite reads these; a change that also touches code still runs.
-    paths-ignore: ["docs/**", "droid-wiki/**", "README.md"]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore: ["docs/**", "droid-wiki/**", "README.md"]
 
 permissions:
   contents: read
@@ -20,8 +20,8 @@ concurrency:
 
 jobs:
   quality:
-    name: lint / types / architecture / deps / secrets
-    # Draft PRs wait for ready_for_review.
+    name: lint / types / architecture / deps
+    # Draft PRs wait for ready_for_review; a skipped job satisfies a required check.
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

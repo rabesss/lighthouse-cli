@@ -266,8 +266,11 @@ class TestCIPolicies:
 
     def test_every_ci_leg_installs_the_lockfile(self) -> None:
         ci = (WORKFLOWS / "ci.yml").read_text()
-        installs = re.findall(r"pip install [^\n]*", ci)
-        floating = [cmd for cmd in installs if "requirements-dev.txt" not in cmd]
+        # One entry per command, so `&& pip install pkg` cannot hide behind
+        # the lockfile install on the same line.
+        installs = re.findall(r"pip install [^\n&;|]*", ci)
+        allowed = r"pip install (--system )?(-r requirements-dev\.txt|-e \. --no-deps)\s*"
+        floating = [cmd for cmd in installs if not re.fullmatch(allowed, cmd)]
         assert installs and floating == [], floating
 
     def test_unpinned_action_checker(self) -> None:
