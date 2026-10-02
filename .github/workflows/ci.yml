@@ -1,9 +1,15 @@
 name: CI
 
+# Kept to three short jobs: every job repeats checkout, Python setup and the
+# lockfile install, so splitting cheap checks into more jobs only adds overhead.
+# Job names are required checks in the protect-main ruleset; rename them there
+# too. No path filters: a skipped workflow leaves required checks pending, and
+# the secret scans cover docs as well.
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -15,16 +21,35 @@ concurrency:
 jobs:
   quality:
     name: lint / types / architecture / deps
+    # Draft PRs wait for ready_for_review; a skipped job satisfies a required check.
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history for the gitleaks scan
+      - name: Git history secret scan
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # pragma: allowlist secret
+          # Pinned so the rule-scoped allowlist in .gitleaks.toml keeps the
+          # semantics it was verified against.
+          GITLEAKS_VERSION: "8.30.1"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.10"
-          cache: pip
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements-dev.txt
       - name: Install pinned dev toolchain
-        run: pip install -r requirements-dev.txt
+        # uv installs the same lockfile as pip, in a few seconds instead of ~15.
+        run: uv pip install --system -r requirements-dev.txt
+      - name: Working tree secret scan (audited baseline)
+        # Rejects any finding in git-tracked files that is not in the audited
+        # baseline and never writes the baseline (scripts/check_secrets.py).
+        run: python scripts/check_secrets.py
       - name: Lint
         run: ruff check .
       - name: Type check (strict)
@@ -40,73 +65,34 @@ jobs:
         # ms_auth.py (SSO state machine) is excluded as a known hotspot.
         run: xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli
 
-  security:
-    name: secret scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Git history secret scan
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # pragma: allowlist secret
-          # Pinned so the rule-scoped allowlist in .gitleaks.toml keeps the
-          # semantics it was verified against.
-          GITLEAKS_VERSION: "8.30.1"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-      - name: Working tree secret scan (audited baseline)
-        # Rejects any finding in git-tracked files that is not in the audited
-        # baseline and never writes the baseline (scripts/check_secrets.py).
-        # The pragma marks "detect-secrets==1.5.0" as a version pin, not a secret.
-        run: | # pragma: allowlist secret
-          pip install detect-secrets==1.5.0
-          python scripts/check_secrets.py
-
   tests:
     name: tests (py${{ matrix.python-version }})
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         include:
-          - python-version: "3.10"
-            install: pip install -r requirements-dev.txt && pip install -e . --no-deps
           # The lockfile is compiled for 3.10 but every pin also resolves on
           # 3.13; both legs install it so 3.13 never floats to new versions.
+          # Coverage is measured on one leg only.
+          - python-version: "3.10"
+            pytest-args: --cov --cov-report=term
           - python-version: "3.13"
-            install: pip install -r requirements-dev.txt && pip install -e . --no-deps
+            pytest-args: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements-dev.txt
       - name: Install
-        run: ${{ matrix.install }}
+        run: uv pip install --system -r requirements-dev.txt && uv pip install --system -e . --no-deps
+      # The full suite includes the repository policy and secret-gate tests.
+      # pytest-xdist spreads it over the runner's cores.
       - name: Test suite
-        run: pytest -q --durations=10 --cov --cov-report=term --cov-report=xml
-      - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-py${{ matrix.python-version }}
-          path: coverage.xml
-
-  policies:
-    name: repository policy tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-          cache: pip
-      # Same locked install as the test legs: conftest imports click and the
-      # package, and the secret-gate regressions need detect-secrets.
-      - run: pip install -r requirements-dev.txt && pip install -e . --no-deps
-      - run: pytest tests/test_repo_policies.py tests/test_secret_gate.py -q
+        run: pytest -q -n auto --durations=10 ${{ matrix.pytest-args }}

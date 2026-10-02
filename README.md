@@ -1310,10 +1310,10 @@ extra.
 
 Contributor and agent conventions live in [`AGENTS.md`](AGENTS.md); the
 PR-review charter (what reviewers check, by severity) lives in
-[`REVIEW.md`](REVIEW.md). CI (`.github/workflows/ci.yml`) gates every PR on
-lint, strict types, architecture layers, dependency hygiene, secret
-scanning, and the test matrix — see [CONTRIBUTING.md](CONTRIBUTING.md) for
-the local equivalents. For exact options of any command, run
+[`REVIEW.md`](REVIEW.md). CI (`.github/workflows/ci.yml`) gates every
+non-draft PR on lint, strict types, architecture layers, dependency hygiene,
+secret scanning, and the test matrix — see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the local equivalents. For exact options of any command, run
 `lighthouse <command> --help` (groups nest, e.g.
 `lighthouse instructor preview --help`).
 

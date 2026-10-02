@@ -19,14 +19,15 @@ playwright install chromium
 
 ## Quality Gates
 
-CI runs on every PR and push to `main` (`.github/workflows/ci.yml`): formatting,
+CI runs on every non-draft PR and push to `main` (`.github/workflows/ci.yml`):
 linting (`ruff`), strict type checking (`mypy`), architecture layers
 (`import-linter`), dependency hygiene (`deptry`), a complexity gate
 (`xenon`: average and per-module ranks only; it does not block individual
 worst-case functions), secret scanning (gitleaks history scan plus a rejecting
-`detect-secrets` check against the audited baseline), the test matrix (Python
-3.10 and 3.13, both from the pinned lockfile), and repository policy tests
-(`tests/test_repo_policies.py`, `tests/test_secret_gate.py`).
+`detect-secrets` check against the audited baseline), and the test matrix
+(Python 3.10 and 3.13, both from the pinned lockfile), which includes the
+repository policy tests (`tests/test_repo_policies.py`,
+`tests/test_secret_gate.py`).
 
 Install the pinned toolchain and reproduce any job locally:
 

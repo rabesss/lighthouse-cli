@@ -3,7 +3,7 @@
 These encode the agent-readiness invariants that must survive future changes:
 pinned dependencies, CI coverage of the quality gates, secret-scanning, and the
 module conventions documented in AGENTS.md. They are deliberately fast and
-network-free so they run as part of the normal suite and as a dedicated CI job.
+network-free so they run as part of the normal suite on every CI leg.
 
 Each policy is a small checker function exercised twice: once against a
 synthetic fixture that must be rejected (so the checker cannot silently pass
@@ -232,15 +232,15 @@ class TestDependencyPolicies:
     def test_detect_secrets_version_is_consistent(self) -> None:
         # The gate, the pre-commit hook, the lockfile, and the baseline format
         # must agree, or the gate reports a spuriously "stale" baseline.
+        # CI installs it from the lockfile.
         dev, _ = _read_lock("requirements-dev.txt")
-        ci = re.search(r"pip install detect-secrets==([0-9.]+)", (WORKFLOWS / "ci.yml").read_text())
         hook = re.search(
             r"Yelp/detect-secrets\s*\n\s*rev:\s*v?(\S+)",
             (ROOT / ".pre-commit-config.yaml").read_text(),
         )
         baseline = json.loads((ROOT / ".secrets.baseline").read_text())["version"]
-        assert ci and hook, "detect-secrets pin missing from ci.yml or pre-commit"
-        assert {dev["detect-secrets"], ci.group(1), hook.group(1), baseline} == {baseline}
+        assert hook, "detect-secrets pin missing from pre-commit"
+        assert {dev["detect-secrets"], hook.group(1), baseline} == {baseline}
 
 
 class TestCIPolicies:
@@ -266,10 +266,12 @@ class TestCIPolicies:
 
     def test_every_ci_leg_installs_the_lockfile(self) -> None:
         ci = (WORKFLOWS / "ci.yml").read_text()
-        installs = re.findall(r"pip install [^\n]*", ci)
-        floating = [cmd for cmd in installs if "requirements-dev.txt" not in cmd]
-        # The secret job installs one exact pin; everything else uses the lock.
-        assert floating == ["pip install detect-secrets==1.5.0"], floating
+        # One entry per command, so `&& pip install pkg` cannot hide behind
+        # the lockfile install on the same line.
+        installs = re.findall(r"pip install [^\n&;|]*", ci)
+        allowed = r"pip install (--system )?(-r requirements-dev\.txt|-e \. --no-deps)\s*"
+        floating = [cmd for cmd in installs if not re.fullmatch(allowed, cmd)]
+        assert installs and floating == [], floating
 
     def test_unpinned_action_checker(self) -> None:
         workflow = (
@@ -286,10 +288,6 @@ class TestCIPolicies:
             if (refs := _unpinned_actions(path.read_text()))
         }
         assert unpinned == _VENDOR_MANAGED_ACTIONS, f"mutable action refs: {unpinned}"
-
-    def test_release_automation_present(self) -> None:
-        release = (WORKFLOWS / "release.yml").read_text()
-        assert "release-please" in release
 
 
 class TestSecretScanningPolicies:

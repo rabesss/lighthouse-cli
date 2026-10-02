@@ -2,8 +2,10 @@ version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    # Monthly: each grouped PR runs CI, so weekly runs cost minutes for little
+    # gain. Security updates are not bound to this schedule.
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     # Burn-in: let new upstream releases settle for a week before proposing
     # them, which filters most yanked/patch-on-patch churn.
     cooldown:
@@ -39,7 +41,7 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     # github-actions supports only `default-days` (no semver-specific days).
     cooldown:
       default-days: 7

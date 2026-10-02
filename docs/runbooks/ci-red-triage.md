@@ -4,14 +4,16 @@ Audience: maintainers and agents reacting to a failed check on a PR or `main`.
 
 ## 1. Identify the failing job
 
-CI (`ci.yml`) has four jobs; each maps to one local command:
+CI (`ci.yml`) has two jobs, `quality` and a `tests` matrix (3.10 with
+coverage, 3.13 without). Each step maps to one local command:
 
-| Job | Local reproduction |
+| Step | Local reproduction |
 | --- | --- |
-| `quality` | `ruff check . && mypy && lint-imports && deptry . && xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli` |
-| `security` | `python scripts/check_secrets.py` (working tree, rejecting) and `gitleaks git .` (history, uses `.gitleaks.toml`) |
-| `tests` | `pytest -q --cov` |
-| `policies` | `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |
+| `quality`: secret scans | `python scripts/check_secrets.py` (working tree, rejecting) and `gitleaks git .` (history, uses `.gitleaks.toml`) |
+| `quality`: lint / types / layers / deps / complexity | `ruff check . && mypy && lint-imports && deptry . && xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli` |
+| `tests` | `pytest -q -n auto --cov`; policy tests alone: `pytest tests/test_repo_policies.py tests/test_secret_gate.py -q` |
+
+CI skips draft PRs; it runs once the PR is marked ready.
 
 ## 2. Fix by category
 
@@ -45,19 +47,7 @@ CI (`ci.yml`) has four jobs; each maps to one local command:
   dep, dropped `from __future__ import annotations`). Restore the invariant
   rather than editing the test.
 
-## 3. Release PRs have no checks
-
-`release.yml` runs release-please with the default `GITHUB_TOKEN`. GitHub does
-not start workflows for PRs or pushes created with that token, so a release
-PR shows the required checks as *expected/missing*, not green. That is not a
-pass. Until a maintainer provisions a dedicated GitHub App (contents +
-pull-requests write, installed on this repo only) and passes its token to the
-action's `token:` input, run CI on the release PR manually. Push an empty
-commit to its branch, or close and reopen it. Then merge only after all
-required checks are green. Provisioning that credential is a maintainer
-decision; agents must not create or store one.
-
-## 4. Escalation
+## 3. Escalation
 
 If `main` is red: fix forward on a branch and request review; do not force-push
 or disable gates.

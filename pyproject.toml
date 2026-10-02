@@ -26,6 +26,7 @@ dev = [
     # breaking release; 0.x tools are bounded at the next minor.
     "pytest>=9.0,<10",
     "pytest-cov>=7.0,<8",
+    "pytest-xdist>=3.6,<4",
     "ruff>=0.16.8,<0.17",
     "mypy>=2.0,<3",
     "types-requests>=2.31,<3",
@@ -131,6 +132,7 @@ exclude = ["tests", ".venv", "docs", "scripts"]
 DEP002 = [
     "pytest",
     "pytest-cov",
+    "pytest-xdist",
     "ruff",
     "mypy",
     "types-requests",
