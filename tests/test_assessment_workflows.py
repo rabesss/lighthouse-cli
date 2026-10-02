@@ -363,7 +363,7 @@ def test_role_help_does_not_load_http(role):
         sys.executable, "-B", "-c",
         "import sys; from lighthouse_cli.cli import cli\n"
         f"try: cli(['{role}', '--help'])\n"
-        "except SystemExit: pass\n"
+        "except SystemExit as exc: assert exc.code == 0, exc.code\n"
         "assert not {'requests', 'lighthouse_cli.api'} & sys.modules.keys()",
     ], capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
