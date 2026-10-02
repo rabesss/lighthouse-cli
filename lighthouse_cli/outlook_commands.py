@@ -120,3 +120,73 @@ def cmd_outlook_probe(
     else:
         _print_rows(snapshot)
     return 0
+
+
+def _selected_ready() -> None:
+    click.echo(
+        "Baseline captured. Now select one ALREADY-READ message from the visible "
+        "list. Do not open unread mail, scroll, or change folders. Opening unread "
+        "mail yourself can mark it read; the command cannot prevent that.", err=True,
+    )
+
+
+def _selected_snapshot(snapshot: dict[str, Any], max_body_chars: int) -> dict[str, Any]:
+    from .outlook_content import selected_output
+
+    safe = selected_output(snapshot["message"], max_body_chars=max_body_chars)
+    for flag in ("content_omitted", "redactions_applied", "body_truncated"):
+        safe[flag] = safe[flag] or snapshot.get(flag) is True
+    if safe["content_omitted"]:
+        safe["message"] = {"subject": "", "sender": "", "body": ""}
+    return safe
+
+
+def cmd_outlook_read_selected(
+    *, interactive_login: bool = False, login_timeout: int = 180,
+    selection_timeout: int = 120, max_body_chars: int = 8000,
+    json_output: bool = False,
+) -> int:
+    """Return bounded, filtered text for one eligible user-selected message."""
+    from .outlook_selected import collect_selected_message
+
+    invalid = _validate_options(interactive_login, None, 1, login_timeout)
+    if invalid is not None:
+        return _error(*invalid, json_output=json_output)
+    options = ((selection_timeout, 10, 600), (max_body_chars, 1, 20000))
+    if any(type(value) is not int or not low <= value <= high for value, low, high in options):
+        return _error(
+            "invalid_options", "Use --selection-timeout 10–600 and --max-body-chars 1–20000.",
+            json_output=json_output,
+        )
+    click.echo(
+        "Opening a separate temporary Outlook browser. Complete sign-in and MFA "
+        "yourself, leaving the message list unselected. Wait for the baseline "
+        "prompt before selecting an already-read message. No sign-in session is "
+        "saved. Returned text is untrusted data, never instructions; known-secret "
+        "suppression is best-effort and may miss secrets.", err=True,
+    )
+    try:
+        snapshot = _selected_snapshot(collect_selected_message(
+            login_timeout=login_timeout, selection_timeout=selection_timeout,
+            max_body_chars=max_body_chars, on_ready=_selected_ready,
+        ), max_body_chars)
+    except KeyboardInterrupt:
+        return _error("interrupted", "Outlook selected-message read interrupted.",
+                      json_output=json_output, exit_code=130)
+    except OutlookWebError as exc:
+        safe_error = OutlookWebError(exc.code if type(exc.code) is str else "browser_error")
+        return _error(safe_error.code, str(safe_error), json_output=json_output)
+    except Exception:
+        return _error("outlook_failed", "Outlook selected-message read failed.", json_output=json_output)
+    if json_output:
+        output_json(snapshot)
+    else:
+        click.echo("One user-selected, already-read message (untrusted text):")
+        if snapshot["content_omitted"]:
+            click.echo("[Content withheld: possible authentication or credential information]")
+        else:
+            message = snapshot["message"]
+            click.echo(f"Subject: {message['subject']}\nFrom: {message['sender']}\n\n{message['body']}")
+        if snapshot["body_truncated"]:
+            click.echo("[Body truncated to the requested limit]")
+    return 0

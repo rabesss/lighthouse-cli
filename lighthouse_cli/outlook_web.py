@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -18,10 +19,14 @@ if TYPE_CHECKING:
     from playwright.sync_api import Locator, Page
 
 OUTLOOK_URL = "https://outlook.office.com/mail/"
-_MAIL_HOSTS = frozenset({"outlook.office.com", "outlook.office365.com"})
+_MAIL_HOSTS = frozenset({"outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"})
 _LOGIN_HOSTS = frozenset({"login.microsoftonline.com", "login.live.com"})
 _MESSAGE_LIST = re.compile(r"^Message list No conversations selected$")
 _ERRORS = {
+    "baseline_required": "Start with an unselected message list and no open message body. No content was returned.",
+    "selection_timeout": "No eligible already-read message was selected in time. No content was returned.",
+    "selection_not_eligible": "Select exactly one message that was already read and visible when the baseline was captured. No content was returned.",
+    "content_too_large": "The selected message exceeds the safe extraction bound. No content was returned.",
     "search_not_supported": "Outlook search is not supported yet because result freshness cannot be verified. No browser was opened.",
     "invalid_options": "Invalid Outlook options. See lighthouse outlook probe --help.",
     "dependency_missing": "Playwright is required. Install lighthouse-cli with the auth extra, then run playwright install chromium.",
@@ -171,6 +176,20 @@ def collect_outlook_rows(
     storage state, credentials, download handling, or mailbox action is used.
     """
     _validate_options(search, limit, login_timeout)
+    return collect_in_temporary_browser(
+        lambda page: _collect_rows_page(page, limit=limit, login_timeout=login_timeout),
+    )
+
+
+def _collect_rows_page(page: Page, *, limit: int, login_timeout: int) -> dict[str, Any]:
+    message_list = _wait_for_message_list(page, timeout=login_timeout)
+    result = _read_rows(message_list, limit=limit)
+    result["scope"] = "current_view"
+    return result
+
+
+def collect_in_temporary_browser(reader: Callable[[Page], dict[str, Any]]) -> dict[str, Any]:
+    """Run a DOM-only reader in a fresh headed context, closing on every exit."""
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -192,10 +211,7 @@ def collect_outlook_rows(
                         page.goto(OUTLOOK_URL, wait_until="domcontentloaded", timeout=30000)
                     except PlaywrightTimeoutError:
                         raise OutlookWebError("navigation_timeout") from None
-                    message_list = _wait_for_message_list(page, timeout=login_timeout)
-                    result = _read_rows(message_list, limit=limit)
-                    result["scope"] = "current_view"
-                    return result
+                    return reader(page)
                 finally:
                     with suppress(Exception):
                         context.close()

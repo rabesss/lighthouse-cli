@@ -397,3 +397,10 @@ def test_default_collection_does_not_read_raw_row_text_or_accessible_labels(brow
     assert result["text_included"] is False
     assert result["rows"][0]["text_omitted"] is True
     assert result["rows"][0]["rendered_text"] == ""
+
+
+def test_cloud_microsoft_redirect_is_an_exact_trusted_mail_origin() -> None:
+    page = _page()
+    page.url = "https://outlook.cloud.microsoft/mail/"
+    assert web._wait_for_message_list(page, timeout=30) is page.get_by_role.return_value
+    assert web._host("https://outlook.cloud.microsoft.evil.test/mail/") not in web._MAIL_HOSTS

@@ -1,5 +1,9 @@
 # Experimental Outlook capability probe
 
+For the separately opt-in bounded body reader, see
+[`outlook read-selected`](outlook-read-selected.md). The probe described here
+remains content-free.
+
 `lighthouse outlook probe` is an experimental metadata-only proof of the browser
 flow, not a message-reading implementation. It reports positions and available read/unread
 states for rows currently rendered by Outlook on the web. All message labels,
@@ -108,7 +112,7 @@ canonical message identifiers.
 The automation only navigates to mail and inspects rendered-row metadata.
 It does not submit searches, click message rows, or click mail-changing controls. Sending,
 replying, forwarding, deleting, marking read/unread, moving mail, attachment
-downloads, and opened message-body access are not implemented. Your own actions
+downloads, and opened message-body access are not implemented by this probe. Your own actions
 inside the sign-in browser remain under your control.
 
 Even content-free mailbox metadata may be private. Redirected JSON persists
