@@ -41,7 +41,7 @@ lint-imports            # layered architecture contracts
 deptry .                # unused/undeclared dependency scan
 xenon -a B -m C -b F -e "*/ms_auth.py" lighthouse_cli   # average/module complexity
 python scripts/check_secrets.py   # rejecting secret scan (never edits the baseline)
-pytest -q --durations=10 --cov --cov-report=term
+pytest -q -n auto --durations=10 --cov --cov-report=term
 ```
 
 Everything above must pass. CI (`.github/workflows/ci.yml`) runs the same

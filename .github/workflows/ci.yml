@@ -1,7 +1,7 @@
 name: CI
 
-# Kept to three short jobs: GitHub bills every job rounded up to a whole
-# minute, so splitting cheap checks into more jobs multiplies the cost.
+# Kept to three short jobs: every job repeats checkout, Python setup and the
+# lockfile install, so splitting cheap checks into more jobs only adds overhead.
 on:
   push:
     branches: [main]
@@ -39,9 +39,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.10"
-          cache: pip
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements-dev.txt
       - name: Install pinned dev toolchain
-        run: pip install -r requirements-dev.txt
+        # uv installs the same lockfile as pip, in a few seconds instead of ~15.
+        run: uv pip install --system -r requirements-dev.txt
       - name: Working tree secret scan (audited baseline)
         # Rejects any finding in git-tracked files that is not in the audited
         # baseline and never writes the baseline (scripts/check_secrets.py).
@@ -82,9 +86,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements-dev.txt
       - name: Install
-        run: pip install -r requirements-dev.txt && pip install -e . --no-deps
+        run: uv pip install --system -r requirements-dev.txt && uv pip install --system -e . --no-deps
       # The full suite includes the repository policy and secret-gate tests.
+      # pytest-xdist spreads it over the runner's cores.
       - name: Test suite
-        run: pytest -q --durations=10 ${{ matrix.pytest-args }}
+        run: pytest -q -n auto --durations=10 ${{ matrix.pytest-args }}
