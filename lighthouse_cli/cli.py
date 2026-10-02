@@ -46,6 +46,7 @@ cmd_grades = _lazy_command(".show", "cmd_grades")
 cmd_quizzes = _lazy_command(".show", "cmd_quizzes")
 cmd_submit = _lazy_command(".submit", "cmd_submit")
 cmd_config_courses = _lazy_command(".course_config", "cmd_config_courses")
+cmd_outlook_probe = _lazy_command(".outlook_commands", "cmd_outlook_probe")
 
 # ---------------------------------------------------------------------------
 # Root group
@@ -83,6 +84,54 @@ for _role in ("instructor", "student"):
     cli.add_command(_AssessmentGroup(
         name=_role,
         help=f"{_role.capitalize()} assessment workflows and submission records.",
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Experimental Outlook capability probe
+# ---------------------------------------------------------------------------
+
+@cli.group(cls=JsonOutputGroup)
+def outlook() -> None:
+    """Probe experimental Outlook browser support; all content is withheld."""
+
+
+@outlook.command("probe", cls=JsonOutputCommand)
+@click.option(
+    "--interactive-login", is_flag=True,
+    help="Required: open a separate temporary browser for your manual sign-in and MFA.",
+)
+@click.option("--search", default=None,
+              help="Unsupported: fails before opening a browser; search results cannot be verified.")
+@click.option("--limit", default=25, type=int, show_default=True,
+              help="Maximum rendered rows to return (1–100).")
+@click.option("--login-timeout", default=180, type=int, show_default=True,
+              help="Seconds to allow for manual sign-in (30–600).")
+@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
+def outlook_probe(
+    interactive_login: bool,
+    search: str | None,
+    limit: int,
+    login_timeout: int,
+    json_output: bool,
+) -> None:
+    """Run an experimental metadata-only probe of the Outlook browser flow.
+
+    Requires the optional [auth] dependency and Playwright Chromium. Complete
+    sign-in and MFA yourself in the separate browser on every invocation.
+    No browser profile or sign-in session is saved or imported.
+
+    This capability probe withholds all row text, labels, and previews.
+    It returns row positions and read/unread states for the current view, not
+    a complete mailbox or stable message IDs. Search is unsupported. It does
+    not open messages, download attachments, or write mail.
+    """
+    raise SystemExit(cmd_outlook_probe(
+        interactive_login=interactive_login,
+        search=search,
+        limit=limit,
+        login_timeout=login_timeout,
+        json_output=json_output,
     ))
 
 
