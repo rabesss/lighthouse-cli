@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Run Droid Exec
-        uses: Factory-AI/droid-action@e5ae50268211d2e9ac85edb57c28bf253b6627f7 # v6
+        uses: Factory-AI/droid-action@efd4574f8244f28cf1da43e7733fd36840ba2880 # v9
         with:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
           allowed_bots: dependabot,factory-droid
