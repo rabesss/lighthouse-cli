@@ -29,7 +29,11 @@ HTML frames and form posts:
    `quiz_start_frame_auto.d2l` and `quiz_start_iframe_2_auto.d2l` to
    `quiz_start_process_auto.d2l`, whose script calls
    `parent.GoToAttemptQuizAuto(attemptId, page, 0)`. That GET creates server
-   state and must never be replayed.
+   state and must never be replayed. The start POST is multipart to
+   `quiz_summary.d2l?...&inProgress=false` with `d2l_action=Custom` and
+   `d2l_actionparam=1`; the frame set it opens is
+   `quiz_attempt_iframe_auto.d2l` holding the timer
+   (`quiz_attempt_top_auto.d2l`), status, save and page frames.
 2. Page `quiz_attempt_page_auto.d2l?ou&qi&ai&pg&isprv`. Each question sits in
    a `d2l-quiz-question-autosave-container` with hidden metadata (object id,
    page, `tAtom` group, saved flag). The prompt is either a legacy
@@ -49,15 +53,39 @@ HTML frames and form posts:
    with `d2l_rf=ProcessQuizSubmission` and **compact** JSON `params`
    (Brightspace answers spaced JSON with an error redirect). Success is the
    callback `parent.QuizDone(quizId, attemptId, ...)`, then a receipt and a
-   completed REST attempt record.
+   completed REST attempt record. The save-frame script names the seven params
+   `quizId, attemptId, isPreview, canBeGraded, isRldbUse, <flag>,
+   cameFromTab`; the confirmation page sends the flag `false`, the time-up
+   path `true`. For `isprv=0` the script sets `isPreview=false`, so
+   `canBeGraded=true`.
 6. Recovery: for a forward-only attempt on page 2, requesting page 1 returns
    page 2 (`pg=2`); the preview driver's read-only `reconcile` relies on this
    only after the full attempt identity matches.
 
 Instructor previews carry `isprv=1`. A real graded attempt observed on
 Lighthouse used the same save, confirmation and submission routes, then a
-receipt at `quiz_submissions_attempt.d2l?isprv=0`. Its start sequence, timers
-and resume flow have not been observed yet.
+receipt at `quiz_submissions_attempt.d2l?isprv=0`. A learner's start and
+resume (the `inProgress=true` path) have not been observed yet; preview has
+no resume, as each Start creates a new attempt with a fresh timer.
+
+## Timed quizzes (observed in timed previews)
+
+- The timer frame renders the limit as script variables: `timeStartedTicks`
+  (.NET UTC ticks), `timeLimit` (seconds), `graceLimit`, `lateLimit`,
+  `enforceTimeLimit`, `hasAutoSubmit`, `timeExceeded`. The REST attempt
+  record carries `AttemptEnforceTimeLimit`, `AttemptSubmissionTimeLimit`
+  (minutes) and `AttemptSubmissionLateTypeId` (2 = automatically submit).
+- Time left: RPC POST to `/d2l/lms/quizzing/rpc/rpc_functions.d2lfile`
+  (`d2l_rh=rpc&d2l_rt=call`) with `d2l_rf=DoUtcTimeRequest` and
+  `params={"param1":<timeStartedTicks>,"param2":<timeLimitSeconds>}`. The
+  result is `[timeTaken, timeLeft, secondsTaken]`, e.g.
+  `["0:00:05","0:01:54","5.92"]`.
+- At expiry with auto-submit, the browser saves with `d2l_actionparam=7,<pg>`
+  then `5,<pg>`, calls `ProcessQuizSubmission` with the time-up flag, and
+  opens the receipt with `isTimeUp=1`.
+- If no browser is open, the server still submits the attempt: an
+  abandoned 2-minute attempt was marked completed about 100 seconds after its
+  limit, with no client request.
 
 ## Not yet implemented
 
