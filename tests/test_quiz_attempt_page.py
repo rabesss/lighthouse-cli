@@ -228,10 +228,10 @@ LEARNER_BUTTONS = ('<button type="button" class="d2l-button d2l-hidden">Save All
                    '<button type="button" primary="" class="d2l-button">Submit Quiz</button>')
 
 
-def learner_question(number: int, options: str, *, prompt: str = "Pick the right answer.", saved: str = "False") -> str:
+def learner_question(number: int, options: str, *, prompt: str = "Pick the right answer.", saved: str = "False", page: int = 1) -> str:
     # Learner pages put the prompt in one custom HTML block outside the options.
     lead = f'<div><d2l-html-block html="{escape(prompt, quote=True)}"></d2l-html-block></div>' if prompt else ""
-    return (f'<div class="d2l-quiz-question-autosave-container">{metadata(number, 1, saved)}{lead}'
+    return (f'<div class="d2l-quiz-question-autosave-container">{metadata(number, page, saved)}{lead}'
             f'<fieldset><legend>Question {number} options:</legend>{options}</fieldset></div>')
 
 

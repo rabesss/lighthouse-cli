@@ -89,13 +89,18 @@ posts:
    is not by itself a failure.
    Neither HTTP 200 nor that call proves which value was stored; read the
    page back and check the selected choices and the saved marker.
+   The hidden "Save All Responses" action, `d2l_actionparam=1,<page>` with
+   the whole page form, stores every answer of the page in one request, so
+   a client sends one save per page instead of one per question. A
+   question whose answer is cleared reads back as not saved.
 4. Forward navigation: the same save endpoint with
    `d2l_actionparam=2,<new page>,<current page>` and the whole page form,
    as the preview driver sends. A learner's `2,2,1` was followed by the
    page frame loading `pg=2`. On a forward-only quiz the learner page
    first asks for confirmation in a page dialog (not `window.confirm`),
-   then calls `DoGoNextPage`. Forward-only quizzes offer no previous-page
-   control. On the last page the "Next Page" buttons are still in the
+   then calls `DoGoNextPage`. That dialog is page script only: an HTTP
+   client's `2,2,1` save moved a forward-only learner attempt to page 2.
+   Forward-only quizzes offer no previous-page control. On the last page the "Next Page" buttons are still in the
    markup, with the `disabled` attribute. Requesting a page number past the
    quiz's last page permanently broke preview attempts (every later read
    redirects to `/d2l/error/500`). It was not tried on a learner attempt;
@@ -108,7 +113,8 @@ posts:
    (Brightspace answers spaced JSON with an error redirect). Success is the
    callback `parent.QuizDone(quizId, attemptId, ...)`, then a receipt and a
    completed REST attempt record (readable with the attempt-grading
-   permission; the learner account tested got 403).
+   permission; the learner account tested got 403, so a learner's submission
+   is checked on the receipt and the submissions list instead).
    The script passes seven params: `quizId, attemptId, isPreview,
    canBeGraded, isRldbUse, shouldAutoSubmit, cameFromTab`. The confirmation
    page passes `shouldAutoSubmit` as `false`, the time-up path as `true`.
@@ -158,6 +164,19 @@ that public site (four attempts on three untimed one-page quizzes):
   before and after submission. The learner's attempt state was readable
   instead from the summary page, the submissions list `quiz_submissions.d2l`
   and the receipt.
+- Save all: `1,<page>` saves stored and cleared single-choice,
+  multi-select and fill-in-the-blank answers together. Brightspace stored a
+  blank's text without its outer spaces and kept inner double spaces,
+  `<`, `&amp;` and non-ASCII text as typed.
+- Unanswered questions: the confirmation page said "You have N unanswered
+  questions." and linked each one as "Question <number>" with
+  `Events.ClickQuestion.Raise(0,<page>,<qi>,<ai>,'q<question id>')`.
+- Completion: the receipt's heading read "Your work has been saved and
+  submitted". The submissions list has one row per attempt, linking
+  `quiz_submissions_attempt.d2l?...&qi&ai...` as "Attempt N"; an open
+  attempt's row read "Attempt 1 (In progress)", and a submitted one showed
+  its grade (e.g. "6 / 25 - 24 %") when the quiz releases it. In the
+  sandbox's "View as Student" role the row showed no score.
 
 Learner attempts in the sandbox's "View as Student" role (an untimed quiz
 with two true/false questions on one page, and a 4-minute auto-submit quiz
@@ -214,7 +233,7 @@ timer.
 
 | Area | Missing workflows / validation |
 | --- | --- |
-| Learner quizzes | Real attempt start, resume, answer save, navigation, submit, timers, receipt |
+| Learner quizzes | Commands over the attempt transport (start, resume, save all, Next, submit and receipt check exist), image and equation questions, timers |
 | Quiz authoring | Question creation/import/edit, sections/pools, settings updates, special access, grading |
 | Assignments | Learner text submission, group submission, instructor feedback/rubric grading |
 | Discussions | Create/reply/edit, attachments, moderation |
