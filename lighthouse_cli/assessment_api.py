@@ -25,6 +25,9 @@ class AssessmentWriteUnknownError(NetworkError):
     """The server may have accepted a write; callers must inspect before retrying."""
 
 
+_WRITE_UNKNOWN = "Write outcome unknown. Inspect the assessment before retrying."
+
+
 def positive_id(value: object) -> int:
     return _require_positive_endpoint_id(value, "identifier")
 
@@ -158,9 +161,7 @@ class AssessmentAPI:
 
     def read(self, resource: str, identifier: int | None = None) -> Any:
         path = self.path(resource, identifier)
-        if identifier is None:
-            return self.client._paginate_list(path)
-        return self.client.get_json(path)
+        return self.client._paginate_list(path) if identifier is None else self.client.get_json(path)
 
     def questions(self, quiz_id: int) -> list[dict[str, Any]]:
         return self.client._paginate_list(self.path("quiz", quiz_id) + "/questions/")
@@ -170,9 +171,7 @@ class AssessmentAPI:
 
     def submissions(self, folder_id: int, *, mine: bool) -> Any:
         path = self.path("assignment", folder_id) + "/submissions/"
-        if mine:
-            return self.client.get_json(path + "mysubmissions/")
-        return self.client.get_json(path)
+        return self.client.get_json(path + "mysubmissions/" if mine else path)
 
     def write(self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None) -> Any:
         if method not in {"POST", "PUT"}:
@@ -184,15 +183,11 @@ class AssessmentAPI:
         try:
             response = self.client._request(method, url, json=data, headers={"X-Csrf-Token": csrf_token})
         except (NetworkError, SessionExpiredError):
-            raise AssessmentWriteUnknownError(
-                "Write outcome unknown. Inspect the assessment before retrying."
-            ) from None
+            raise AssessmentWriteUnknownError(_WRITE_UNKNOWN) from None
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else None
             if status == 429 or (isinstance(status, int) and status >= 500):
-                raise AssessmentWriteUnknownError(
-                    "Write outcome unknown. Inspect the assessment before retrying."
-                ) from None
+                raise AssessmentWriteUnknownError(_WRITE_UNKNOWN) from None
             raise
         try:
             if response.status_code == 204:

@@ -7,7 +7,6 @@ as data, and never execute the response. A separate receipt GET is required.
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -59,12 +58,8 @@ def verify_receipt(client: LighthouseClient, *, course_id: int, quiz_id: int, at
         if timestamp.tzinfo is None:
             raise PreviewSubmitUnknownError()
         score = detail.get("Score")
-        if (
-            not isinstance(score, (int, float))
-            or isinstance(score, bool)
-            or not abs(score) < 1e12
-            or not math.isfinite(score)
-        ):
+        # The bound also rejects NaN and infinities.
+        if not isinstance(score, (int, float)) or isinstance(score, bool) or not abs(score) < 1e12:
             score = None
         return {"mode": "preview", "course_id": course_id, "quiz_id": quiz_id,
                 "attempt_id": attempt_id, "submitted": True, "receipt_verified": True,
@@ -74,14 +69,6 @@ def verify_receipt(client: LighthouseClient, *, course_id: int, quiz_id: int, at
         raise
     except Exception:
         raise PreviewSubmitUnknownError() from None
-
-
-def _rpc_result(response: Any, quiz_id: int, attempt_id: int) -> None:
-    if response.status_code != 200:
-        raise PreviewSubmitUnknownError()
-    expected = f"parent.QuizDone({quiz_id},{attempt_id},'1','0','0','gotoSv','')"
-    if rpc_script(response.iter_content(chunk_size=8192)) != expected:
-        raise PreviewSubmitUnknownError()
 
 
 def submit_preview(
@@ -101,14 +88,12 @@ def submit_preview(
     fields = current.answer_fields(first["question_id"], first["selected_choice_ids"][0], protection)
     fields["d2l_actionparam"] = f"5,{page}"
     response = None
-    write_dispatched = False
     try:
         save_url = client.canonical_url("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?" + urlencode({
             "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,
         }))
         # The preparatory save can be accepted even when its response is an
-        # auth redirect, so mark the operation before dispatch.
-        write_dispatched = True
+        # auth redirect, so a session expiry from here on is unknown too.
         response = client._request("POST", save_url,
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
@@ -143,16 +128,14 @@ def submit_preview(
                                          "d2l_referrer": protection.csrf_token, "d2l_hitcode": protection.next_hit_code(),
                                          "d2l_action": "rpc"},
                                    headers={"Referer": client.canonical_url(parent_path + "?" + urlencode(context))})
-        _rpc_result(response, quiz_id, attempt_id)
+        expected = f"parent.QuizDone({quiz_id},{attempt_id},'1','0','0','gotoSv','')"
+        if response.status_code != 200 or rpc_script(response.iter_content(chunk_size=8192)) != expected:
+            raise PreviewSubmitUnknownError()
         _close_response(response)
         response = None
         result = verify_receipt(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, actor_id=actor_id)
         result["retained_for_grading"] = retain
         return result
-    except SessionExpiredError:
-        if write_dispatched:
-            raise PreviewSubmitUnknownError() from None
-        raise
     except Exception:
         raise PreviewSubmitUnknownError() from None
     finally:

@@ -11,7 +11,8 @@ import json
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, ClassVar, TypeVar
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -55,12 +56,9 @@ REFUSE_LEARNER_UNANSWERED = "This page has unanswered questions. Answer them, or
 
 
 def _id(value: object) -> int:
-    if not isinstance(value, str) or not value.isascii() or not value.isdecimal() or len(value) > 18:
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal() or len(value) > 18 or int(value) <= 0:
         raise PreviewPageError()
-    result = int(value)
-    if result <= 0:
-        raise PreviewPageError()
-    return result
+    return int(value)
 
 
 def _token(value: object) -> str:
@@ -72,9 +70,7 @@ def _token(value: object) -> str:
 
 def _metadata(container: Tag, name: str) -> str:
     values = container.select(f".{name} input")
-    if len(values) != 1:
-        raise PreviewPageError()
-    value = values[0].get("value")
+    value = values[0].get("value") if len(values) == 1 else None
     if not isinstance(value, str):
         raise PreviewPageError()
     return value
@@ -251,7 +247,10 @@ def hidden_form(body: bytes) -> tuple[Tag, dict[str, str]]:
 
 
 @dataclass(frozen=True)
-class PreviewPage:
+class _AttemptPage:
+    """The fields and public view a preview and a learner page share."""
+
+    _mode: ClassVar[str]
     course_id: int
     quiz_id: int
     attempt_id: int
@@ -266,24 +265,24 @@ class PreviewPage:
 
     def public_data(self) -> dict[str, Any]:
         return {
-            "mode": "preview", "course_id": self.course_id,
+            "mode": self._mode, "course_id": self.course_id,
             "quiz_id": self.quiz_id, "attempt_id": self.attempt_id,
             "page": self.page, "questions": list(self.questions),
             "has_next_control": self.has_next_control,
             "has_previous_control": self.has_previous_control,
         }
 
+
+@dataclass(frozen=True)
+class PreviewPage(_AttemptPage):
+    _mode: ClassVar[str] = "preview"
+
     def confirms_answer(self, question_id: int, choice_id: int) -> bool:
         """A 200 response is insufficient: require saved, selected readback."""
         if type(question_id) is not int or type(choice_id) is not int:
             return False
-        return any(
-            q["question_id"] == question_id
-            and q["supported"]
-            and q["saved"] is True
-            and q["selected_choice_ids"] == [choice_id]
-            for q in self.questions
-        )
+        return any(q["question_id"] == question_id and q["supported"] and q["saved"] is True
+                   and q["selected_choice_ids"] == [choice_id] for q in self.questions)
 
     def answer_fields(self, question_id: int, choice_id: int, protection: FormProtection) -> dict[str, str]:
         """Build one autosave form. Returned fields are secret-bearing.
@@ -353,8 +352,6 @@ def _attempt_form(
     body: bytes, isprv: str, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
 ) -> tuple[Tag, dict[str, str]]:
     """Check the attempt identity; ``isprv`` is ``1`` on previews, empty for learners."""
-    if not isinstance(body, bytes) or len(body) > MAX_PAGE_BYTES:
-        raise PreviewPageError()
     if any(type(value) is not int or value <= 0 for value in (course_id, quiz_id, attempt_id, page)):
         raise PreviewPageError()
     form, hidden = hidden_form(body)
@@ -442,11 +439,7 @@ def _choices(
             if control_id in control_ids:
                 raise PreviewPageError()
             control_ids.add(control_id)
-        label = (
-            container.find("label", attrs={"for": control_id})
-            if isinstance(control_id, str)
-            else None
-        )
+        label = container.find("label", attrs={"for": control_id}) if isinstance(control_id, str) else None
         label = label if label is not None else control.find_parent("tr")
         if label is None:
             raise PreviewPageError()
@@ -577,30 +570,12 @@ def parse_preview_page(
 
 
 @dataclass(frozen=True)
-class LearnerPage:
+class LearnerPage(_AttemptPage):
     """A learner's attempt page. Choice, option and blank ids are strings."""
 
-    course_id: int
-    quiz_id: int
-    attempt_id: int
-    page: int
-    questions: tuple[dict[str, Any], ...]
-    has_next_control: bool
-    has_previous_control: bool
-    # Private, as on PreviewPage: session-bound form tokens, never logged.
-    _hidden_fields: dict[str, str] = field(repr=False, compare=False)
-    _groups: dict[int, tuple[str, int, int, int]] = field(repr=False, compare=False)
+    _mode: ClassVar[str] = "learner"
     # The page's own form protection, when it embeds one.
     _protection: FormProtection | None = field(default=None, repr=False, compare=False)
-
-    def public_data(self) -> dict[str, Any]:
-        return {
-            "mode": "learner", "course_id": self.course_id,
-            "quiz_id": self.quiz_id, "attempt_id": self.attempt_id,
-            "page": self.page, "questions": list(self.questions),
-            "has_next_control": self.has_next_control,
-            "has_previous_control": self.has_previous_control,
-        }
 
     def intended(self, answers: Mapping[int, object]) -> dict[int, tuple[str, ...]]:
         """Every question's value once ``answers`` are applied; others keep theirs.
@@ -896,3 +871,37 @@ def unanswered_questions(form: Tag, *, quiz_id: int, attempt_id: int) -> list[di
     if counts != [str(len(found))] and not (counts in ([], ["0"]) and not found):
         raise PreviewPageError()
     return found
+
+
+# The start pages that lead to an attempt: the frame set, its hidden process
+# frame, and the process page's one callback naming the attempt and its page.
+_STARTED_ATTEMPT = re.compile(
+    r"^\s*parent\.GoToAttemptQuizAuto\(\s*([0-9]{1,18})\s*,\s*([0-9]{1,6})\s*,\s*0\s*\)\s*;?\s*$", re.MULTILINE
+)
+
+
+def start_frame_src(body: bytes) -> str:
+    """The ``src`` of the start page's one ``quiz_start_iframe_2_auto.d2l`` iframe."""
+    sources = [src for frame in BeautifulSoup(body, "html.parser").find_all("iframe")
+               if isinstance(src := frame.get("src"), str) and urlparse(src).path.endswith("/quiz_start_iframe_2_auto.d2l")]
+    if len(sources) != 1:
+        raise PreviewPageError()
+    return sources[0]
+
+
+def process_frame_src(body: bytes) -> str:
+    """The ``src`` of the start frame's one hidden process frame."""
+    frames = BeautifulSoup(body, "html.parser").select('iframe[name="hiddenFrame"], frame[name="hiddenFrame"]')
+    src = frames[0].get("src") if len(frames) == 1 else None
+    if not isinstance(src, str):
+        raise PreviewPageError()
+    return src
+
+
+def started_attempt(body: bytes) -> tuple[int, int]:
+    """The attempt id and page that the process page's scripts name, exactly once."""
+    matches = {(int(match[1]), int(match[2])) for script in BeautifulSoup(body, "html.parser").find_all("script")
+               for match in _STARTED_ATTEMPT.finditer(script.get_text())}
+    if len(matches) != 1:
+        raise PreviewPageError()
+    return matches.pop()

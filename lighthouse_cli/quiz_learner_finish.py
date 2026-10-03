@@ -152,11 +152,9 @@ def submit_learner(
                                                attempt_id=attempt_id, page=page)
     fields = current.finish_fields(protection)
     response = None
-    dispatched = False
     try:
         save_url = ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l?" + urlencode(
             {"dnb": 0, "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id})
-        dispatched = True
         response = client._request("POST", client.canonical_url(save_url),
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(learner_page_path(course_id, quiz_id, attempt_id, page))})
@@ -191,11 +189,7 @@ def submit_learner(
         return verify_learner_submission(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
     except (LearnerUnansweredError, LearnerSubmitUnknownError):
         raise
-    except SessionExpiredError:
-        if dispatched:
-            raise LearnerSubmitUnknownError() from None
-        raise
-    except Exception:
+    except Exception:  # sent once: a session expiry is unknown too
         raise LearnerSubmitUnknownError() from None
     finally:
         if response is not None:
