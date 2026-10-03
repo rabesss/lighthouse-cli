@@ -1,4 +1,4 @@
-"""Characterization of the observed preview DOM, using synthetic tokens only."""
+"""Characterization of the observed preview and learner DOM, using synthetic tokens only."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ from lighthouse_cli.quiz_attempt_page import (
     MAX_PAGE_BYTES,
     PreviewPageError,
     PreviewRefusedError,
+    _button_present,
+    hidden_form,
+    parse_learner_page,
     parse_preview_page,
 )
 from lighthouse_cli.quiz_preview_transport import (
@@ -27,15 +30,18 @@ from lighthouse_cli.quiz_preview_transport import (
 from lighthouse_cli.request_protection import FormProtection
 
 
-def question(number: int, page: int = 1, *, saved: str = "True", selected: bool = True) -> str:
+def metadata(number: int, page: int, saved: str) -> str:
     values = {
         "object-id": str(100 + number), "autosave-question-num": str(number),
         "autosave-page": str(page), "autosave-tid": str(200 + number),
         "autosave-tvid": "300", "autosave-is-saved": saved,
     }
-    metadata = "".join(f'<div class="d2l-quiz-question-{key}"><input type="hidden" value="{value}"></div>' for key, value in values.items())
+    return "".join(f'<div class="d2l-quiz-question-{key}"><input type="hidden" value="{value}"></div>' for key, value in values.items())
+
+
+def question(number: int, page: int = 1, *, saved: str = "True", selected: bool = True) -> str:
     checked = "checked" if selected else ""
-    return f'''<div class="d2l-quiz-question-autosave-container">{metadata}
+    return f'''<div class="d2l-quiz-question-autosave-container">{metadata(number, page, saved)}
     <div id="d2l_read_element_{number}">Question {number}: choose true.
     <fieldset><legend>Options</legend><table>
     <tr><td><input type="radio" name="tAtom{200 + number}_300" id="q{number}a" value="401" {checked}></td><td><label for="q{number}a">True</label></td></tr>
@@ -43,8 +49,8 @@ def question(number: int, page: int = 1, *, saved: str = "True", selected: bool 
     </table></fieldset></div></div>'''
 
 
-def html(questions: str, *, page: int = 1, extra: str = "") -> bytes:
-    identity = {"ou": "10", "qi": "20", "ai": "30", "pg": str(page), "isprv": "1", "d2l_referrer": "SESSION_SENTINEL"}
+def html(questions: str, *, page: int = 1, extra: str = "", isprv: str = "1") -> bytes:
+    identity = {"ou": "10", "qi": "20", "ai": "30", "pg": str(page), "isprv": isprv, "d2l_referrer": "SESSION_SENTINEL"}
     identity.update({"d2l_controlMap": json.dumps([{"hdn_resp_101": ["z_r1"], "hdn_resp_102": ["z_r2"]}, {}]), "z_r1": "0", "z_r2": "0"})
     fields = "".join(f'<input name="{key}" type="hidden" value="{escape(value, quote=True)}">' for key, value in identity.items())
     return f"<form>{fields}{questions}{extra}</form>".encode()
@@ -216,6 +222,166 @@ def test_advance_refusals_are_specific():
     last = parse(html(question(1)))
     with pytest.raises(PreviewRefusedError, match="last page"):
         last.advance_fields(protection)
+
+
+LEARNER_BUTTONS = ('<button type="button" class="d2l-button d2l-hidden">Save All Responses</button>'
+                   '<button type="button" primary="" class="d2l-button">Submit Quiz</button>')
+
+
+def learner_question(number: int, options: str, *, prompt: str = "Pick the right answer.", saved: str = "False") -> str:
+    # Learner pages put the prompt in one custom HTML block outside the options.
+    lead = f'<div><d2l-html-block html="{escape(prompt, quote=True)}"></d2l-html-block></div>' if prompt else ""
+    return (f'<div class="d2l-quiz-question-autosave-container">{metadata(number, 1, saved)}{lead}'
+            f'<fieldset><legend>Question {number} options:</legend>{options}</fieldset></div>')
+
+
+def radios(number: int, values: list[str], *, checked: tuple[str, ...] = ()) -> str:
+    group = f"tAtom{200 + number}_300"
+    return "<table>" + "".join(
+        f'<tr><td><input type="radio" name="{group}" id="{group}_{value}_id" value="{value}"'
+        f'{" checked" if value in checked else ""}></td>'
+        f'<td><d2l-html-block html="&lt;p&gt;Answer {value}&lt;/p&gt;"></d2l-html-block></td></tr>'
+        for value in values) + "</table>"
+
+
+def checkboxes(number: int, options: list[str], *, checked: tuple[str, ...] = ()) -> str:
+    group = f"tAtom{200 + number}_300"
+    return "<table>" + "".join(
+        f'<tr><td><input type="checkbox" name="{group}_{option}" id="{group}_{option}_id" value="1"'
+        f'{" checked" if option in checked else ""}></td>'
+        f'<td><label for="{group}_{option}_id">Option {option}</label></td></tr>'
+        for option in options) + "</table>"
+
+
+def segment(text: str) -> str:
+    return f'<d2l-html-block html="{escape(text, quote=True)}" inline=""></d2l-html-block>'
+
+
+def blank(number: int, blank_id: str, value: str = "") -> str:
+    return f'<input type="text" name="tAtom{200 + number}_300_{blank_id}" title="Answer" value="{escape(value, quote=True)}">'
+
+
+def learner(questions: str, *, extra: str = LEARNER_BUTTONS, isprv: str = ""):
+    return parse_learner_page(html(questions, extra=extra, isprv=isprv), course_id=10, quiz_id=20, attempt_id=30, page=1)
+
+
+def test_learner_multiple_choice_ids_are_opaque_strings():
+    page = learner(learner_question(1, radios(1, ["o4330", "o89", "o7"], checked=("o89",)), saved="True"))
+    data = page.public_data()
+    assert data["mode"] == "learner"
+    assert data["questions"] == [{
+        "question_id": 101, "number": 1, "text": "Pick the right answer.",
+        "kind": "single-choice", "supported": True,
+        "choices": [{"choice_id": "o4330", "text": "Answer o4330"}, {"choice_id": "o89", "text": "Answer o89"},
+                    {"choice_id": "o7", "text": "Answer o7"}],
+        "selected_choice_ids": ["o89"], "blanks": [], "saved": True,
+    }]
+    assert not page.has_next_control and not page.has_previous_control
+    assert "SESSION_SENTINEL" not in repr(page)
+    assert "SESSION_SENTINEL" not in json.dumps(data)
+
+
+def test_learner_true_false_numeric_ids_stay_strings():
+    q = learner(learner_question(2, radios(2, ["501", "502"]))).questions[0]
+    assert q["kind"] == "single-choice"
+    assert [choice["choice_id"] for choice in q["choices"]] == ["501", "502"]
+    assert q["selected_choice_ids"] == []
+    assert q["saved"] is False
+
+
+@pytest.mark.parametrize("checked", [(), ("o12",), ("o11", "o13")])
+def test_learner_multi_select_option_id_is_the_name_suffix(checked):
+    q = learner(learner_question(4, checkboxes(4, ["o11", "o12", "o13"], checked=checked))).questions[0]
+    assert q["kind"] == "multi-select" and q["supported"]
+    assert q["choices"] == [{"choice_id": option, "text": f"Option {option}"} for option in ("o11", "o12", "o13")]
+    assert q["selected_choice_ids"] == list(checked)
+    assert q["blanks"] == []
+
+
+def test_learner_fill_in_the_blank_numbers_each_blank_in_the_sentence():
+    options = segment("Two plus two is") + blank(3, "601", "four") + segment("and three plus three is") + blank(3, "602") + segment("in total.")
+    q = learner(learner_question(3, options, prompt="")).questions[0]
+    assert q["kind"] == "fill-blank" and q["supported"]
+    assert q["text"] == "Two plus two is (blank 1) and three plus three is (blank 2) in total."
+    assert q["blanks"] == [{"blank_id": "601", "number": 1, "value": "four"}, {"blank_id": "602", "number": 2, "value": ""}]
+    assert q["choices"] == [] and q["selected_choice_ids"] == []
+    # Only blanks carry their text in the options; a choice question still needs a prompt.
+    with pytest.raises(PreviewPageError):
+        learner(learner_question(1, radios(1, ["o1", "o2"]), prompt=""))
+
+
+def test_learner_hidden_buttons_are_not_controls():
+    # "Save All Responses" is always in the markup but hidden with d2l-hidden,
+    # so matching on its text alone would wrongly report a visible control.
+    body = html(learner_question(1, radios(1, ["o1", "o2"])), extra=LEARNER_BUTTONS, isprv="")
+    form = hidden_form(body)[0]
+    assert _button_present(form, "Save All Responses")
+    assert not _button_present(form, "Save All Responses", visible_only=True)
+    assert _button_present(form, "Submit Quiz", visible_only=True)
+    hidden = '<div class="d2l-hidden"><button type="button">Next Page</button></div><button type="button" hidden>Previous Page</button>'
+    page = learner(learner_question(1, radios(1, ["o1", "o2"])), extra=LEARNER_BUTTONS + hidden)
+    assert not page.has_next_control and not page.has_previous_control
+    shown = learner(learner_question(1, radios(1, ["o1", "o2"])), extra=LEARNER_BUTTONS + '<button type="button">Next Page</button>')
+    assert shown.has_next_control
+
+
+@pytest.mark.parametrize("isprv", ["1", "0", None])
+def test_learner_page_requires_an_empty_isprv(isprv):
+    body = html(learner_question(1, radios(1, ["o1", "o2"])), isprv=isprv or "")
+    if isprv is None:
+        body = body.replace(b'<input name="isprv" type="hidden" value="">', b"")
+    with pytest.raises(PreviewPageError):
+        parse_learner_page(body, course_id=10, quiz_id=20, attempt_id=30, page=1)
+    with pytest.raises(PreviewPageError):
+        parse_learner_page(html(learner_question(1, radios(1, ["o1", "o2"])), isprv=""), course_id=10, quiz_id=20, attempt_id=31, page=1)
+
+
+@pytest.mark.parametrize("options", [
+    radios(1, ["o1", "x2"]),
+    radios(1, ["o1", "o1234567890"]),
+    radios(1, ["o1", "o\u0663"]),
+    radios(1, ["o1", "-2"]),
+    radios(1, ["o1", "0"]),
+    radios(1, ["o1", "1.5"]),
+    radios(1, ["o1", "o1"]),
+    radios(1, ["o1", "o2"], checked=("o1", "o2")),
+    radios(1, ["o1", "o2"]).replace('name="tAtom201_300"', 'name="tAtom999_300"', 1),
+    checkboxes(1, ["o1", "o2"]).replace('value="1"', 'value="on"', 1),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300"'),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300_o1_x"'),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom202_300_o1"'),
+    segment("Two is") + blank(1, "60 1"),
+    segment("Two is") + blank(1, "601") + blank(1, "601"),
+])
+def test_learner_malformed_ids_or_names_are_rejected(options):
+    with pytest.raises(PreviewPageError) as exc:
+        learner(learner_question(1, options))
+    assert "SESSION_SENTINEL" not in str(exc.value)
+
+
+@pytest.mark.parametrize("options", [
+    radios(1, ["o1", "o2"]) + checkboxes(1, ["o3"]),
+    '<textarea name="tAtom201_300_7"></textarea>',
+    '<select name="tAtom201_300_7"><option>1</option></select>',
+    '<input type="number" name="tAtom201_300_7">',
+    radios(1, ["o1", "o2"]).replace("<input", "<input disabled", 1),
+    segment("Two is") + blank(1, "601").replace("<input", "<input readonly"),
+    checkboxes(1, ["o1", "o2"]).replace("Option o1", '<img alt="diagram">'),
+    radios(1, ["o1", "o2"]) + '<d2l-html-block html="&lt;input type=&quot;text&quot;&gt;"></d2l-html-block>',
+])
+def test_learner_unknown_mixed_or_disabled_controls_are_unsupported(options):
+    q = learner(learner_question(1, options)).questions[0]
+    assert q["kind"] == "unsupported" and q["supported"] is False
+
+
+def test_preview_parser_still_rejects_learner_markup():
+    with pytest.raises(PreviewPageError):
+        parse(html(learner_question(1, radios(1, ["401", "402"])), isprv=""))
+    with pytest.raises(PreviewPageError):
+        parse(html(learner_question(1, radios(1, ["o1", "o2"]))))
+    page = parse(html(learner_question(1, checkboxes(1, ["o1", "o2"])) + learner_question(2, segment("Two is") + blank(2, "601"))))
+    assert [q["kind"] for q in page.questions] == ["unsupported", "unsupported"]
+    assert "blanks" not in page.questions[0]
 
 
 def bootstrap() -> bytes:

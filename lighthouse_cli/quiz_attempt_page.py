@@ -1,4 +1,4 @@
-"""Parse a current preview page, without executing Brightspace scripts.
+"""Parse a current preview or learner attempt page, without executing scripts.
 
 This is a parser, not an attempt driver. In particular, the server's HTML
 form lacks some runtime-populated fields required for successful writes.
@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from bs4 import BeautifulSoup, Tag
 
@@ -53,6 +54,13 @@ def _id(value: object) -> int:
     return result
 
 
+def _token(value: object) -> str:
+    """A learner choice, option or blank id: ``o<digits>`` or a positive integer."""
+    if not isinstance(value, str) or not re.fullmatch(r"o[0-9]{1,9}|[1-9][0-9]{0,17}", value):
+        raise PreviewPageError()
+    return value
+
+
 def _metadata(container: Tag, name: str) -> str:
     values = container.select(f".{name} input")
     if len(values) != 1:
@@ -84,9 +92,16 @@ def _expanded(node: Tag) -> BeautifulSoup:
     return copy
 
 
-def _text(node: Tag) -> str:
+def _text(node: Tag, *, blanks: bool = False) -> str:
     copy = _expanded(node)
-    for element in copy.select("script, style, button, input, fieldset, legend"):
+    removed = "script, style, button, input, fieldset, legend"
+    if blanks:
+        # A fill-in-the-blank sentence is the options fieldset itself: keep
+        # it and mark each blank, numbered in document order.
+        removed = "script, style, button, input, legend"
+        for number, blank in enumerate(copy.select('input[type="text"]'), 1):
+            blank.replace_with(f" (blank {number}) ")
+    for element in copy.select(removed):
         element.decompose()
     text = copy.get_text(" ", strip=True)
     if len(text) > 16384:
@@ -210,6 +225,115 @@ class PreviewPage:
         return fields
 
 
+_ChoiceId = TypeVar("_ChoiceId", int, str)
+
+
+def _attempt_form(
+    body: bytes, isprv: str, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
+) -> tuple[Tag, dict[str, str]]:
+    """Check the attempt identity; ``isprv`` is ``1`` on previews, empty for learners."""
+    if not isinstance(body, bytes) or len(body) > MAX_PAGE_BYTES:
+        raise PreviewPageError()
+    if any(type(value) is not int or value <= 0 for value in (course_id, quiz_id, attempt_id, page)):
+        raise PreviewPageError()
+    form, hidden = hidden_form(body)
+    expected = {"ou": course_id, "qi": quiz_id, "ai": attempt_id, "pg": page}
+    if hidden.get("isprv") != isprv or any(_id(hidden.get(key)) != value for key, value in expected.items()):
+        raise PreviewPageError()
+    return form, hidden
+
+
+def _question_containers(form: Tag, page: int) -> list[tuple[Tag, int, int, int, int, bool | None]]:
+    """Each question container with its object id, number, tid, tvid and saved flag."""
+    containers = form.select(".d2l-quiz-question-autosave-container")
+    if not containers or len(containers) > MAX_QUESTIONS:
+        raise PreviewPageError()
+    result: list[tuple[Tag, int, int, int, int, bool | None]] = []
+    ids: set[int] = set()
+    ordinals: set[int] = set()
+    for container in containers:
+        qid = _id(_metadata(container, "d2l-quiz-question-object-id"))
+        ordinal = _id(_metadata(container, "d2l-quiz-question-autosave-question-num"))
+        if qid in ids or ordinal in ordinals or _id(_metadata(container, "d2l-quiz-question-autosave-page")) != page:
+            raise PreviewPageError()
+        ids.add(qid)
+        ordinals.add(ordinal)
+        tid = _id(_metadata(container, "d2l-quiz-question-autosave-tid"))
+        tvid = _id(_metadata(container, "d2l-quiz-question-autosave-tvid"))
+        saved = _metadata(container, "d2l-quiz-question-autosave-is-saved")
+        result.append((container, qid, ordinal, tid, tvid, {"true": True, "false": False}.get(saved.lower())))
+    return result
+
+
+def _prompt(container: Tag) -> Tag | None:
+    prompt = container.select_one('[id^="d2l_read_element_"]')
+    if prompt is None:
+        # Brightspace tenant variants sometimes put the prompt directly
+        # in one custom HTML block without the legacy read-element ID.
+        # Rich-text answer choices use the same element, so only blocks
+        # outside the options (fieldset/table/label) can be the prompt.
+        blocks = [block for block in container.find_all("d2l-html-block")
+                  if not _inside_options(block, container)]
+        if len(blocks) == 1 and isinstance(blocks[0].get("html"), str):
+            prompt = blocks[0]
+    return prompt
+
+
+def _disabled(control: Tag) -> bool:
+    return bool(control.has_attr("disabled") or control.get("aria-disabled") == "true"
+                or control.find_parent("fieldset", attrs={"disabled": True}))
+
+
+def _choices(
+    container: Tag, controls: list[Tag], group: str, choice_id: Callable[[Tag, str], _ChoiceId],
+) -> tuple[list[dict[str, Any]], list[_ChoiceId], bool]:
+    """Labelled choices, the checked ids and whether any control is disabled."""
+    choices: list[dict[str, Any]] = []
+    selected: list[_ChoiceId] = []
+    seen: set[_ChoiceId] = set()
+    disabled = False
+    for control in controls:
+        disabled = disabled or _disabled(control)
+        cid = choice_id(control, group)
+        if cid in seen:
+            raise PreviewPageError()
+        seen.add(cid)
+        control_id = control.get("id")
+        label = (
+            container.find("label", attrs={"for": control_id})
+            if isinstance(control_id, str)
+            else None
+        )
+        label = label if label is not None else control.find_parent("tr")
+        if label is None:
+            raise PreviewPageError()
+        choices.append({"choice_id": cid, "text": _text(label)})
+        if control.has_attr("checked"):
+            selected.append(cid)
+    return choices, selected, disabled
+
+
+def _radio_id(radio: Tag, group: str) -> int:
+    if radio.get("name") != group:
+        raise PreviewPageError()
+    return _id(radio.get("value"))
+
+
+def _hidden(node: Tag) -> bool:
+    return any(tag.has_attr("hidden") or "d2l-hidden" in tag.get_attribute_list("class")
+               for tag in (node, *node.parents))
+
+
+def _button_present(form: Tag, label: str, *, visible_only: bool = False) -> bool:
+    return any(
+        button.get_text(" ", strip=True) == label
+        and not button.has_attr("disabled")
+        and button.get("aria-disabled") != "true"
+        and not (visible_only and _hidden(button))
+        for button in form.find_all("button")
+    )
+
+
 def parse_preview_page(
     body: bytes, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
 ) -> PreviewPage:
@@ -220,77 +344,21 @@ def parse_preview_page(
     Navigation flags describe rendered controls, not permission to construct
     arbitrary page URLs or return to a previous page.
     """
-    if not isinstance(body, bytes) or len(body) > MAX_PAGE_BYTES:
-        raise PreviewPageError()
-    if any(type(value) is not int or value <= 0 for value in (course_id, quiz_id, attempt_id, page)):
-        raise PreviewPageError()
-    form, hidden = hidden_form(body)
-    expected = {"ou": course_id, "qi": quiz_id, "ai": attempt_id, "pg": page}
-    if hidden.get("isprv") != "1" or any(_id(hidden.get(key)) != value for key, value in expected.items()):
-        raise PreviewPageError()
-
-    containers = form.select(".d2l-quiz-question-autosave-container")
-    if not containers or len(containers) > MAX_QUESTIONS:
-        raise PreviewPageError()
+    form, hidden = _attempt_form(body, "1", course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     questions: list[dict[str, Any]] = []
-    ids: set[int] = set()
-    ordinals: set[int] = set()
     groups: dict[int, tuple[str, int, int, int]] = {}
-    for container in containers:
-        qid = _id(_metadata(container, "d2l-quiz-question-object-id"))
-        ordinal = _id(_metadata(container, "d2l-quiz-question-autosave-question-num"))
-        if qid in ids or ordinal in ordinals or _id(_metadata(container, "d2l-quiz-question-autosave-page")) != page:
-            raise PreviewPageError()
-        ids.add(qid)
-        ordinals.add(ordinal)
-        tid = _id(_metadata(container, "d2l-quiz-question-autosave-tid"))
-        tvid = _id(_metadata(container, "d2l-quiz-question-autosave-tvid"))
+    for container, qid, ordinal, tid, tvid, saved_value in _question_containers(form, page):
         groups[qid] = (f"tAtom{tid}_{tvid}", tid, tvid, ordinal)
-        saved = _metadata(container, "d2l-quiz-question-autosave-is-saved")
-        saved_value = {"true": True, "false": False}.get(saved.lower())
-        prompt = container.select_one('[id^="d2l_read_element_"]')
-        if prompt is None:
-            # Brightspace tenant variants sometimes put the prompt directly
-            # in one custom HTML block without the legacy read-element ID.
-            # Rich-text answer choices use the same element, so only blocks
-            # outside the options (fieldset/table/label) can be the prompt.
-            blocks = [block for block in container.find_all("d2l-html-block")
-                      if not _inside_options(block, container)]
-            if len(blocks) == 1 and isinstance(blocks[0].get("html"), str):
-                prompt = blocks[0]
+        prompt = _prompt(container)
         if prompt is None:
             raise PreviewPageError()
         radios = container.select('input[type="radio"]')
         unsupported = bool(_expanded(container).select('textarea, select, input[type="checkbox"], input[type="text"], img, math, iframe, audio, video'))
         question_text = _text(prompt)
-        unsupported = unsupported or not question_text
-        choices: list[dict[str, Any]] = []
-        selected: list[int] = []
-        choice_ids: set[int] = set()
-        for radio in radios:
-            if radio.has_attr("disabled") or radio.get("aria-disabled") == "true" or radio.find_parent("fieldset", attrs={"disabled": True}):
-                unsupported = True
-            if radio.get("name") != f"tAtom{tid}_{tvid}":
-                raise PreviewPageError()
-            cid = _id(radio.get("value"))
-            if cid in choice_ids:
-                raise PreviewPageError()
-            choice_ids.add(cid)
-            radio_id = radio.get("id")
-            label = (
-                container.find("label", attrs={"for": radio_id})
-                if isinstance(radio_id, str)
-                else None
-            )
-            label = label if label is not None else radio.find_parent("tr")
-            if label is None:
-                raise PreviewPageError()
-            choices.append({"choice_id": cid, "text": _text(label)})
-            if radio.has_attr("checked"):
-                selected.append(cid)
+        choices, selected, disabled = _choices(container, radios, groups[qid][0], _radio_id)
         if len(selected) > 1:
             raise PreviewPageError()
-        unsupported = unsupported or any(not choice["text"] for choice in choices)
+        unsupported = unsupported or disabled or not question_text or any(not choice["text"] for choice in choices)
         questions.append({
             "question_id": qid, "number": ordinal, "text": question_text,
             "kind": "single-choice" if radios and not unsupported else "unsupported",
@@ -298,13 +366,126 @@ def parse_preview_page(
             "choices": choices, "selected_choice_ids": selected, "saved": saved_value,
         })
 
-    def button_present(label: str) -> bool:
-        return any(
-            button.get_text(" ", strip=True) == label
-            and not button.has_attr("disabled")
-            and button.get("aria-disabled") != "true"
-            for button in form.find_all("button")
-        )
-
     return PreviewPage(course_id, quiz_id, attempt_id, page, tuple(questions),
-                       button_present("Next Page"), button_present("Previous Page"), hidden, groups)
+                       _button_present(form, "Next Page"), _button_present(form, "Previous Page"), hidden, groups)
+
+
+@dataclass(frozen=True)
+class LearnerPage:
+    """A learner's attempt page. Choice, option and blank ids are strings."""
+
+    course_id: int
+    quiz_id: int
+    attempt_id: int
+    page: int
+    questions: tuple[dict[str, Any], ...]
+    has_next_control: bool
+    has_previous_control: bool
+    # Private, as on PreviewPage: session-bound form tokens, never logged.
+    _hidden_fields: dict[str, str] = field(repr=False, compare=False)
+    _groups: dict[int, tuple[str, int, int, int]] = field(repr=False, compare=False)
+
+    def public_data(self) -> dict[str, Any]:
+        return {
+            "mode": "learner", "course_id": self.course_id,
+            "quiz_id": self.quiz_id, "attempt_id": self.attempt_id,
+            "page": self.page, "questions": list(self.questions),
+            "has_next_control": self.has_next_control,
+            "has_previous_control": self.has_previous_control,
+        }
+
+
+_LEARNER_KINDS = {"radio": "single-choice", "checkbox": "multi-select", "text": "fill-blank"}
+
+
+def _learner_radio_id(radio: Tag, group: str) -> str:
+    if radio.get("name") != group:
+        raise PreviewPageError()
+    return _token(radio.get("value"))
+
+
+def _suffix_id(control: Tag, group: str) -> str:
+    """The option or blank id that ends a ``<group>_<id>`` control name."""
+    name = control.get("name")
+    if not isinstance(name, str) or not name.startswith(f"{group}_"):
+        raise PreviewPageError()
+    return _token(name[len(group) + 1:])
+
+
+def _learner_option_id(checkbox: Tag, group: str) -> str:
+    if checkbox.get("value") != "1":
+        raise PreviewPageError()
+    return _suffix_id(checkbox, group)
+
+
+def _blanks(controls: list[Tag], group: str) -> tuple[list[dict[str, Any]], bool]:
+    """Each blank's id, its number in the question text and its current value."""
+    blanks: list[dict[str, Any]] = []
+    disabled = False
+    for number, blank in enumerate(controls, 1):
+        disabled = disabled or _disabled(blank) or blank.has_attr("readonly")
+        blank_id = _suffix_id(blank, group)
+        value = blank.get("value", "")
+        if blank_id in {b["blank_id"] for b in blanks} or not isinstance(value, str) or len(value) > 10000:
+            raise PreviewPageError()
+        blanks.append({"blank_id": blank_id, "number": number, "value": value})
+    return blanks, disabled
+
+
+def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved: bool | None) -> dict[str, Any]:
+    """One question of a single known kind; mixed or other controls are unsupported."""
+    controls = [control for control in container.find_all("input") if control.get("type") != "hidden"]
+    types = {str(control.get("type")) for control in controls}
+    kind = _LEARNER_KINDS.get(types.pop()) if len(types) == 1 else None
+    expanded = _expanded(container)
+    # Inputs inside custom HTML blocks are content, not form controls.
+    unsupported = (bool(expanded.select("textarea, select, img, math, iframe, audio, video"))
+                   or len([c for c in expanded.find_all("input") if c.get("type") != "hidden"]) != len(controls))
+    choices: list[dict[str, Any]] = []
+    selected: list[str] = []
+    blanks: list[dict[str, Any]] = []
+    disabled = False
+    if kind == "single-choice":
+        choices, selected, disabled = _choices(container, controls, group, _learner_radio_id)
+        if len(selected) > 1:
+            raise PreviewPageError()
+    elif kind == "multi-select":
+        choices, selected, disabled = _choices(container, controls, group, _learner_option_id)
+    elif kind == "fill-blank":
+        blanks, disabled = _blanks(controls, group)
+    if kind == "fill-blank":
+        text = _text(container, blanks=True)
+    else:
+        prompt = _prompt(container)
+        if prompt is None:
+            raise PreviewPageError()
+        text = _text(prompt)
+    supported = kind is not None and not (
+        unsupported or disabled or not text or any(not choice["text"] for choice in choices))
+    return {
+        "question_id": qid, "number": ordinal, "text": text,
+        "kind": kind if supported else "unsupported", "supported": supported,
+        "choices": choices, "selected_choice_ids": selected, "blanks": blanks, "saved": saved,
+    }
+
+
+def parse_learner_page(
+    body: bytes, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
+) -> LearnerPage:
+    """Read a learner's attempt page (empty ``isprv``) with the preview's checks.
+
+    True/false and multiple choice are radios, multi-select is one checkbox
+    per option and fill-in-the-blank is one text input per blank. Ids are
+    strings, as multiple-choice values and option names carry opaque tokens.
+    Hidden buttons, such as the always-present "Save All Responses", are not
+    controls. Unrecognized controls and media are reported as unsupported.
+    """
+    form, hidden = _attempt_form(body, "", course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+    questions: list[dict[str, Any]] = []
+    groups: dict[int, tuple[str, int, int, int]] = {}
+    for container, qid, ordinal, tid, tvid, saved in _question_containers(form, page):
+        groups[qid] = (f"tAtom{tid}_{tvid}", tid, tvid, ordinal)
+        questions.append(_learner_question(container, qid, ordinal, groups[qid][0], saved))
+    return LearnerPage(course_id, quiz_id, attempt_id, page, tuple(questions),
+                       _button_present(form, "Next Page", visible_only=True),
+                       _button_present(form, "Previous Page", visible_only=True), hidden, groups)
