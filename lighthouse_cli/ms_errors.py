@@ -207,16 +207,76 @@ MS_ERROR_CODES: dict[int, str] = {
     50079: "User needs to enroll in multi-factor authentication.",
     50126: "Invalid username or password.",
     50128: "Domain hint is invalid.",
-    50131: "Device is not in required device state.",
+    50131: "An organizational access or security policy prevented sign-in.",
     50133: "Password is incorrect or account is locked.",
-    50140: "User needs to accept Terms of Use.",
+    50140: "The 'Keep me signed in' prompt needs to be completed.",
     50144: "User's password has expired.",
     50158: "External security challenge not satisfied.",
     50173: "Fresh token needed.",
     53000: "Device is not compliant.",
+    53001: "A domain-joined device is required.",
+    53002: "The application is not approved by your organization.",
     53003: "Access blocked by conditional access policy.",
-    65001: "Application needs permission to access resources.",
+    53004: "MFA registration was blocked by sign-in risk.",
+    65001: "Application consent is missing.",
+    65004: "Application consent was not completed.",
+    90094: "Administrator consent is required.",
 }
+
+# Recovery text for errors that do not know which proof Microsoft selected.
+_MFA_RECOVERY_HINT = (
+    "Complete MFA with a supported method: run --mfa-method choose to select "
+    "SMS, Authenticator app, voice, or push, then use auth verify <code> for a "
+    "code or auth verify ok for an approval."
+)
+
+# Static, code-specific advice only. These are diagnostics, never instructions
+# for the state machine to grant consent, alter policy, or retry a blocked flow.
+# Microsoft reference: https://learn.microsoft.com/en-us/entra/identity-platform/reference-error-codes
+MS_ERROR_RECOVERY: dict[int, str] = {
+    50034: "This email is not associated with a Microsoft account in this tenant.",
+    50053: "Account is temporarily locked. Wait a few minutes and try again.",
+    50055: "Your password has expired. Reset it via the Microsoft portal.",
+    50056: "Password is incorrect. If you recently changed your password, try again.",
+    50057: "Your account has been disabled. Contact IT support.",
+    50058: "Additional sign-in verification required. Check your authenticator app.",
+    50072: f"Multi-factor authentication is required. {_MFA_RECOVERY_HINT}",
+    50076: f"Multi-factor authentication is required. {_MFA_RECOVERY_HINT}",
+    50126: (
+        "Double-check your email and password. "
+        "If using @manipal.edu, ensure your account is active."
+    ),
+    50131: "Contact IT support to review the sign-in and required device or security policy.",
+    50133: "Password is incorrect. If you recently changed your password, try again.",
+    50140: "Complete the 'Keep me signed in' prompt in the normal browser sign-in flow.",
+    53000: "Use a device that meets your organization's compliance requirements, or contact IT support.",
+    53001: "Use a device joined as required by your organization, or contact IT support.",
+    53002: "Use an application approved by your organization, or contact IT support.",
+    53003: "Contact IT support to review the blocked sign-in and your organization's access requirements.",
+    53004: (
+        "Use your organization's allowed MFA registration process. "
+        "If registration remains blocked, contact IT support."
+    ),
+    65001: (
+        "Review the requested application permissions in your organization's normal sign-in flow. "
+        "If administrator approval is required, contact IT support."
+    ),
+    65004: (
+        "Review the consent request in your organization's normal sign-in flow. "
+        "If you requested administrator approval, wait for the review before retrying."
+    ),
+    90094: (
+        "Ask your organization's administrator to review the requested application permissions. "
+        "The CLI cannot grant administrator consent."
+    ),
+}
+
+# Preserve this fixed guidance in CLI output instead of incorrectly suggesting
+# another password attempt. Unknown codes remain opaque; do not infer policy
+# from code ranges or from untrusted page text.
+MS_INTERACTIVE_ERROR_CODES = frozenset({
+    50131, 50140, 53000, 53001, 53002, 53003, 53004, 65001, 65004, 90094,
+})
 
 
 # ---------------------------------------------------------------------------

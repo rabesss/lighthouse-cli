@@ -44,6 +44,9 @@ from .ms_errors import (
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    MS_ERROR_CODES,
+    MS_ERROR_RECOVERY,
+    MS_INTERACTIVE_ERROR_CODES,
     VALID_MFA_METHODS,
     MfaPendingError,
     MicrosoftSSOError,
@@ -147,6 +150,13 @@ def _safe_auth_category(text: str, code: str | None) -> str:
     """Map an auth error to a fixed, non-upstream diagnostic."""
     lowered = text.casefold()
     if lowered.startswith("authentication failed"):
+        if code and int(code) in MS_INTERACTIVE_ERROR_CODES:
+            # Reconstruct from local constants, never upstream Step/Fix text.
+            number = int(code)
+            return (
+                f"Authentication failed: [{number}] {MS_ERROR_CODES[number]} "
+                f"{MS_ERROR_RECOVERY[number]}"
+            )
         return f"Authentication failed ({code})." if code else _AUTH_ERROR_FALLBACK
     if lowered.startswith("login completed but session verification failed"):
         return "Login completed but session verification failed. Try: lighthouse auth login"

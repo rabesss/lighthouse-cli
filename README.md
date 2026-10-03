@@ -2,8 +2,8 @@
 
 CLI tool for interacting with the D2L Brightspace LMS at
 [lighthouse.manipal.edu](https://lighthouse.manipal.edu) (Manipal Academy of
-Higher Education). Uses the D2L REST API directly — no browser automation,
-no Selenium, no headless Chrome needed for data access.
+Higher Education). LMS data access uses the D2L REST API directly. The experimental
+[Outlook capability probe](docs/outlook-web.md) and optional [one-message reader](docs/outlook-read-selected.md) use a separate temporary browser.
 
 Built so that AI agents (Hermes, Claude Code, etc.) can interact with the
 university's LMS through terminal commands, but equally useful for students

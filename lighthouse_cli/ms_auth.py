@@ -64,6 +64,7 @@ from lighthouse_cli.ms_errors import (
     MFA_METHOD_AUTO,
     MFA_METHOD_INSTRUCTIONS,
     MS_ERROR_CODES,
+    MS_ERROR_RECOVERY,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
     MfaPendingError,
@@ -205,12 +206,6 @@ _MAX_ENDAUTH_POLL_SECONDS = 30.0
 _MAX_ENDAUTH_TOTAL_SECONDS = _MAX_ENDAUTH_POLLS * _MAX_ENDAUTH_POLL_SECONDS
 _SAFE_MFA_ENTROPY_RE = re.compile(r"[0-9]{1,3}\Z")
 _INVALID_ENTROPY_SENTINEL = "__invalid_entropy__"
-# Recovery text for errors that do not know which proof Microsoft selected.
-_MFA_RECOVERY_HINT = (
-    "Complete MFA with a supported method: run --mfa-method choose to select "
-    "SMS, Authenticator app, voice, or push, then use auth verify <code> for a "
-    "code or auth verify ok for an approval."
-)
 # Conservative client-side safety budget. The page's ``slMaxRetry`` belongs
 # to Microsoft's script loader, not to the session-pull form submission.
 _MAX_SSO_RELOADS = 2
@@ -429,31 +424,10 @@ def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSS
     if code:
         description = f"[{code}] {description}"
 
-    recovery = "Check your credentials and try again."
-    if code == 50126:
-        recovery = (
-            "Double-check your email and password. "
-            "If using @manipal.edu, ensure your account is active."
-        )
-    elif code == 50034:
-        recovery = "This email is not associated with a Microsoft account in this tenant."
-    elif code in (50056, 50133):
-        recovery = "Password is incorrect. If you recently changed your password, try again."
-    elif code == 50055:
-        recovery = "Your password has expired. Reset it via the Microsoft portal."
-    elif code == 50057:
-        recovery = "Your account has been disabled. Contact IT support."
-    elif code == 50053:
-        recovery = "Account is temporarily locked. Wait a few minutes and try again."
-    elif code == 50058:
-        recovery = "Additional sign-in verification required. Check your authenticator app."
-    elif code in (50076, 50072):
-        recovery = f"Multi-factor authentication is required. {_MFA_RECOVERY_HINT}"
-
     return MicrosoftSSOError(
         f"Authentication failed: {description}",
         step=step,
-        recovery=recovery,
+        recovery=MS_ERROR_RECOVERY.get(code or 0, "Check your credentials and try again."),
     )
 
 
