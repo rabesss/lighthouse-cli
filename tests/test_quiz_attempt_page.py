@@ -440,6 +440,7 @@ def test_learner_page_requires_an_empty_isprv(isprv):
     radios(1, ["o1", "o2"], checked=("o1", "o2")),
     checkboxes(1, ["o1", "o2"]).replace('value="1"', 'value="on"', 1),
     checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300_o1_x"'),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300_"'),
     segment("Two is") + blank(1, "60 1"),
     segment("Two is") + blank(1, "601") + blank(1, "601"),
     # Two labels for one control id would show one option's text twice.

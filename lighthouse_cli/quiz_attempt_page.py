@@ -131,16 +131,19 @@ class _Media:
     unsupported: bool = False
 
 
-# A root-relative or web address; others (data:, page-relative) are not fetched.
+# A root-relative or web address; others (data:, page-relative) are not fetched,
+# nor are paths with dot segments, which a browser would resolve first.
 _IMAGE_SOURCE = re.compile(r"/(?!/)[!-~]{0,2047}|https?://[!-~]{1,2040}", re.IGNORECASE)
+_DOT_SEGMENT = re.compile(r"/(?:\.|%2e){1,2}(?:/|$)", re.IGNORECASE)
 # Soft hyphens, zero-width spaces and joiners, word joiners and byte order
 # marks are invisible and meaningless here; other format characters, such as
 # bidirectional controls, still void the text.
 _INVISIBLE_MARKS = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"))
 # Elements that start a new line, so their text is not run into a neighbour's.
-_BLOCK_TAGS = ["address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption", "figure",
-               "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "label", "li", "main", "nav",
-               "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]
+_BLOCK_TAGS = ["address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dir", "div",
+               "dl", "dt", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
+               "label", "li", "main", "menu", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody", "td",
+               "tfoot", "th", "thead", "tr", "ul"]
 
 
 def _clean(text: str, limit: int = 16384) -> str | None:
@@ -160,7 +163,9 @@ def _render_media(copy: BeautifulSoup, media: _Media) -> None:
         math.replace_with(latex)
     for image in copy.find_all("img"):
         source = image.get("src")
-        source = source if isinstance(source, str) and _IMAGE_SOURCE.fullmatch(source) and "\\" not in source else None
+        if not (isinstance(source, str) and _IMAGE_SOURCE.fullmatch(source) and "\\" not in source
+                and not _DOT_SEGMENT.search(re.split(r"[?#]", source, maxsplit=1)[0])):
+            source = None
         alt = _clean(str(image.get("alt", "")), 1000)
         number = len(media.images) + 1
         media.images.append({"number": number, "src": source, "alt": alt or ""})
@@ -172,6 +177,7 @@ def _render_media(copy: BeautifulSoup, media: _Media) -> None:
 
 
 def _text(node: Tag, *, blanks: bool = False, media: _Media | None = None) -> str:
+    media = media if media is not None else _Media()
     copy = BeautifulSoup(str(node), "html.parser")
     removed = "script, style, noscript, button, input, fieldset, legend"
     if blanks:
@@ -181,19 +187,25 @@ def _text(node: Tag, *, blanks: bool = False, media: _Media | None = None) -> st
         removed = "script, style, noscript, button, input, legend"
         text_inputs = [control for control in copy.find_all("input") if _input_type(control) == "text"]
         for number, blank in enumerate(text_inputs, 1):
+            # A blank in text that is not read, such as a legend, would lose its marker.
+            media.unsupported = media.unsupported or blank.find_parent(removed.split(", ")) is not None
             blank.replace_with(f" (blank {number}) ")
     _expand_blocks(copy)
     for element in copy.select(removed):
         element.decompose()
-    _render_media(copy, media if media is not None else _Media())
+    # Spaced first, so a line break inside a superscript does not join its lines.
     for element in copy.find_all(_BLOCK_TAGS):
         element.insert_before(" ")
         element.insert_after(" ")
+    _render_media(copy, media)
     # Quiz content is authored text the answer depends on, so it is not
     # screened like a label: words such as "password", a JSON snippet, a
     # non-breaking space or a line break must survive. Only whitespace is
-    # compacted; control characters still void the text.
-    return _clean(copy.get_text()) or ""
+    # compacted; control characters still void the text, and any image or
+    # equation it showed.
+    text = _clean(copy.get_text())
+    media.unsupported = media.unsupported or text is None
+    return text or ""
 
 
 def rpc_script(chunks: Iterable[object]) -> str:
@@ -453,27 +465,57 @@ def _radio_id(radio: Tag, group: str) -> int:
 _CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
+_IMPORTANT = re.compile(r"!\s*important$")
+_CSS_WIDE = {"inherit", "initial", "unset", "revert", "revert-layer"}
+_DISPLAY_SINGLE = {"none", "contents", "inline-block", "inline-table", "inline-flex", "inline-grid", "table-row-group",
+                   "table-header-group", "table-footer-group", "table-row", "table-cell", "table-column-group",
+                   "table-column", "table-caption", "ruby-base", "ruby-text", "ruby-base-container",
+                   "ruby-text-container", "-webkit-box", "-webkit-inline-box", *_CSS_WIDE}
+# Words of the multi-keyword syntax, such as "inline flow-root".
+_DISPLAY_WORDS = {"block", "inline", "run-in", "flow", "flow-root", "table", "flex", "grid", "ruby", "list-item", "math"}
+_VISIBILITY = {"visible", "hidden", "collapse", *_CSS_WIDE}
+
+
+def _valid(prop: str, value: str) -> bool:
+    if prop == "display":
+        words = value.split()
+        return value in _DISPLAY_SINGLE or (0 < len(set(words)) == len(words) <= 3 and set(words) <= _DISPLAY_WORDS)
+    return prop != "visibility" or value in _VISIBILITY
+
+
 def _style(tag: Tag) -> dict[str, str]:
-    """A tag's inline style declarations, by lower-case property; later ones win, as in CSS."""
-    declarations: dict[str, str] = {}
+    """A tag's valid inline declarations, by lower-case property, resolved as CSS does.
+
+    A later declaration wins unless an earlier one is ``!important``, and a
+    value the property does not accept is ignored.
+    """
+    declarations: dict[str, tuple[str, bool]] = {}
     for declaration in _CSS_COMMENT.sub("", str(tag.get("style", ""))).split(";"):
         prop, _, value = declaration.partition(":")
-        declarations[prop.strip().lower()] = " ".join(value.lower().replace("!important", "").split())
-    return declarations
+        prop, value = prop.strip().lower(), " ".join(value.lower().split())
+        important = _IMPORTANT.search(value) is not None
+        value = _IMPORTANT.sub("", value).strip()
+        if _valid(prop, value) and (important or not declarations.get(prop, ("", False))[1]):
+            declarations[prop] = (value, important)
+    return {prop: value for prop, (value, _) in declarations.items()}
 
 
 def _hidden(node: Tag) -> bool:
     """Not rendered: ``display:none`` on it or an ancestor, or ``visibility:hidden`` it inherits.
 
     An element can make itself visible again inside a ``visibility:hidden``
-    ancestor, so the nearest declared visibility decides.
+    ancestor, so the nearest declared visibility decides. Visibility is
+    inherited, so ``inherit``, ``unset`` and ``revert`` leave it to the
+    ancestors, and ``initial`` is ``visible``.
     """
     visibility = None
     for tag in (node, *node.parents):
         style = _style(tag)
         if tag.has_attr("hidden") or "d2l-hidden" in tag.get_attribute_list("class") or style.get("display") == "none":
             return True
-        visibility = visibility or style.get("visibility")
+        declared = style.get("visibility")
+        if visibility is None and declared not in {None, "inherit", "unset", "revert", "revert-layer"}:
+            visibility = declared
     return visibility in {"hidden", "collapse"}
 
 
@@ -748,8 +790,10 @@ def _learner_text(container: Tag, kind: str | None, media: _Media) -> str:
 
 
 def _media_count(expanded: BeautifulSoup) -> tuple[int, int]:
-    """The images and outermost equations a question shows."""
-    return len(expanded.find_all("img")), len([m for m in expanded.find_all("math") if m.find_parent("math") is None])
+    """The images and outermost equations a question shows; a noscript fallback is not shown."""
+    images = [image for image in expanded.find_all("img") if image.find_parent("noscript") is None]
+    equations = [m for m in expanded.find_all("math") if m.find_parent(["math", "noscript"]) is None]
+    return len(images), len(equations)
 
 
 def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved: bool | None) -> dict[str, Any]:
@@ -762,7 +806,9 @@ def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved:
     kind = _learner_kind(controls, group)
     expanded = _expanded(container)
     # Inputs inside custom HTML blocks are content, not form controls.
-    unsupported = (bool(expanded.select("textarea, select, iframe, audio, video, svg, object, embed, canvas"))
+    # Browsers read <image> as <img>, and a picture can show a source other than its img.
+    unsupported = (bool(expanded.select("textarea, select, iframe, audio, video, svg, object, embed, canvas, "
+                                        "image, picture"))
                    or bool(expanded.find_all(re.compile(r":math$")))
                    or len([c for c in expanded.find_all("input") if _input_type(c) != "hidden"]) != len(controls))
     media = _Media()

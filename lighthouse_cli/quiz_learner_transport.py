@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urldefrag, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -299,17 +299,16 @@ def read_quiz_image(client: LighthouseClient, src: str) -> tuple[bytes, str]:
     """
     if not isinstance(src, str) or not src or len(src) > 2048 or "\\" in src or not src.isprintable():
         raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
-    if src.startswith("/") and not src.startswith("//"):
-        url = client.base_url + src
-    else:
-        try:
-            parsed = urlparse(src)
-            same_site = parsed.scheme.lower() == "https" and parsed.hostname == urlparse(client.base_url).hostname
-        except ValueError:
-            same_site = False
-        if not same_site:
-            raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
-        url = src
+    try:
+        # A browser never sends the fragment.
+        parsed = urlparse(urldefrag(src).url)
+        same_site = (parsed.scheme.lower() == "https" and parsed.hostname == urlparse(client.base_url).hostname
+                     and parsed.username is None and parsed.password is None and parsed.port in (None, 443))
+    except ValueError:
+        raise PreviewRefusedError(REFUSE_IMAGE_SOURCE) from None
+    if not (same_site or (not parsed.scheme and not parsed.netloc and src.startswith("/"))):
+        raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
+    url = client.base_url + parsed._replace(scheme="", netloc="").geturl()
     body, headers = client.get_raw(url, max_bytes=MAX_IMAGE_BYTES)
     content_type = next((str(value) for key, value in headers.items() if key.lower() == "content-type"), "")
     media_type = content_type.split(";", 1)[0].strip().lower()
