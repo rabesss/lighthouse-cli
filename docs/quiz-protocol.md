@@ -38,7 +38,9 @@ HTML frames and form posts:
    script's `DoAction` sends that same `Custom`/`1` POST to start or to
    continue, with `inProgress` set to its `continueQuiz` flag and `cfql=1`
    when the quiz was opened from a content link. A password-protected quiz
-   also needs the summary form's `password` field.
+   also needs the summary form's `password` field. `DoAction` refuses to
+   start while the user is impersonating a role ("View as Student"), so a
+   learner attempt needs a real learner account.
 2. Page `quiz_attempt_page_auto.d2l?ou&qi&ai&pg&isprv`. Each question sits in
    a `d2l-quiz-question-autosave-container` with hidden metadata (object id,
    page, `tAtom` group, saved flag). The prompt is either a legacy
@@ -55,13 +57,20 @@ HTML frames and form posts:
 3. Answer save: multipart POST to `quiz_attempt_save_auto.d2l` with
    `d2l_action=Update`, `d2l_actionparam=3,<page>,<tid>,<tvid>,<question
    number>`, a fresh per-request hit code and the question's
-   response-present flag. A learner page has no Save button: it saves on each
-   change (text on change or blur) and posts the whole page form, every
-   question's current value included, with `isFinalAutoSave=false`,
-   `useNewFinalAutoSave=true` and `timeLimitFromQuiz`. HTTP 200 alone does
-   not prove the answer persisted; read the page back and check the selected
-   choice and saved marker.
-4. Forward navigation: the same save endpoint with `d2l_actionparam=2,...`.
+   response-present flag. A learner page shows no Save button (its "Save All
+   Responses" button is hidden): it saves on each change (text on change or
+   blur) and posts the whole page form, every question's current value
+   included, with `isFinalAutoSave=false`, `useNewFinalAutoSave=true` and
+   `timeLimitFromQuiz`. Unchecked multi-select options are left out of the
+   form; checked ones send `1`. The save response names the question object
+   ids the server marked saved, in
+   `parent.infoFrame.UpdateSaved('<ids>','')`: the changed question for a
+   `3,...` save, every saved question on the page for the `5,<page>` save.
+   Neither HTTP 200 nor that call proves which value was stored; read the
+   page back and check the selected choice.
+4. Forward navigation: the same save endpoint with
+   `d2l_actionparam=2,<new page>,<current page>`; the learner page script
+   (`DoGoNextPage`) builds the same value the preview driver sends.
    Forward-only quizzes offer no previous-page control. Requesting a page
    number past the quiz's last page permanently breaks that attempt (every
    later read redirects to `/d2l/error/500`).
@@ -86,14 +95,20 @@ and confirmation page carry an empty `isprv=`.
 A real graded attempt observed on Lighthouse and a learner attempt on a public
 Brightspace site used the same save, confirmation and submission routes, then
 a receipt at `quiz_submissions_attempt.d2l?isprv=0`. Learner specifics from
-that public-site attempt (untimed, one page):
+that public site (four attempts on three untimed one-page quizzes):
 
+- Fresh start: from a summary opened directly (`cfql=0`), Start Quiz posted
+  `quiz_summary.d2l?ou&qi&cfql=0&inProgress=false` with the same multipart
+  fields as a preview start (`d2l_action=Custom`, `d2l_actionparam=1`, hit
+  code, `hps`, `drc=0`, `LockDownBrowserUrl=0`,
+  `LockDownBrowserLaunchTimeout=5000` and the form-state fields). The chain
+  ran with `inProgress=0`, and `quiz_start_process_auto.d2l` returned
+  `parent.GoToAttemptQuizAuto( <ai>,1,0 )` with the new attempt id.
 - Resume: the summary read "Completed - 0 (Attempt 1 in progress)" with a
   Continue Quiz button. It posts `quiz_summary.d2l?...&inProgress=true`,
   which redirects through the same chain with `inProgress=1`, including
   `quiz_start_process_auto.d2l`, and reopened the same attempt id with its
-  saved answers. The learner's fresh-start POST was lost from the capture,
-  but the summary script sends `inProgress=false` for it, as previews do.
+  saved answers.
 - Submission `param1` to `param7` were `"<qi>"`, `"<ai>"`, `false`, `true`,
   `true`, `false`, `""` (ids as strings). The confirmation page had no
   `CHK_canBeGraded` control, so `canBeGraded` stayed `true`. `isRldbUse` was
@@ -108,8 +123,9 @@ that public-site attempt (untimed, one page):
   receipt.
 
 Preview has no resume, as each Start creates a new attempt with a fresh
-timer. A learner's timed attempt and a learner's multi-page Next have not
-been observed yet.
+timer. A learner's timed attempt has not been observed yet, and a learner's
+multi-page Next is known only from the page script: none of the public
+site's quizzes is timed or has more than one page.
 
 ## Timed quizzes (observed in timed previews)
 
