@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import re
-from unittest.mock import Mock
+from email.utils import formatdate
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -48,9 +49,12 @@ from lighthouse_cli.quiz_learner_transport import (
     LearnerAdvanceUnknownError,
     LearnerSaveUnknownError,
     LearnerStartUnknownError,
+    LearnerTimer,
     advance_learner,
     parse_learner_summary,
+    parse_learner_timer,
     read_learner_summary,
+    read_learner_timer,
     save_learner_answers,
     start_learner,
 )
@@ -325,6 +329,74 @@ def test_inconsistent_summary_is_rejected(page):
     with pytest.raises(PreviewPageError):
         parse_learner_summary(page, course_id=10, quiz_id=20)
 
+
+# -- timer ----------------------------------------------------------------------
+
+STARTED = 1_791_000_000  # a Unix time
+TIMER = "lighthouse_cli.quiz_learner_transport"
+
+
+def timer_frame(*, quiz: int = 20, attempt: int = 30, preview: str = "false", started: float = STARTED,
+                limit: int = 240, enforced: str = "true", auto_submit: str = "true", exceeded: str = "false",
+                extra: str = "", logging_quiz: int | None = None) -> bytes:
+    ticks = 621_355_968_000_000_000 + int(started * 10**7)
+    # The frame's functions assign and test the same names; only declarations count.
+    functions = ("<script>function OnTimeUp() {\n      timeExceeded = true;\n}\n"
+                 "function Limit() { return typeof timeLimit == \"undefined\" ? 30000 : timeLimit; }</script>")
+    declarations = (f"<script>\n\t\tvar quizId = {quiz};\n\t\tvar isPreview = {preview};\n"
+                    f"\t\tvar timeStartedTicks = {ticks};\n\t\tvar attemptTimeLoggingQuizId = {logging_quiz or quiz};\n"
+                    f"\t\tvar attemptTimeLoggingAttemptId = {attempt};\n\t\tvar timeLimit = {limit};\n"
+                    f"\t\tvar enforceTimeLimit = {enforced};\n\t\tvar timeExceeded = {exceeded};\n"
+                    f"\t\tvar hasAutoSubmit = {auto_submit};\n\t\tvar isPreviewFromQB = '0';\n{extra}</script>")
+    return (functions + declarations).encode()
+
+
+def parse_timer(page: bytes, *, now: float = STARTED + 60) -> LearnerTimer | None:
+    return parse_learner_timer(page, quiz_id=20, attempt_id=30, now=now)
+
+
+def test_timer_reads_an_enforced_limit_and_none_otherwise():
+    assert parse_timer(timer_frame()) == LearnerTimer(240, STARTED + 240, True)
+    assert parse_timer(timer_frame(auto_submit="false")) == LearnerTimer(240, STARTED + 240, False)
+    # An untimed attempt's frame still declares a limit, unenforced.
+    assert parse_timer(timer_frame(enforced="false", limit=7200)) is None
+    # Over time by the server's account: it ends now, whatever the start says.
+    assert parse_timer(timer_frame(exceeded="true"), now=STARTED + 100) == LearnerTimer(240, STARTED + 100, True)
+    assert parse_timer(timer_frame(exceeded="true"), now=STARTED + 300).ends_at == STARTED + 240
+
+
+@pytest.mark.parametrize("page", [
+    timer_frame(quiz=21), timer_frame(attempt=31), timer_frame(preview="true"),
+    timer_frame(logging_quiz=21), timer_frame(limit=0), timer_frame(started=STARTED + 60 + 301), timer_frame(started=0),
+    timer_frame(enforced="1"),
+    timer_frame(extra="var timeLimit = 60;\n"),  # declared twice
+    timer_frame().replace(b"var hasAutoSubmit", b"var autoSubmit"),
+    b"<p>var quizId = 20;</p>",
+])
+def test_an_unexpected_timer_frame_is_rejected(page):
+    with pytest.raises(PreviewPageError):
+        parse_timer(page)
+
+
+@pytest.mark.parametrize(("headers", "offset"), [
+    # The local clock runs about 10 s ahead of the server's. The offset is the
+    # largest the Date allows, so the countdown never ends late.
+    ({"Date": formatdate(STARTED + 60, usegmt=True)}, -9),
+    ({"date": formatdate(STARTED + 60, usegmt=True)}, -9),
+    ({}, 0), ({"Date": "soon"}, 0), ({"Date": formatdate(STARTED + 60)}, 0),  # "-0000": no zone
+])
+def test_timer_is_read_once_with_the_server_clocks_offset(headers, offset):
+    client = LighthouseClient(read_only_auth=True)
+    client.get_raw = Mock(return_value=(timer_frame(), headers))
+    # The clock reads before the request is sent and after its reply, 2 s later.
+    with patch(f"{TIMER}.time", Mock(time=Mock(side_effect=[STARTED + 70, STARTED + 72]))):
+        timer = read_learner_timer(client, course_id=10, quiz_id=20, attempt_id=30)
+    assert timer == LearnerTimer(240, STARTED + 240, True, clock_offset=offset)
+    client.get_raw.assert_called_once()
+    assert client.get_raw.call_args.args[0] == (
+        "/d2l/lms/quizzing/user/attempt/quiz_attempt_top_auto.d2l?ou=10&isprv=&impcf=&qi=20&ai=30"
+        "&dnb=0&cfql=0&fromQB=0&cft=&d2l_body_type=3")
+    assert client.get_raw.call_args.kwargs["_replay_safe"] is False
 
 START_PROCESS = "/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=&fromQB=0&inProgress={}"
 

@@ -26,8 +26,8 @@ def attempt() -> None:
 
     Start (or continue) an attempt, read its page, answer the questions on
     it, move on with Next, and submit from the last page. Every change is
-    read back from Brightspace before it is reported. Timed quizzes are not
-    supported yet.
+    read back from Brightspace before it is reported. On a timed quiz every
+    page reports the time left; submit before it runs out.
     """
 
 
@@ -43,7 +43,8 @@ def _confirmed(operation: str, course_id: int, quiz_id: int) -> bool:
         return False
     if operation == "start":
         prompt = (f"Start or continue your attempt at quiz {quiz_id} in course {course_id}? "
-                  "A new attempt uses one of your allowed attempts and is graded.")
+                  "A new attempt uses one of your allowed attempts and is graded. "
+                  "On a timed quiz its clock starts and keeps running.")
     elif operation == "submit":
         prompt = f"Submit your attempt at quiz {quiz_id} in course {course_id}? A submitted attempt is final and graded."
     elif operation == "forget":
@@ -98,7 +99,8 @@ def start(course_id: int, quiz_id: int, yes: bool, dry_run: bool, json_output: b
     """Continue the attempt in progress, or start a new one, and read its page.
 
     Once an attempt is open, until it is submitted only that attempt is
-    continued, where Brightspace has it; no new attempt is started.
+    continued, where Brightspace has it; no new attempt is started. A timed
+    attempt's limit is read here, once; later commands count down from it.
     """
     _execute("start", course_id, quiz_id, json_output, yes, dry_run)
 
@@ -172,7 +174,8 @@ def verify(course_id: int, quiz_id: int, json_output: bool) -> None:
     """Check that the attempt was submitted, from its receipt and the submissions list.
 
     Settles a submission that could not be verified, or reports that the
-    attempt is still in progress. Changes nothing on Brightspace.
+    attempt is still in progress, or, once its time ran out, still waiting
+    for Brightspace to submit it. Changes nothing on Brightspace.
     """
     _execute("verify", course_id, quiz_id, json_output)
 
