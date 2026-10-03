@@ -599,6 +599,7 @@ def timed(seconds_left: float, *, auto_submit: bool = True) -> LearnerTimer:
 def start_timed(workflow, timer):
     with patch(f"{SESSION}.read_learner_timer", return_value=timer) as read:
         result = start(workflow)
+    read.assert_called_once()
     assert read.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
     return result
 
@@ -738,6 +739,19 @@ def test_without_auto_submit_the_attempt_stays_open_past_its_limit(remote):
     with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()):
         with pytest.raises(LearnerNotSubmittedError):
             workflow.verify()
+    # Answers are still saved, and the attempt moved on and submitted.
+    with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
+            patch(f"{SESSION}.save_learner_answers", return_value=open_page()) as save:
+        workflow.answer({101: "o1"}, allow_unanswered=True)
+    with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
+            patch(f"{SESSION}.advance_learner", return_value=open_page(2, next_control=False)) as advance:
+        workflow.next(allow_unanswered=True)
+    with patch(f"{SESSION}.read_learner_page", return_value=open_page(2, next_control=False)), \
+            patch(f"{SESSION}.submit_learner", return_value=RECEIPT) as submit:
+        assert workflow.submit(allow_unanswered=True) == RECEIPT
+    save.assert_called_once()
+    advance.assert_called_once()
+    submit.assert_called_once()
 
 
 @pytest.mark.parametrize(("failure", "raised"), [

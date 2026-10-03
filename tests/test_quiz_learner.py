@@ -367,7 +367,8 @@ def test_timer_reads_an_enforced_limit_and_none_otherwise():
 
 @pytest.mark.parametrize("page", [
     timer_frame(quiz=21), timer_frame(attempt=31), timer_frame(preview="true"),
-    timer_frame(logging_quiz=21), timer_frame(limit=0), timer_frame(started=STARTED + 60 + 301), timer_frame(enforced="1"),
+    timer_frame(logging_quiz=21), timer_frame(limit=0), timer_frame(started=STARTED + 60 + 301), timer_frame(started=0),
+    timer_frame(enforced="1"),
     timer_frame(extra="var timeLimit = 60;\n"),  # declared twice
     timer_frame().replace(b"var hasAutoSubmit", b"var autoSubmit"),
     b"<p>var quizId = 20;</p>",

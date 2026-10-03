@@ -77,8 +77,10 @@ _TIMER_VARS = {
 }
 # .NET ticks (100 ns since 0001-01-01 UTC) at the Unix epoch.
 _UNIX_EPOCH_TICKS = 621_355_968_000_000_000
-# How far ahead of the server's clock an attempt's start may be.
+# How far ahead of the server's clock an attempt's start may be, and the
+# earliest it may be (2000-01-01): an older one is no real start.
 _START_SKEW_SECONDS = 300
+_EARLIEST_START = 946_684_800
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 # Raster formats an agent can view, by their leading bytes.
 _IMAGE_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
@@ -206,7 +208,7 @@ def parse_learner_timer(body: bytes, *, quiz_id: int, attempt_id: int, now: floa
         return None
     limit = int(values["timeLimit"])
     started = (int(values["timeStartedTicks"]) - _UNIX_EPOCH_TICKS) / 10**7
-    if limit < 1 or started > now + _START_SKEW_SECONDS:
+    if limit < 1 or not _EARLIEST_START <= started <= now + _START_SKEW_SECONDS:
         raise PreviewPageError()
     ends_at = started + limit
     if values["timeExceeded"] == "true":
