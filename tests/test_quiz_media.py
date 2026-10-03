@@ -372,10 +372,10 @@ def image_client(content: bytes = PNG, headers: dict[str, str] | None = None) ->
 def test_a_root_relative_image_is_read_from_the_lms():
     client = image_client()
     assert read_quiz_image(client, ATTACHED_SRC) == (PNG, "image/png")
-    client.get_raw.assert_called_once_with(client.base_url + ATTACHED_SRC, max_bytes=MAX_IMAGE_BYTES)
+    client.get_raw.assert_called_once_with(client.base_url + ATTACHED_SRC, max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
     client = image_client()
     read_quiz_image(client, client.base_url + "/content/enforced/10/sq.png")
-    client.get_raw.assert_called_once_with(client.base_url + "/content/enforced/10/sq.png", max_bytes=MAX_IMAGE_BYTES)
+    client.get_raw.assert_called_once_with(client.base_url + "/content/enforced/10/sq.png", max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
 
 
 @pytest.mark.parametrize("src", [
@@ -393,6 +393,7 @@ def test_an_image_elsewhere_is_never_requested(src):
     "/d2l/lms/quizzing/user/attempt/quiz_attempt_page_auto.d2l?qi=20&ai=30&pg=999999&ou=10",
     "/D2L/LMS/Quizzing/user/x.png", "/d2l/lms/%71uizzing/x.png", "/d2l//lms/./quizzing/x.png",
     "/content/../d2l/lms/quizzing/x.png", "/d2l/logout", "/d2l/LogOut?x.png", "{base}/d2l/lms/quizzing/x.png",
+    "/d2l/lms/dropbox/user/folder_submit_files.d2l?db=1&ou=10", "/d2l/home/10/x.D2L", "/d2l/x.d2l/y.png",
 ])
 def test_an_image_address_that_is_a_brightspace_action_is_never_requested(src):
     client = image_client()
@@ -404,7 +405,7 @@ def test_an_image_address_that_is_a_brightspace_action_is_never_requested(src):
 def test_an_image_fragment_is_not_sent():
     client = image_client()
     read_quiz_image(client, "/content/enforced/10/sq.png#zoom")
-    client.get_raw.assert_called_once_with(client.base_url + "/content/enforced/10/sq.png", max_bytes=MAX_IMAGE_BYTES)
+    client.get_raw.assert_called_once_with(client.base_url + "/content/enforced/10/sq.png", max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
 
 
 @pytest.mark.parametrize("address", ["https://user:pass@{host}/tri.png", "https://user@{host}/tri.png",  # pragma: allowlist secret

@@ -60,7 +60,8 @@ REFUSE_PAGE_PROTECTION = "Form protection could not be read from the quiz page. 
 REFUSE_IMAGE_SOURCE = "This image is not stored on Brightspace, so the CLI does not download it."
 REFUSE_IMAGE_ROUTE = "This image address is a Brightspace page, not a file, so the CLI does not request it."
 # Pages a request can change: the quiz pages themselves (one past the last
-# page breaks the attempt) and signing out. Paths are case-insensitive.
+# page breaks the attempt) and signing out. Legacy ``.d2l`` pages anywhere
+# are refused too. Paths are case-insensitive.
 _ACTION_ROUTES = ("/d2l/lms/quizzing/", "/d2l/logout")
 
 _SUMMARY_FLAGS = ("isImpersonatingRole", "canTakeQuiz", "startQuiz", "continueQuiz", "hasPass")
@@ -318,10 +319,11 @@ def read_quiz_image(client: LighthouseClient, src: str) -> tuple[bytes, str]:
     if not (same_site or (not parsed.scheme and not parsed.netloc and src.startswith("/"))):
         raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
     path = "/" + posixpath.normpath(unquote(parsed.path)).lstrip("/").casefold() + "/"
-    if path.startswith(_ACTION_ROUTES):
+    if path.startswith(_ACTION_ROUTES) or any(segment.endswith(".d2l") for segment in path.split("/")):
         raise PreviewRefusedError(REFUSE_IMAGE_ROUTE)
     url = client.base_url + parsed._replace(scheme="", netloc="").geturl()
-    body, headers = client.get_raw(url, max_bytes=MAX_IMAGE_BYTES)
+    # Sent once: if the address is a page after all, it is not repeated.
+    body, headers = client.get_raw(url, max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
     content_type = next((str(value) for key, value in headers.items() if key.lower() == "content-type"), "")
     media_type = content_type.split(";", 1)[0].strip().lower()
     if not (media_type.startswith("image/") or media_type == "application/octet-stream"):

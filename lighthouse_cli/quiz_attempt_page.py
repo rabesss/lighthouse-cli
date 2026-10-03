@@ -462,7 +462,8 @@ def _radio_id(radio: Tag, group: str) -> int:
     return _id(radio.get("value"))
 
 
-_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# An unclosed comment runs to the end of the style, as in a browser.
+_CSS_COMMENT = re.compile(r"/\*.*?(?:\*/|\Z)", re.DOTALL)
 
 
 _IMPORTANT = re.compile(r"!\s*important$")
