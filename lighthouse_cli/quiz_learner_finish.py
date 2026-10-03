@@ -19,6 +19,7 @@ from .quiz_attempt_page import (
     MAX_PAGE_BYTES,
     LearnerPage,
     PreviewRefusedError,
+    active_buttons,
     hidden_form,
     rpc_script,
     unanswered_questions,
@@ -41,7 +42,10 @@ class LearnerSubmitUnknownError(NetworkError):
 
 
 class LearnerUnansweredError(PreviewRefusedError):
-    """Nothing was submitted. ``questions`` lists each unanswered question's page, id and number."""
+    """The page's answers were saved, but the quiz was not submitted.
+
+    ``questions`` lists each unanswered question's page, id and number.
+    """
 
     def __init__(self, questions: list[dict[str, int]]) -> None:
         self.questions = questions
@@ -82,14 +86,14 @@ def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_
                                  _replay_safe=False, headers={"Cache-Control": "no-cache"})
         soup = BeautifulSoup(body, "html.parser")
         if (not any(h.get_text(" ", strip=True) == _RECEIPT_HEADING for h in soup.find_all("h2"))
-                or "still in progress" in soup.get_text(" ", strip=True)):
+                or "still in progress" in soup.get_text(" ", strip=True).casefold()):
             raise LearnerSubmitUnknownError()
         listing, _ = client.get_raw("/d2l/lms/quizzing/user/quiz_submissions.d2l?" + urlencode({"ou": course_id, "qi": quiz_id}),
                                     max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"})
         link, row = _attempt_row(listing, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
         number = re.fullmatch(r"Attempt ([0-9]{1,6})", link.get_text(" ", strip=True))
         row_text = " ".join(row.get_text(" ", strip=True).split())
-        if number is None or "In progress" in row_text:
+        if number is None or "in progress" in row_text.casefold():
             raise LearnerSubmitUnknownError()
         grade = row.find("td", class_="d_gn")
         score = re.match(r"([0-9]{1,9}(?:\.[0-9]{1,4})?) / ([0-9]{1,9}(?:\.[0-9]{1,4})?)(?: |$)",
@@ -115,7 +119,7 @@ def _confirmation(client: LighthouseClient, protection: FormProtection, *, cours
     # A learner's page has no can-be-graded checkbox (that is preview-only),
     # and a secure-browser attempt is never submitted over plain HTTP.
     if (form.select('input[type="checkbox"]')
-            or not any(b.get_text(" ", strip=True) == "Submit Quiz" and not b.has_attr("disabled") for b in form.find_all("button"))
+            or active_buttons(form, {"Submit Quiz"}) != ["Submit Quiz"]
             or fields.get("d2l_referrer") != protection.csrf_token
             or fields.get("HDN_isUsingRldb") != "0"):
         raise LearnerSubmitUnknownError()

@@ -23,6 +23,7 @@ from .quiz_attempt_page import (
     LearnerPage,
     PreviewPageError,
     PreviewRefusedError,
+    active_buttons,
     hidden_form,
     parse_learner_page,
 )
@@ -50,7 +51,7 @@ class LearnerAdvanceUnknownError(NetworkError):
 
 REFUSE_START_UNAVAILABLE = "This quiz cannot be started or continued now (closed, not yet open or out of attempts)."
 REFUSE_NOTHING_IN_PROGRESS = "No attempt of this quiz is in progress."
-REFUSE_START_PASSWORD = "This quiz needs a password, which the CLI does not support."
+REFUSE_START_PASSWORD = "This quiz needs a password, which the CLI does not support."  # pragma: allowlist secret
 REFUSE_START_BROWSER = "This quiz needs a browser step (such as LockDown Browser) that the CLI cannot do."
 REFUSE_START_ROLE = "Brightspace does not let an impersonated role take a quiz."
 REFUSE_START_PROTECTION = "Quiz form protection could not be verified. Nothing was started."
@@ -109,8 +110,7 @@ def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int) -> Learn
         if len(values) != 1:
             raise PreviewPageError()
         flags[name] = values[0] == "true"
-    labels = [button.get_text(" ", strip=True) for button in soup.find_all("button")
-              if not button.has_attr("disabled") and button.get_text(" ", strip=True) in {"Start Quiz!", "Continue Quiz..."}]
+    labels = active_buttons(soup, {"Start Quiz!", "Continue Quiz..."})
     if len(labels) > 1:
         raise PreviewPageError()
     text = " ".join(soup.get_text(" ", strip=True).split())
@@ -247,6 +247,8 @@ def start_learner(
             learner_page_path(course_id, quiz_id, attempt_id, page)
         except ValueError:
             raise LearnerStartUnknownError() from None
+        if not resume and page != 1:  # a new attempt opens on its first page
+            raise LearnerStartUnknownError(attempt_id=attempt_id)
         if on_identity is not None:
             try:
                 on_identity(attempt_id, page)
@@ -272,7 +274,12 @@ def start_learner(
 def read_learner_page(
     client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
 ) -> LearnerPage:
-    """Read one page of the attempt; never infer or move the server's cursor."""
+    """Read one page of the attempt; never infer or move the server's cursor.
+
+    ``page`` must be one the server showed for this attempt (its start or
+    continue page, or a Next readback): reading past the last page breaks
+    the attempt.
+    """
     body, _ = client.get_raw(learner_page_path(course_id, quiz_id, attempt_id, page), max_bytes=MAX_PAGE_BYTES,
                              _replay_safe=False, headers={"Cache-Control": "no-cache"})
     return parse_learner_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
@@ -284,9 +291,13 @@ def current_learner_page(
     """The page to write from, with its protection: ``current`` if it is this page, else a fresh read.
 
     Passing the verified readback of the previous write saves a request.
+    Only the first page is read without one, so a wrong page number is
+    never requested.
     """
     identity = (course_id, quiz_id, attempt_id, page)
     if current is None:
+        if page != 1:
+            raise ValueError("Pass the page's verified readback.")
         current = read_learner_page(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     elif not isinstance(current, LearnerPage) or (current.course_id, current.quiz_id, current.attempt_id, current.page) != identity:
         raise ValueError("Invalid quiz attempt identity.")

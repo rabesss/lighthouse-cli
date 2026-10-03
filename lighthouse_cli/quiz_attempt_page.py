@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -142,7 +142,10 @@ def rpc_script(chunks: Iterable[object]) -> str:
         if not isinstance(chunk, bytes) or len(data) + len(chunk) > 65536:
             raise ValueError("Unexpected RPC reply.")
         data.extend(chunk)
-    reply = json.loads(bytes(data).decode("utf-8").removeprefix("while(true){}"))
+    try:
+        reply = json.loads(bytes(data).decode("utf-8").removeprefix("while(true){}"))
+    except RecursionError:
+        raise ValueError("Unexpected RPC reply.") from None
     if (not isinstance(reply, dict) or type(reply.get("ResponseType")) is not int
             or reply["ResponseType"] != 0 or reply.get("IsResultMin") is not False
             or reply.get("RedirectUrl") != "" or not isinstance(reply.get("Result"), str)):
@@ -381,6 +384,13 @@ def _hidden(node: Tag) -> bool:
                for tag in (node, *node.parents))
 
 
+def active_buttons(root: Tag, labels: Collection[str]) -> list[str]:
+    """The labels of enabled, rendered buttons that have one of ``labels``, in page order."""
+    return [text for button in root.find_all("button")
+            if (text := button.get_text(" ", strip=True)) in labels
+            and not _disabled(button) and not _hidden(button) and button.find_parent("template") is None]
+
+
 def _button_present(form: Tag, label: str, *, visible_only: bool = False) -> bool:
     # A button inside a question is its content, not page navigation, and
     # template content is never rendered.
@@ -476,7 +486,8 @@ class LearnerPage:
         return values
 
     def unanswered(self) -> list[int]:
-        return [q["question_id"] for q in self.questions if not any(_learner_value(q))]
+        """Questions with no answer, or with an empty blank."""
+        return [q["question_id"] for q in self.questions if not (value := _learner_value(q)) or not all(value)]
 
     def confirms(self, values: Mapping[int, tuple[str, ...]], answered: Iterable[int]) -> bool:
         """A 200 response is insufficient: every value must read back as sent.
@@ -700,6 +711,6 @@ def unanswered_questions(form: Tag, *, quiz_id: int, attempt_id: int) -> list[di
         found.append({"page": _id(match[1]), "question_id": _id(match[4]), "number": int(number[1])})
     text = " ".join(form.get_text(" ", strip=True).split())
     counts = re.findall(r"You have ([0-9]{1,6}) unanswered questions?\.", text)
-    if counts != ([str(len(found))] if found else []):
+    if counts != [str(len(found))] and not (counts in ([], ["0"]) and not found):
         raise PreviewPageError()
     return found

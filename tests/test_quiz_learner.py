@@ -12,7 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lighthouse_cli.api import LighthouseClient, SessionExpiredError
+from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredError
 from lighthouse_cli.quiz_attempt_page import (
     REFUSE_ANSWER_SHAPE,
     REFUSE_BLANK_TEXT,
@@ -203,6 +203,9 @@ def test_next_needs_a_rendered_next_control_and_answered_questions():
     assert answered.advance_fields(answered._protection)["d2l_actionparam"] == "2,2,1"
     open_page = parse(body(questions(sc=("o1",)), extra=LEARNER_BUTTONS + NEXT))
     assert open_page.unanswered() == [102, 103]
+    # On a forward-only quiz an empty blank could not be filled in later.
+    partial = parse(body(questions(sc=("o1",), ms=("o11",), fb=("four", "")), extra=LEARNER_BUTTONS + NEXT))
+    assert partial.unanswered() == [103]
     with pytest.raises(PreviewRefusedError, match=re.escape(REFUSE_LEARNER_UNANSWERED)):
         open_page.advance_fields(open_page._protection)
     fields = open_page.advance_fields(open_page._protection, allow_unanswered=True)
@@ -240,6 +243,8 @@ def test_unanswered_questions_are_read_from_the_confirmation_links():
     assert unanswered_questions(hidden_form(confirmation())[0], quiz_id=20, attempt_id=30) == []
     single = hidden_form(confirmation(unanswered=((1, 102, 2),)))[0]
     assert len(unanswered_questions(single, quiz_id=20, attempt_id=30)) == 1
+    none_left = hidden_form(confirmation(extra="<p>You have 0 unanswered questions.</p>"))[0]
+    assert unanswered_questions(none_left, quiz_id=20, attempt_id=30) == []
 
 
 @pytest.mark.parametrize("page", [
@@ -268,7 +273,7 @@ def test_rpc_reply_is_read_as_data_without_whitespace():
 
 @pytest.mark.parametrize("chunks", [
     [reply(ResponseType=1)], [reply(IsResultMin=True)], [reply(RedirectUrl="/d2l/error")],
-    [reply(Result=None)], [b"[]"], ["text"], [b" " * 65537],
+    [reply(Result=None)], [b"[]"], ["text"], [b" " * 65537], [b"[" * 30000 + b"]" * 30000],
 ])
 def test_other_rpc_replies_are_rejected(chunks):
     with pytest.raises(ValueError):
@@ -366,10 +371,13 @@ def test_continue_reopens_the_attempt_in_progress():
 @pytest.mark.parametrize("page, kwargs, message", [
     (summary(), {"continue_only": True}, REFUSE_NOTHING_IN_PROGRESS),
     (summary(impersonating="true"), {}, REFUSE_START_ROLE),
-    (summary(password="true"), {}, REFUSE_START_PASSWORD),
+    (summary(password="true"), {}, REFUSE_START_PASSWORD),  # pragma: allowlist secret
     (summary(extra='<input type="password" name="password">'), {}, REFUSE_START_PASSWORD),
     (summary(can_take="false"), {}, REFUSE_START_UNAVAILABLE),
     (summary(button=None), {}, REFUSE_START_UNAVAILABLE),
+    (summary(button=None, extra='<button type="button" class="d2l-hidden">Start Quiz!</button>'), {}, REFUSE_START_UNAVAILABLE),
+    (summary(button=None, extra='<fieldset disabled><button type="button">Start Quiz!</button></fieldset>'), {},
+     REFUSE_START_UNAVAILABLE),
     (summary(button="Continue Quiz..."), {}, REFUSE_START_UNAVAILABLE),
     (summary(fields={"LockDownBrowserUrl": "1"}), {}, REFUSE_START_BROWSER),
     (summary(fields={"hps": "1"}), {}, REFUSE_START_BROWSER),
@@ -397,12 +405,47 @@ def test_unexpected_start_chain_is_unknown_and_not_retried(change):
     client._request.assert_called_once()
 
 
+def test_a_new_attempt_must_open_on_its_first_page():
+    client = start_client(summary(), script=b"<script>\nparent.GoToAttemptQuizAuto( 30,2,0 );\n</script>")
+    with pytest.raises(LearnerStartUnknownError) as exc_info:
+        start_learner(client, course_id=10, quiz_id=20)
+    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, None)
+    assert client.get_raw.call_count == 4  # page 2 is never requested
+
+
+def test_continue_opens_the_page_the_server_names():
+    client = start_client(summary(**IN_PROGRESS), resume=True, script=b"<script>\nparent.GoToAttemptQuizAuto( 30,3,0 );\n</script>",
+                          readback=(body(questions(page=3), page=3), {}))
+    assert start_learner(client, course_id=10, quiz_id=20, continue_only=True).page == 3
+
+
 def test_start_readback_failure_is_unknown_with_the_attempt_identity():
     client = start_client(summary(), readback=SessionExpiredError("session expired"))
     with pytest.raises(LearnerStartUnknownError) as exc_info:
         start_learner(client, course_id=10, quiz_id=20)
     assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
     client._request.assert_called_once()
+
+
+def test_start_identity_callback_failure_is_unknown_with_identity():
+    client = start_client(summary())
+    with pytest.raises(LearnerStartUnknownError) as exc_info:
+        start_learner(client, course_id=10, quiz_id=20, on_identity=Mock(side_effect=OSError("disk full")))
+    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
+    assert client.get_raw.call_count == 4  # no readback after a failed seal
+    client._request.assert_called_once()
+
+
+@pytest.mark.parametrize("failing", [1, 2, 3])  # the outer frame, inner frame and process page
+def test_start_chain_network_failure_is_unknown_and_not_retried(failing):
+    client = start_client(summary())
+    replies = list(client.get_raw.side_effect)
+    replies[failing] = NetworkError("connection reset")
+    client.get_raw = Mock(side_effect=replies)
+    with pytest.raises(LearnerStartUnknownError):
+        start_learner(client, course_id=10, quiz_id=20)
+    client._request.assert_called_once()
+    assert client.get_raw.call_count == failing + 1
 
 
 def test_start_post_auth_expiry_is_unknown_after_dispatch():
@@ -455,6 +498,19 @@ def test_save_from_the_previous_readback_skips_the_page_read():
     client._request.assert_called_once()
 
 
+def test_later_pages_are_never_read_from_a_bare_page_number():
+    # Reading past the last page breaks the attempt, so pages after the
+    # first come from a verified readback.
+    client, _ = write_client()
+    for call in (lambda: save_learner_answers(client, **IDENTITY, page=2, answers={101: "o1"}),
+                 lambda: advance_learner(client, **IDENTITY, page=2),
+                 lambda: submit_learner(client, **IDENTITY, page=2)):
+        with pytest.raises(ValueError):
+            call()
+    client.get_raw.assert_not_called()
+    client._request.assert_not_called()
+
+
 def test_save_from_another_attempt_page_is_rejected():
     client, _ = write_client()
     other = parse_learner_page(body(questions()).replace(b'name="ai" type="hidden" value="30"', b'name="ai" type="hidden" value="31"'),
@@ -486,6 +542,15 @@ def test_unverified_save_is_unknown_and_not_retried(readback):
     with pytest.raises(LearnerSaveUnknownError):
         save_learner_answers(client, **IDENTITY, page=1, answers={101: "o2", 102: ["o11", "o13"], 103: ["four", "six"]})
     client._request.assert_called_once()
+
+
+def test_save_rejected_by_the_server_is_unknown_and_not_retried():
+    client, response = write_client(body(questions()), status=500)
+    with pytest.raises(LearnerSaveUnknownError):
+        save_learner_answers(client, **IDENTITY, page=1, answers={101: "o1"})
+    client._request.assert_called_once()
+    client.get_raw.assert_called_once()  # no readback of a refused write
+    response.close.assert_called_once()
 
 
 def test_save_post_auth_expiry_is_unknown_after_dispatch():
@@ -532,6 +597,14 @@ def test_unverified_next_is_unknown_and_not_retried(readback):
     with pytest.raises(LearnerAdvanceUnknownError):
         advance_learner(client, **IDENTITY, page=1)
     client._request.assert_called_once()
+
+
+def test_next_rejected_by_the_server_is_unknown_and_never_reads_the_next_page():
+    client, _ = write_client(body(ANSWERED, extra=LEARNER_BUTTONS + NEXT), status=500)
+    with pytest.raises(LearnerAdvanceUnknownError):
+        advance_learner(client, **IDENTITY, page=1)
+    client._request.assert_called_once()
+    client.get_raw.assert_called_once()
 
 
 # -- submit and verify --------------------------------------------------------------
@@ -597,6 +670,14 @@ def test_unanswered_questions_can_be_submitted_explicitly():
     assert client._request.call_count == 2
 
 
+def test_submit_reads_the_last_page_when_no_readback_is_given():
+    client, _, _ = submit_client()
+    client.get_raw.side_effect = [(body(ANSWERED), {}), *client.get_raw.side_effect]
+    assert submit_learner(client, **IDENTITY, page=1)["submitted"]
+    assert "isprv=&pg=1&qi=20&ai=30" in client.get_raw.call_args_list[0].args[0]
+    assert client._request.call_count == 2
+
+
 def test_submit_refuses_before_any_write_when_not_on_the_last_page():
     client, _, _ = submit_client()
     with pytest.raises(PreviewRefusedError, match=re.escape(REFUSE_LEARNER_NOT_LAST_PAGE)):
@@ -609,6 +690,12 @@ def test_submit_refuses_before_any_write_when_not_on_the_last_page():
     confirmation(secure_browser="1"),
     confirmation(referrer="OTHER_SESSION"),
     confirmation().replace(b'primary="">Submit Quiz', b'disabled>Submit Quiz'),
+    confirmation().replace(b'primary="">Submit Quiz', b'primary="" aria-disabled="true">Submit Quiz'),
+    confirmation().replace(b'primary="">Submit Quiz', b'primary="" class="d2l-hidden">Submit Quiz'),
+    confirmation().replace(b'<button type="button" primary="">Submit Quiz</button>',
+                           b'<fieldset disabled><button type="button" primary="">Submit Quiz</button></fieldset>'),
+    confirmation().replace(b'primary="">Submit Quiz</button>',
+                           b'disabled>Submit Quiz</button><button type="button" hidden>Submit Quiz</button>'),
     confirmation(count=1),
 ])
 def test_unexpected_confirmation_page_is_unknown_before_the_final_request(confirm):
@@ -624,7 +711,9 @@ def test_unexpected_confirmation_page_is_unknown_before_the_final_request(confir
     {"result": "parent.QuizDone(20,30,'0','0','0','gotoSv','');evil()"},
     {"receipt": b"<h2>Quiz Submission Confirmation</h2>"},
     {"receipt": RECEIPT + b"<p>This attempt is still in progress.</p>"},
+    {"receipt": RECEIPT + b"<p>This attempt is Still In Progress.</p>"},
     {"submissions": listing(state="<label> (In progress)</label>")},
+    {"submissions": listing(state="<label> (IN PROGRESS)</label>")},
     {"submissions": listing(attempt_id=31)},
     {"submissions": listing(rows=2)},
 ])
@@ -634,6 +723,15 @@ def test_unverified_submission_is_unknown_and_not_retried(change):
         submit_learner(client, **IDENTITY, page=1, current=LAST)
     assert client._request.call_count == 2
     rpc.close.assert_called_once()
+
+
+def test_submit_page_save_rejected_by_the_server_is_unknown_before_the_final_request():
+    client, prep, _ = submit_client()
+    prep.status_code = 500
+    with pytest.raises(LearnerSubmitUnknownError):
+        submit_learner(client, **IDENTITY, page=1, current=LAST)
+    client._request.assert_called_once()
+    client.get_raw.assert_not_called()
 
 
 def test_submit_auth_expiry_after_the_page_save_is_unknown():
