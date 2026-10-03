@@ -82,14 +82,14 @@ def safe_upstream_text(value: object, *, fallback: str) -> str:
 
     Microsoft sometimes puts request bodies, cookies, flow tokens, or URLs in
     ``Message``/``ResultValue`` fields.  Those values must never be interpolated
-    into an exception or a JSON error document.  This helper intentionally
-    prefers a fixed category message whenever a sensitive marker is present.
+    into an exception or a JSON error document.  Only the fixed phrases in
+    ``_SAFE_UPSTREAM_PHRASES`` pass; any other text becomes *fallback*.
     """
     if not isinstance(value, str):
         return fallback
     text = " ".join(value.split())
-    # Upstream error strings are not an allowlist.  Keep unknown text opaque;
-    # callers can still use ``safe_diagnostic_text`` for structural metadata.
+    # Keep unknown upstream text opaque, even when it looks harmless; callers
+    # can still use ``safe_diagnostic_text`` for structural metadata.
     return text if text.casefold() in _SAFE_UPSTREAM_PHRASES else fallback
 
 
