@@ -11,10 +11,11 @@ import click
 
 from .display import JsonOutputCommand, format_user_error, output_json
 from .quiz_attempt_page import PreviewPageError, PreviewRefusedError
+from .quiz_learner_finish import LearnerNotSubmittedError, LearnerUnansweredError
 from .quiz_learner_session import UNCERTAIN, LearnerWorkflow, LearnerWorkflowError, parse_answers
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
-_WRITES = {"start", "answer", "next"}
+_CONFIRMED = {"start", "answer", "next", "submit", "forget"}
 _NOT_CURRENT = ("Brightspace did not return a supported current page of this attempt. If the attempt "
                 "changed elsewhere, run attempt start to continue it where Brightspace has it.")
 
@@ -24,8 +25,9 @@ def attempt() -> None:
     """Take your own quiz attempts as a learner. Attempts are graded, unlike previews.
 
     Start (or continue) an attempt, read its page, answer the questions on
-    it, and move on with Next. Every change is read back from Brightspace
-    before it is reported. Timed quizzes are not supported yet.
+    it, move on with Next, and submit from the last page. Every change is
+    read back from Brightspace before it is reported. Timed quizzes are not
+    supported yet.
     """
 
 
@@ -42,6 +44,11 @@ def _confirmed(operation: str, course_id: int, quiz_id: int) -> bool:
     if operation == "start":
         prompt = (f"Start or continue your attempt at quiz {quiz_id} in course {course_id}? "
                   "A new attempt uses one of your allowed attempts and is graded.")
+    elif operation == "submit":
+        prompt = f"Submit your attempt at quiz {quiz_id} in course {course_id}? A submitted attempt is final and graded."
+    elif operation == "forget":
+        prompt = (f"Forget the CLI's record of your attempt at quiz {quiz_id} in course {course_id}? "
+                  "Brightspace keeps the attempt, and the next start may begin a new graded attempt.")
     else:
         prompt = f"Run attempt {operation} for course {course_id}, quiz {quiz_id}?"
     return click.confirm(prompt, err=True)
@@ -56,7 +63,7 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
             _emit({"mode": "learner", "operation": operation, "course_id": course_id,
                    "quiz_id": quiz_id, "dry_run": True, "options": options}, json_output)
             return
-        if operation in _WRITES and not yes and not _confirmed(operation, course_id, quiz_id):
+        if operation in _CONFIRMED and not yes and not _confirmed(operation, course_id, quiz_id):
             click.echo("Operation cancelled. Use --yes for non-interactive quiz attempt changes.", err=True)
             if json_output:
                 output_json({"cancelled": True})
@@ -65,14 +72,19 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
         _emit(getattr(workflow, operation)(**options), json_output)
     except Exception as exc:
         # These carry only fixed, local messages; anything else is sanitized.
-        fixed = (LearnerWorkflowError, PreviewRefusedError, *UNCERTAIN)
+        fixed = (LearnerWorkflowError, LearnerUnansweredError, LearnerNotSubmittedError, PreviewRefusedError, *UNCERTAIN)
         if isinstance(exc, PreviewPageError):
             message = _NOT_CURRENT
         else:
             message = str(exc) if isinstance(exc, fixed) else format_user_error(exc)
-        click.echo(message, err=True)
+        unanswered = exc.questions if isinstance(exc, LearnerUnansweredError) else None
+        listed = "".join(f" Question {q['number']} (page {q['page']}) is unanswered." for q in unanswered or ())
+        click.echo(message + listed, err=True)
         if json_output:
-            output_json({"mode": "learner", "course_id": course_id, "quiz_id": quiz_id, "error": message})
+            error: dict[str, Any] = {"mode": "learner", "course_id": course_id, "quiz_id": quiz_id, "error": message}
+            if unanswered is not None:
+                error["unanswered"] = unanswered
+            output_json(error)
         raise SystemExit(1) from None
 
 
@@ -85,8 +97,8 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
 def start(course_id: int, quiz_id: int, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Continue the attempt in progress, or start a new one, and read its page.
 
-    Also reopens the attempt where Brightspace has it after a change that
-    could not be verified.
+    Once an attempt is open, until it is submitted only that attempt is
+    continued, where Brightspace has it; no new attempt is started.
     """
     _execute("start", course_id, quiz_id, json_output, yes, dry_run)
 
@@ -132,6 +144,51 @@ def next_page(course_id: int, quiz_id: int, allow_unanswered: bool, yes: bool, d
               json_output: bool) -> None:
     """Move to the next page. On a forward-only quiz there is no way back."""
     _execute("next", course_id, quiz_id, json_output, yes, dry_run, allow_unanswered=allow_unanswered)
+
+
+@attempt.command("submit", cls=JsonOutputCommand)
+@click.argument("course_id", type=_ID)
+@click.argument("quiz_id", type=_ID)
+@click.option("--allow-unanswered", is_flag=True, help="Submit even with unanswered questions in the quiz.")
+@click.option("--yes", is_flag=True)
+@click.option("--dry-run", is_flag=True)
+@click.option("--json", "json_output", is_flag=True)
+def submit(course_id: int, quiz_id: int, allow_unanswered: bool, yes: bool, dry_run: bool,
+           json_output: bool) -> None:
+    """Submit the attempt from its last page, once, and verify the receipt.
+
+    Unless --allow-unanswered, nothing is submitted while any question of the
+    quiz is unanswered: the page's answers are saved and the error lists the
+    unanswered questions. A submitted attempt is final.
+    """
+    _execute("submit", course_id, quiz_id, json_output, yes, dry_run, allow_unanswered=allow_unanswered)
+
+
+@attempt.command("verify", cls=JsonOutputCommand)
+@click.argument("course_id", type=_ID)
+@click.argument("quiz_id", type=_ID)
+@click.option("--json", "json_output", is_flag=True)
+def verify(course_id: int, quiz_id: int, json_output: bool) -> None:
+    """Check that the attempt was submitted, from its receipt and the submissions list.
+
+    Settles a submission that could not be verified, or reports that the
+    attempt is still in progress. Changes nothing on Brightspace.
+    """
+    _execute("verify", course_id, quiz_id, json_output)
+
+
+@attempt.command("forget", cls=JsonOutputCommand)
+@click.argument("course_id", type=_ID)
+@click.argument("quiz_id", type=_ID)
+@click.option("--yes", is_flag=True)
+@click.option("--json", "json_output", is_flag=True)
+def forget(course_id: int, quiz_id: int, yes: bool, json_output: bool) -> None:
+    """Drop the CLI's record of this quiz's attempt; Brightspace keeps the attempt.
+
+    For an attempt that ended outside the CLI and cannot be verified. The
+    next start may then begin a new graded attempt.
+    """
+    _execute("forget", course_id, quiz_id, json_output, yes)
 
 
 @attempt.command("images", cls=JsonOutputCommand)

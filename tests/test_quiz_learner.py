@@ -31,6 +31,7 @@ from lighthouse_cli.quiz_attempt_page import (
     unanswered_questions,
 )
 from lighthouse_cli.quiz_learner_finish import (
+    LearnerNotSubmittedError,
     LearnerSubmitUnknownError,
     LearnerUnansweredError,
     submit_learner,
@@ -638,7 +639,7 @@ def listing(*, attempt_id: int = 30, state: str = "", grade: str = "<label>6</la
 def submit_client(*, confirm: bytes | None = None, result: str = "parent.QuizDone(20,30,'0','0','0','gotoSv','')",
                   receipt: bytes = RECEIPT, submissions: bytes | None = None):
     client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(confirm or confirmation(), {}), (receipt, {}), (submissions or listing(), {})])
+    client.get_raw = Mock(side_effect=[(confirm or confirmation(), {}), (submissions or listing(), {}), (receipt, {})])
     prep = Mock(status_code=200)
     rpc = Mock(status_code=200)
     rpc.iter_content.return_value = [reply(result)]
@@ -664,7 +665,7 @@ def test_submit_saves_confirms_and_verifies_the_receipt_and_list_row():
         '{"param1":"20","param2":"30","param3":false,"param4":true,"param5":true,"param6":false,"param7":""}')
     assert final.kwargs["data"]["d2l_rf"] == "ProcessQuizSubmission"
     assert "isprv=&" in final.args[1] and "&pg=1&" in final.args[1]
-    assert "isprv=0" in client.get_raw.call_args_list[1].args[0]
+    assert "isprv=0" in client.get_raw.call_args_list[2].args[0]
     prep.close.assert_called_once()
     rpc.close.assert_called_once()
 
@@ -758,9 +759,18 @@ def test_submit_auth_expiry_after_the_page_save_is_unknown():
 
 def test_verification_reports_no_score_when_the_quiz_hides_it():
     client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(RECEIPT, {}), (listing(grade=""), {})])
+    client.get_raw = Mock(side_effect=[(listing(grade=""), {}), (RECEIPT, {})])
     result = verify_learner_submission(client, **IDENTITY)
     assert result["submitted"] and result["score"] is None and result["out_of"] is None
+
+
+@pytest.mark.parametrize("state", ["<label> (In progress)</label>", "<label> (IN PROGRESS)</label>"])
+def test_verification_reports_an_attempt_in_progress_without_reading_its_receipt(state):
+    client = LighthouseClient(read_only_auth=True)
+    client.get_raw = Mock(side_effect=[(listing(state=state), {})])
+    with pytest.raises(LearnerNotSubmittedError, match="still in progress"):
+        verify_learner_submission(client, **IDENTITY)
+    assert "quiz_submissions.d2l?" in client.get_raw.call_args.args[0]
 
 
 def test_verification_does_not_mask_an_expired_session():

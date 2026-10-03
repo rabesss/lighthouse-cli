@@ -32,12 +32,20 @@ from .request_protection import FormProtection
 
 REFUSE_QUIZ_UNANSWERED = ("The quiz has unanswered questions, so it was not submitted. "
                           "Answer them, or explicitly allow submitting with unanswered questions.")
+NOT_SUBMITTED = "This attempt is still in progress, so it has not been submitted. Run attempt start to continue it."
 _RECEIPT_HEADING = "Your work has been saved and submitted"
 
 
 class LearnerSubmitUnknownError(NetworkError):
     def __init__(self) -> None:
         super().__init__("Quiz submission could not be verified. Check the quiz's submissions before retrying.")
+
+
+class LearnerNotSubmittedError(ValueError):
+    """The submissions list shows the attempt in progress."""
+
+    def __init__(self) -> None:
+        super().__init__(NOT_SUBMITTED)
 
 
 class LearnerUnansweredError(ValueError):
@@ -77,24 +85,25 @@ def _attempt_row(body: bytes, *, course_id: int, quiz_id: int, attempt_id: int) 
 
 
 def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int) -> dict[str, Any]:
-    """Read-only: whether this attempt is submitted, from its receipt and list row.
+    """Read-only: whether this attempt is submitted, from its list row and receipt.
 
-    Raises ``LearnerSubmitUnknownError`` unless both pages agree. The score
-    is reported only when the quiz shows it to learners.
+    Raises ``LearnerNotSubmittedError`` when the list shows the attempt in
+    progress (its receipt is then not read), and ``LearnerSubmitUnknownError``
+    unless both pages agree it was submitted. The score is reported only
+    when the quiz shows it to learners.
     """
     try:
-        body, _ = client.get_raw(receipt_path(course_id, quiz_id, attempt_id), max_bytes=MAX_PAGE_BYTES,
-                                 _replay_safe=False, headers={"Cache-Control": "no-cache"})
-        soup = BeautifulSoup(body, "html.parser")
-        if (not any(h.get_text(" ", strip=True) == _RECEIPT_HEADING for h in soup.find_all("h2"))
-                or "still in progress" in soup.get_text(" ", strip=True).casefold()):
-            raise LearnerSubmitUnknownError()
         listing, _ = client.get_raw("/d2l/lms/quizzing/user/quiz_submissions.d2l?" + urlencode({"ou": course_id, "qi": quiz_id}),
                                     max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"})
         link, row = _attempt_row(listing, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
+        if "in progress" in " ".join(row.get_text(" ", strip=True).split()).casefold():
+            raise LearnerNotSubmittedError()
         number = re.fullmatch(r"Attempt ([0-9]{1,6})", link.get_text(" ", strip=True))
-        row_text = " ".join(row.get_text(" ", strip=True).split())
-        if number is None or "in progress" in row_text.casefold():
+        body, _ = client.get_raw(receipt_path(course_id, quiz_id, attempt_id), max_bytes=MAX_PAGE_BYTES,
+                                 _replay_safe=False, headers={"Cache-Control": "no-cache"})
+        soup = BeautifulSoup(body, "html.parser")
+        if (number is None or not any(h.get_text(" ", strip=True) == _RECEIPT_HEADING for h in soup.find_all("h2"))
+                or "still in progress" in soup.get_text(" ", strip=True).casefold()):
             raise LearnerSubmitUnknownError()
         grade = row.find("td", class_="d_gn")
         score = re.match(r"([0-9]{1,9}(?:\.[0-9]{1,4})?) / ([0-9]{1,9}(?:\.[0-9]{1,4})?)(?: |$)",
@@ -102,7 +111,7 @@ def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_
         return {"mode": "learner", "course_id": course_id, "quiz_id": quiz_id, "attempt_id": attempt_id,
                 "submitted": True, "attempt_number": int(number[1]),
                 "score": float(score[1]) if score else None, "out_of": float(score[2]) if score else None}
-    except SessionExpiredError:
+    except (SessionExpiredError, LearnerNotSubmittedError):
         raise
     except Exception:
         raise LearnerSubmitUnknownError() from None
@@ -177,6 +186,8 @@ def submit_learner(
             raise LearnerSubmitUnknownError()
         _close_response(response)
         response = None
+        # Still listed in progress after the final request: unknown, not
+        # "not submitted", as the request was sent.
         return verify_learner_submission(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
     except (LearnerUnansweredError, LearnerSubmitUnknownError):
         raise

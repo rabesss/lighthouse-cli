@@ -129,8 +129,8 @@ stderr. `--help` remains human-readable.
   the local download root (`--output-dir`, default `~/Downloads/lighthouse`).
 - **[REMOTE WRITE]:** `submit` sends a file to Brightspace. Instructor
   `quiz-create` and `assignment-create` create hidden assessments.
-  `student attempt start`, `answer` and `next` change your own graded quiz
-  attempt. These commands require confirmation unless `--yes` is supplied.
+  `student attempt start`, `answer`, `next` and `submit` change your own
+  graded quiz attempt. These commands require confirmation unless `--yes` is supplied.
 
 `download --dry-run` writes nothing: it does not
 create or replace a manifest, create directories, or download file bodies.
@@ -240,6 +240,12 @@ lighthouse student attempt answer COURSE_ID QUIZ_ID --answers '{"101": "CHOICE_I
 lighthouse student attempt next COURSE_ID QUIZ_ID --yes --json
 # Download the page's question images to view them:
 lighthouse student attempt images COURSE_ID QUIZ_ID --json
+# From the last page: submit once and verify the receipt (final and graded):
+lighthouse student attempt submit COURSE_ID QUIZ_ID --yes --json
+# Read-only: confirm the attempt was submitted:
+lighthouse student attempt verify COURSE_ID QUIZ_ID --json
+# Local only: drop the CLI's record of an attempt that ended elsewhere:
+lighthouse student attempt forget COURSE_ID QUIZ_ID --yes --json
 ```
 
 `start` also returns the quiz's name, whether it is forward-only and its
@@ -252,8 +258,18 @@ directory, or `--dir`). Next is refused on the last page and, unless
 `--allow-unanswered`, while a question is unanswered; `answer --next` checks
 that before saving anything. Every change is read back before it is
 reported. If one cannot be verified, `page` settles an answer save, and
-`start` reopens the attempt on the page Brightspace has. `status` reads the
-local cursor. Submitting and timed quizzes are not supported yet.
+`start` continues the attempt on the page Brightspace has. Once `start` has
+opened an attempt, until it is submitted `start` continues only that attempt
+and never begins a new one: if it ended elsewhere, `verify` checks whether it was submitted, and
+`forget` drops the CLI's record of it. `submit` is refused
+before anything is saved unless the cursor is on the last page; unless
+`--allow-unanswered`, it then stops while any question of the quiz is
+unanswered, listing them under `unanswered` (only the page's own answers were
+saved again). It reports the attempt number and, when the quiz shows it, the
+score. A submission that cannot be verified is settled with `verify`, which
+reads the submissions list and the receipt, and reports an attempt that is
+still in progress. `status` reads the local cursor.
+Timed quizzes are not supported yet.
 
 Question authoring, teacher grading and full
 course-administration parity are **not implemented** yet. Instructor question

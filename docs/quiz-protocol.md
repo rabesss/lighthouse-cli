@@ -270,7 +270,7 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
 
 | Area | Missing workflows / validation |
 | --- | --- |
-| Learner quizzes | Submit and receipt check commands (the transport has them), timed quizzes |
+| Learner quizzes | Timed quizzes |
 | Quiz authoring | Question creation/import/edit, sections/pools, settings updates, special access, grading |
 | Assignments | Learner text submission, group submission, instructor feedback/rubric grading |
 | Discussions | Create/reply/edit, attachments, moderation |
