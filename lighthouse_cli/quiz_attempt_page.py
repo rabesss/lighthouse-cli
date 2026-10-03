@@ -341,8 +341,12 @@ def _radio_id(radio: Tag, group: str) -> int:
     return _id(radio.get("value"))
 
 
+_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
+
+
 def _hidden(node: Tag) -> bool:
     return any(tag.has_attr("hidden") or "d2l-hidden" in tag.get_attribute_list("class")
+               or _HIDDEN_STYLE.search(str(tag.get("style", ""))) is not None
                for tag in (node, *node.parents))
 
 
