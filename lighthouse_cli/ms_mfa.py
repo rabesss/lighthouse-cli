@@ -80,19 +80,13 @@ def _parse_user_proofs(config: dict[str, Any]) -> list[UserProof]:
 def _proof_method_label(proof: UserProof) -> str:
     """Return a static, safe label for a Microsoft auth method id."""
     auth_id = proof.auth_method_id if isinstance(proof.auth_method_id, str) else ""
-    return _PROOF_METHOD_LABELS.get(
-        auth_id,
-        "Other verification method",
-    )
+    return _PROOF_METHOD_LABELS.get(auth_id, "Other verification method")
 
 
 def safe_auth_method_id(proof: UserProof) -> str:
     """Return a known method id or the fixed ``other`` category."""
     candidate = proof.auth_method_id if isinstance(proof.auth_method_id, str) else ""
-    for auth_id in _PROOF_METHOD_LABELS:
-        if candidate == auth_id:
-            return auth_id
-    return "other"
+    return candidate if candidate in _PROOF_METHOD_LABELS else "other"
 
 
 def _masked_proof_destination(proof: UserProof) -> str | None:
@@ -105,9 +99,6 @@ def _masked_proof_destination(proof: UserProof) -> str | None:
     """
     data = proof.data
     if not isinstance(data, str) or not data or len(data) > _MAX_PROOF_DATA_LENGTH:
-        return None
-    digits = re.sub(r"\D", "", data)
-    if len(digits) < 4:
         return None
     masked = _mask_phone_hint(data)
     return masked if _MASKED_PHONE_RE.fullmatch(masked) else None
@@ -179,7 +170,4 @@ def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
         )
 
     # auto: tenant default, else first registered method
-    for proof in proofs:
-        if proof.is_default:
-            return proof
-    return proofs[0]
+    return next((proof for proof in proofs if proof.is_default), proofs[0])
