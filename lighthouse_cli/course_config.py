@@ -13,21 +13,7 @@ from contextlib import suppress
 from .api import LighthouseClient
 from .config import CONFIG_DIR
 from .credential_store import _validate_credential_path
-from .display import (
-    error as _error,
-)
-from .display import (
-    output_json as _output_json,
-)
-from .display import (
-    print_table as _print_table,
-)
-from .display import (
-    safe_display_text,
-)
-from .display import (
-    short as _short,
-)
+from .display import error, output_json, print_table, safe_display_text, short
 from .utils import atomic_write
 
 COURSE_CONFIG_FILE = CONFIG_DIR / "course-config.json"
@@ -78,20 +64,16 @@ def _normalise_enrollment_catalog(enrollments: object) -> list[dict[str, str]]:
         return []
     courses: dict[int, dict[str, str]] = {}
     for enrollment in enrollments:
-        if not isinstance(enrollment, dict):
-            continue
-        org_unit = enrollment.get("OrgUnit")
+        org_unit = enrollment.get("OrgUnit") if isinstance(enrollment, dict) else None
         if not isinstance(org_unit, dict):
             continue
         course_id = _positive_course_id(org_unit.get("Id"))
         if course_id is None or course_id in courses:
             continue
-        name = _safe_catalog_text(org_unit.get("Name"), "Unknown course")
-        code = _safe_catalog_text(org_unit.get("Code"), "Unknown code")
         courses[course_id] = {
             "OrgUnitId": str(course_id),
-            "Name": name,
-            "Code": code,
+            "Name": _safe_catalog_text(org_unit.get("Name"), "Unknown course"),
+            "Code": _safe_catalog_text(org_unit.get("Code"), "Unknown code"),
         }
     return [courses[course_id] for course_id in sorted(courses)]
 
@@ -105,11 +87,15 @@ def semester_state(entry: Mapping[str, object] | None) -> dict[str, str]:
     This helper only reads the supplied mapping; it never writes config.
     """
     _, semester = _safe_tracked_labels(entry or {})
-    mapped = bool(semester.strip())
     return {
         "semester": semester,
-        "semester_source": "config" if mapped else "unmapped",
+        "semester_source": "config" if semester.strip() else "unmapped",
     }
+
+
+def _tracked_semester(tracked: object) -> str:
+    """Return a stored course's safe semester label, or "" when untracked."""
+    return _safe_tracked_labels(tracked)[1] if isinstance(tracked, Mapping) else ""
 
 
 def load() -> dict[str, dict[str, str]]:
@@ -121,48 +107,36 @@ def load() -> dict[str, dict[str, str]]:
         data = json.loads(COURSE_CONFIG_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeError):
         return {}
-    if not isinstance(data, dict):
-        return {}
-    tracked_courses = data.get("tracked_courses", {})
+    tracked_courses = data.get("tracked_courses", {}) if isinstance(data, dict) else None
     if not isinstance(tracked_courses, dict):
         return {}
 
     # Treat the file as untrusted input. One malformed course must not make
     # list/JSON output crash or prevent valid sibling entries from loading.
     normalized: dict[str, dict[str, str]] = {}
+    # JSON object keys are always strings, so only the entry type needs checking.
     for org_id, entry in tracked_courses.items():
-        if not isinstance(org_id, str) or not isinstance(entry, dict):
-            continue
         course_id = _positive_course_id(org_id)
-        if course_id is None:
+        if course_id is None or not isinstance(entry, dict):
             continue
-        name = entry.get("name", "")
-        semester = entry.get("semester", "")
         normalized[str(course_id)] = {
-            "name": _safe_catalog_text(name, ""),
-            "semester": _safe_catalog_text(semester, ""),
+            "name": _safe_catalog_text(entry.get("name", ""), ""),
+            "semester": _safe_catalog_text(entry.get("semester", ""), ""),
         }
     return normalized
 
 
 def _entries(config: dict[str, dict[str, str]]) -> list[dict[str, str]]:
     """Return tracked courses in the stable JSON/list display shape."""
-    normalized: list[tuple[int, dict[str, str]]] = []
-    seen_ids: set[int] = set()
+    first_by_id: dict[int, dict[str, str]] = {}
     for raw_oid, entry in config.items():
         course_id = _positive_course_id(raw_oid)
-        if course_id is None or not isinstance(entry, dict) or course_id in seen_ids:
-            continue
-        seen_ids.add(course_id)
-        normalized.append((course_id, entry))
+        if course_id is not None and isinstance(entry, dict):
+            first_by_id.setdefault(course_id, entry)
     entries: list[dict[str, str]] = []
-    for course_id, entry in sorted(normalized, key=lambda item: item[0]):
-        name, semester = _safe_tracked_labels(entry)
-        entries.append({
-            "id": str(course_id),
-            "name": name,
-            "semester": semester,
-        })
+    for course_id in sorted(first_by_id):
+        name, semester = _safe_tracked_labels(first_by_id[course_id])
+        entries.append({"id": str(course_id), "name": name, "semester": semester})
     return entries
 
 
@@ -181,11 +155,7 @@ def save(config: dict[str, dict[str, str]]) -> None:
 
 def _config_error(message: BaseException | str, json_output: bool) -> int:
     """Emit a config failure without violating the leaf JSON contract."""
-    return _error(
-        message,
-        json_output=json_output,
-        payload={"courses": []},
-    )
+    return error(message, json_output=json_output, payload={"courses": []})
 
 
 def cmd_config_courses(
@@ -213,7 +183,7 @@ def cmd_config_courses(
         except Exception as e:
             return _config_error(e, json_output)
         if json_output:
-            _output_json([])
+            output_json([])
         else:
             print("Course tracking config cleared.")
         return 0
@@ -221,33 +191,28 @@ def cmd_config_courses(
     # --remove ID: untrack a course
     if remove is not None:
         remove_id = _positive_course_id(remove)
-        config_id = (
-            next(
-                (
-                    raw_id
-                    for raw_id, entry in config.items()
-                    if _positive_course_id(raw_id) == remove_id
-                    and isinstance(entry, dict)
-                ),
-                None,
-            )
-            if remove_id is not None
-            else None
+        config_id = next(
+            (
+                raw_id
+                for raw_id, entry in config.items()
+                if remove_id is not None
+                and _positive_course_id(raw_id) == remove_id
+                and isinstance(entry, dict)
+            ),
+            None,
         )
         if config_id is None:
             return _config_error(
                 f"Course {remove} is not in your tracked courses.",
                 json_output,
             )
-        entry = config[config_id]
-        name, _ = _safe_tracked_labels(entry)
-        del config[config_id]
+        name, _ = _safe_tracked_labels(config.pop(config_id))
         try:
             save(config)
         except Exception as e:
             return _config_error(e, json_output)
         if json_output:
-            _output_json(_entries(config))
+            output_json(_entries(config))
         else:
             print(f"Stopped tracking {name} ({remove_id})")
         return 0
@@ -256,25 +221,24 @@ def cmd_config_courses(
     if list_courses or (json_output and add is None):
         if not config:
             if json_output:
-                _output_json([])
+                output_json([])
             else:
                 print("No courses tracked. Run: lighthouse config courses (without flags) to set up.")
             return 0
         entries = _entries(config)
         if json_output:
-            _output_json(entries)
+            output_json(entries)
             return 0
-        _print_table(
+        print_table(
             ["ID", "Name", "Semester"],
-            [[e["id"], _short(e["name"], 45), e["semester"].strip() or "Unmapped"] for e in entries],
+            [[e["id"], short(e["name"], 45), e["semester"].strip() or "Unmapped"] for e in entries],
             title=f"Tracked Courses ({len(entries)})",
         )
         return 0
 
     # Fetch enrollments (needed for both --add and interactive)
     try:
-        client = LighthouseClient()
-        all_enrollments = client.get_course_enrollments()
+        all_enrollments = LighthouseClient().get_course_enrollments()
     except Exception as e:
         return _config_error(e, json_output)
 
@@ -307,7 +271,7 @@ def cmd_config_courses(
         except Exception as e:
             return _config_error(e, json_output)
         if json_output:
-            _output_json(_entries(config))
+            output_json(_entries(config))
         else:
             print(f"Tracking {name} ({oid}){f' -> {semester}' if semester else ''}")
         return 0
@@ -318,19 +282,15 @@ def cmd_config_courses(
     table_rows = []
     for course in courses:
         tracked = config.get(course["OrgUnitId"])
-        tracked_semester = (
-            _safe_tracked_labels(tracked)[1]
-            if isinstance(tracked, Mapping)
-            else ""
-        )
+        tracked_semester = _tracked_semester(tracked)
         tracking = f"-> {tracked_semester}" if tracked_semester else ("tracked" if tracked else "")
         table_rows.append([
             course["OrgUnitId"],
-            _short(course["Name"], 40),
-            _short(course["Code"], 35),
+            short(course["Name"], 40),
+            short(course["Code"], 35),
             tracking,
         ])
-    _print_table(
+    print_table(
         ["ID", "Name", "Code", "Tracked"],
         table_rows,
         title=f"Enrolled Courses ({len(courses)})",
@@ -372,12 +332,7 @@ def cmd_config_courses(
     course_lookup = {c["OrgUnitId"]: c["Name"] for c in courses}
     for oid in sorted(selected_ids, key=lambda x: int(x) if x.isdigit() else 0):
         name = course_lookup.get(oid, oid)
-        tracked = config.get(oid)
-        existing = (
-            _safe_tracked_labels(tracked)[1]
-            if isinstance(tracked, Mapping)
-            else ""
-        )
+        existing = _tracked_semester(config.get(oid))
         prompt = f"  Semester for {name} ({oid}){' [' + existing + ']' if existing else ''}: "
         try:
             sem = input(prompt).strip()

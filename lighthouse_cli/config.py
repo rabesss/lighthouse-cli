@@ -107,12 +107,10 @@ def ensure_config_dir() -> Path:
 
 def missing_cookie_names(cookies: dict[str, str]) -> list[str]:
     """Return required D2L cookie names that are absent or empty."""
-    missing: list[str] = []
-    for name in COOKIE_NAMES:
-        value = cookies.get(name)
-        if value is None or not str(value).strip():
-            missing.append(name)
-    return missing
+    return [
+        name for name in COOKIE_NAMES
+        if (value := cookies.get(name)) is None or not str(value).strip()
+    ]
 
 
 def cookie_domain_accepted(domain: str) -> bool:
@@ -140,8 +138,7 @@ def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        name = entry.get("name")
-        value = entry.get("value")
+        name, value = entry.get("name"), entry.get("value")
         if not isinstance(name, str) or not name.startswith("d2l"):
             continue
         if not isinstance(value, str):
@@ -155,9 +152,7 @@ def d2l_cookies_from_entries(entries: object) -> dict[str, str]:
             else domain_scoped
         )
         target[name] = value
-    merged = dict(domain_scoped)
-    merged.update(host_only)
-    return merged
+    return {**domain_scoped, **host_only}
 
 
 def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, expected_origin: str | None = None) -> dict[str, str]:
@@ -171,21 +166,13 @@ def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, exp
     and leave the file byte-for-byte unchanged.
     """
     store = CredentialStore(config_dir=config_dir) if config_dir is not None else CredentialStore()
-    path = store.cookie_file
-    _validate_credential_path(store.config_dir)
-    _validate_credential_path(path)
-    if not path.exists():
-        return {}
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {}
-    if not isinstance(doc, dict):
+    doc = _read_cookie_document(store)
+    if doc is None:
         return {}
 
     if is_sealed_document(doc):
         try:
-            artifact = store.read_artifact(path)
+            artifact = store.read_artifact(store.cookie_file)
         except CredentialStoreError:
             # ``CredentialStoreError`` is normally safe, but this is a
             # non-auth read boundary and must not echo arbitrary exception
@@ -213,7 +200,7 @@ def load_cookies(*, read_only: bool = False, config_dir: Path | None = None, exp
         return {}
 
     # Legacy plaintext ({"cookies": ...} wrapper or flat dict).
-    cookies = _cookies_from_legacy_doc(doc)
+    cookies = _filter_cookie_names(doc.get("cookies") if "cookies" in doc else doc)
     legacy_extracted = doc.get("extracted_at")
     upgraded = _try_upgrade_plaintext_cookies(
         store,
@@ -262,36 +249,28 @@ def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) ->
 
 def get_cookie_age_days() -> float | None:
     """Return the age of stored cookies in days, or None if unavailable."""
-    store = CredentialStore()
-    path = store.cookie_file
-    _validate_credential_path(store.config_dir)
-    _validate_credential_path(path)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    ts_str = _trusted_iso_timestamp(data.get("extracted_at"))
+    data = _read_cookie_document(CredentialStore())
+    # _trusted_iso_timestamp only passes strings datetime.fromisoformat accepts.
+    ts_str = _trusted_iso_timestamp((data or {}).get("extracted_at"))
     if ts_str is None:
         return None
-    try:
-        extracted = datetime.fromisoformat(ts_str)
-        if extracted.tzinfo is None:
-            extracted = extracted.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - extracted).total_seconds() / 86400
-    except ValueError:
+    extracted = datetime.fromisoformat(ts_str)
+    if extracted.tzinfo is None:
+        extracted = extracted.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - extracted).total_seconds() / 86400
+
+
+def _read_cookie_document(store: CredentialStore) -> dict[str, Any] | None:
+    """Return the cookie file's JSON object, or None when absent or unreadable."""
+    _validate_credential_path(store.config_dir)
+    _validate_credential_path(store.cookie_file)
+    if not store.cookie_file.exists():
         return None
-
-
-def _cookies_from_legacy_doc(doc: dict[str, Any]) -> dict[str, str]:
-    """Extract cookies from a legacy plaintext document."""
-    source = doc.get("cookies") if "cookies" in doc else doc
-    if not isinstance(source, dict):
-        return {}
-    return _filter_cookie_names(source)
+    try:
+        doc = json.loads(store.cookie_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return doc if isinstance(doc, dict) else None
 
 
 def _filter_cookie_names(source: object) -> dict[str, str]:
@@ -383,15 +362,8 @@ def load_mfa_pending() -> dict[str, Any] | None:
         ) from None
     try:
         doc = _loads_strict_json(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        # A malformed checkpoint cannot be resumed safely.  Remove it so a
-        # later auth invocation does not repeatedly inspect untrusted bytes.
-        _discard_pending(path, None)
-        return None
-    if not isinstance(doc, dict):
-        _discard_pending(path, None)
-        return None
-
+    except ValueError:  # includes JSONDecodeError
+        doc = None
     if is_sealed_document(doc):
         artifact = store.read_artifact(path)
         if artifact is None:
@@ -404,8 +376,9 @@ def load_mfa_pending() -> dict[str, Any] | None:
             safe_metadata["mfa_method"] = mfa_method
         return {**secret, **safe_metadata, "version": FORMAT_VERSION}
 
-    version = doc.get("version")
-    _discard_pending(path, version)
+    # A malformed or unsealed checkpoint cannot be resumed safely.  Remove it so
+    # a later auth invocation does not repeatedly inspect untrusted bytes.
+    _discard_pending(path, doc.get("version") if isinstance(doc, dict) else None)
     return None
 
 

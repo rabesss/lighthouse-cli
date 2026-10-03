@@ -62,10 +62,8 @@ class SessionExpiredError(Exception):
         self.recovery = recovery
 
     def __str__(self) -> str:
-        parts = [super().__str__()]
-        if self.recovery:
-            parts.append(f"  Recovery: {self.recovery}")
-        return "\n".join(parts)
+        message = super().__str__()
+        return f"{message}\n  Recovery: {self.recovery}" if self.recovery else message
 
 
 class NetworkError(Exception):
@@ -109,16 +107,13 @@ class CourseNotFoundError(Exception):
 
 
 def _download_size_limit() -> int:
-    """Return the bounded binary-download limit configured for this process."""
+    """Return the configured binary-download limit; get_raw() checks its range."""
     raw = os.getenv(_MAX_DOWNLOAD_BYTES_ENV, "").strip()
     if not raw:
         return DEFAULT_MAX_DOWNLOAD_BYTES
     if not raw.isascii() or not raw.isdecimal() or len(raw) > 10:
         raise NetworkError("Binary download size limit is invalid.")
-    limit = int(raw)
-    if limit <= 0 or limit > MAX_CONFIGURABLE_DOWNLOAD_BYTES:
-        raise NetworkError("Binary download size limit is invalid.")
-    return limit
+    return int(raw)
 
 
 def _safe_http_error(response: Any) -> requests.HTTPError:
@@ -148,17 +143,11 @@ def _close_response(response: Any) -> None:
 
 def _positive_org_unit_id(value: Any) -> int | None:
     """Coerce a Brightspace org-unit ID, accepting only positive integers."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value > 0 else None
     if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
         with suppress(ValueError):
-            number = int(value)
-            return number if number > 0 else None
+            value = int(value.strip())
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
     return None
 
 
@@ -219,36 +208,32 @@ def _extract_rich_text(value: Any) -> str | None:
     cannot cause a recursion error or leak arbitrary content.
     """
     current = value
+    # Every visited object is in ``seen``, so its size is the nesting depth.
     seen: set[int] = set()
-    depth = 0
     blank: str | None = None
     while True:
         if isinstance(current, str):
             return current
         if current is None:
             return None
-        if not isinstance(current, dict):
+        if (
+            not isinstance(current, dict)
+            or len(seen) >= _MAX_RICH_TEXT_DEPTH
+            or id(current) in seen
+        ):
             raise ContentResponseShapeError()
-        if depth >= _MAX_RICH_TEXT_DEPTH:
-            raise ContentResponseShapeError()
-        object_id = id(current)
-        if object_id in seen:
-            raise ContentResponseShapeError()
-        seen.add(object_id)
-        depth += 1
+        seen.add(id(current))
 
         if current and not any(
             key in current for key in ("Html", "html", "HTML", "Text")
         ):
             raise ContentResponseShapeError()
 
-        html_value: Any = _MISSING
-        for key in ("Html", "html", "HTML"):
-            if key in current:
-                html_value = current[key]
-                break
-        text_value = current.get("Text", _MISSING)
-        for candidate in (html_value, text_value):
+        html_value: Any = next(
+            (current[key] for key in ("Html", "html", "HTML") if key in current), _MISSING
+        )
+        candidates = (html_value, current.get("Text", _MISSING))
+        for candidate in candidates:
             if candidate is not _MISSING and candidate is not None and not isinstance(
                 candidate, (str, dict)
             ):
@@ -257,35 +242,23 @@ def _extract_rich_text(value: Any) -> str | None:
         # Prefer actual HTML when it is present and non-empty.  Keep an empty
         # scalar as a fallback so an explicitly empty RichText remains a
         # valid, bytes-valued response.
-        for candidate in (html_value, text_value):
+        for candidate in candidates:
             if isinstance(candidate, str):
                 if candidate:
                     return candidate
-                if blank is None:
-                    blank = candidate
+                blank = ""
 
         # If no scalar was available, follow one nested RichText object.  The
         # HTML key wins over Text to mirror the scalar preference above.
-        nested = next(
-            (
-                candidate
-                for candidate in (html_value, text_value)
-                if isinstance(candidate, dict)
-            ),
-            _MISSING,
-        )
-        if nested is _MISSING:
+        nested = [candidate for candidate in candidates if isinstance(candidate, dict)]
+        if not nested:
             return blank
-        current = nested
+        current = nested[0]
 
 
-def _normalise_course_enrollment(
-    enrollment: Any,
-) -> dict[str, Any] | None:
+def _normalise_course_enrollment(enrollment: Any) -> dict[str, Any] | None:
     """Project one raw enrollment into the public course-list shape."""
-    if not isinstance(enrollment, dict):
-        return None
-    org_unit = enrollment.get("OrgUnit")
+    org_unit = enrollment.get("OrgUnit") if isinstance(enrollment, dict) else None
     if not isinstance(org_unit, dict):
         return None
 
@@ -319,9 +292,12 @@ _SESSION_EXPIRED_RECOVERY = (
 )
 
 
-def _session_expired_msg(detail: str = "") -> str:
-    """Build a short session-expired message."""
-    return f"Session expired{' (' + detail + ')' if detail else ''}. Run: lighthouse auth login"
+def _session_expired(detail: str) -> SessionExpiredError:
+    """Build the short session-expired error with the standard recovery hint."""
+    return SessionExpiredError(
+        f"Session expired ({detail}). Run: lighthouse auth login",
+        recovery=_SESSION_EXPIRED_RECOVERY,
+    )
 
 
 def _is_login_redirect(location: object) -> bool:
@@ -340,6 +316,27 @@ def _is_login_redirect(location: object) -> bool:
     )
 
 
+def _raise_for_redirect(resp: requests.Response, *, allow_other: bool = False) -> None:
+    """Reject redirects; D2L redirects to its login page when the session is dead."""
+    if resp.status_code in (301, 302, 303, 307, 308):
+        if _is_login_redirect(resp.headers.get("Location", "")):
+            raise _session_expired(f"HTTP {resp.status_code} redirect to login")
+        if not allow_other:
+            raise NetworkError("The server returned an unexpected redirect.")
+
+
+def _check_status(resp: requests.Response) -> None:
+    """Raise for an error status without the URL or adapter text requests adds."""
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        raise _safe_http_error(resp) from None
+    except Exception:
+        # A custom response adapter should not be able to leak a raw
+        # response/URL through an unexpected validation exception either.
+        raise NetworkError("Network response validation failed.") from None
+
+
 def _submission_response_result(
     resp: requests.Response,
     *,
@@ -347,13 +344,7 @@ def _submission_response_result(
     folder_id: int,
 ) -> dict[str, Any]:
     """Validate one submission response without leaking its body or URL."""
-    if resp.status_code in (301, 302, 303, 307, 308):
-        if _is_login_redirect(resp.headers.get("Location", "")):
-            raise SessionExpiredError(
-                _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
-                recovery=_SESSION_EXPIRED_RECOVERY,
-            )
-        raise NetworkError("The server returned an unexpected redirect.")
+    _raise_for_redirect(resp)
     if resp.status_code == 403:
         raise PermissionError(
             f"Permission denied to submit to folder {folder_id}. "
@@ -371,12 +362,7 @@ def _submission_response_result(
             "D2L API error (500): the remote server rejected the submission. "
             "This may indicate malformed request body or submission window restrictions."
         )
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError:
-        raise _safe_http_error(resp) from None
-    except Exception:
-        raise NetworkError("Network response validation failed.") from None
+    _check_status(resp)
     try:
         result = resp.json()
     except (TypeError, ValueError):
@@ -479,9 +465,8 @@ class LighthouseClient:
             _replay_safe: False for legacy GET routes that create state, such
                 as preview start. Disables retries and automatic auth replay.
         """
-        cookies = self.cookies
-        if missing_cookie_names(cookies):
-            raise SessionExpiredError(_session_expired_msg("no cookies found"), recovery=_SESSION_EXPIRED_RECOVERY)
+        if missing_cookie_names(self.cookies):
+            raise _session_expired("no cookies found")
 
         retryable = method.upper() in self._RETRYABLE_METHODS and _replay_safe
         refresh_attempted = False
@@ -497,26 +482,16 @@ class LighthouseClient:
                     # cookie persistence for GET/HEAD requests.
                     raise
                 if refresh_attempted:
-                    raise SessionExpiredError(
-                        _session_expired_msg("auto-refresh already attempted"),
-                        recovery=_SESSION_EXPIRED_RECOVERY,
-                    ) from None
+                    raise _session_expired("auto-refresh already attempted") from None
                 refresh_attempted = True
                 print("Session expired. Refreshing from browser...", file=sys.stderr)
                 try:
                     new_cookies = refresh_auth_from_browser()
                 except Exception:
-                    raise SessionExpiredError(
-                        _session_expired_msg("auto-refresh failed"),
-                        recovery=_SESSION_EXPIRED_RECOVERY,
-                    ) from None
+                    raise _session_expired("auto-refresh failed") from None
 
-                missing = missing_cookie_names(new_cookies)
-                if missing:
-                    raise SessionExpiredError(
-                        _session_expired_msg(f"CDP cookies missing: {missing}"),
-                        recovery=_SESSION_EXPIRED_RECOVERY,
-                    ) from None
+                if missing := missing_cookie_names(new_cookies):
+                    raise _session_expired(f"CDP cookies missing: {missing}") from None
 
                 save_cookies(new_cookies)
                 self._cookies = new_cookies
@@ -554,62 +529,31 @@ class LighthouseClient:
                 time.sleep(self._RETRY_BACKOFF * (2 ** attempt))
                 continue
 
-            # D2L redirects to login page when session is dead
-            if resp.status_code in (301, 302, 303, 307, 308):
-                if _is_login_redirect(resp.headers.get("Location", "")):
-                    _close_response(resp)
-                    raise SessionExpiredError(
-                        _session_expired_msg(f"HTTP {resp.status_code} redirect to login"),
-                        recovery=_SESSION_EXPIRED_RECOVERY,
-                    )
-                if not skip_raise:
-                    _close_response(resp)
-                    raise NetworkError("The server returned an unexpected redirect.")
-
-            if resp.status_code == 401:
-                _close_response(resp)
-                raise SessionExpiredError(
-                    _session_expired_msg("HTTP 401 Unauthorized"),
-                    recovery=_SESSION_EXPIRED_RECOVERY,
-                )
-
-            # Rate-limit: retry with backoff
+            # Rate-limit: retry with backoff (a 429 is never a redirect or 401)
             if resp.status_code == 429 and retryable and attempt < max_attempts - 1:
-                fallback = self._RETRY_BACKOFF * (2 ** attempt)
-                retry_after = resp.headers.get("Retry-After")
-                try:
-                    server_delay = float(retry_after) if retry_after is not None else None
-                except (TypeError, ValueError):
-                    server_delay = None
-
-                # Retry-After is untrusted input.  Invalid, non-finite, and
-                # negative values use the normal exponential fallback.  A
-                # valid server delay is authoritative (do not exponentiate it)
-                # but is capped to keep a malicious response from stalling the
-                # CLI indefinitely.
-                if server_delay is None or not math.isfinite(server_delay) or server_delay < 0:
-                    delay = fallback
-                else:
-                    delay = min(server_delay, self._MAX_RETRY_AFTER)
+                # Retry-After is untrusted input.  Missing, invalid,
+                # non-finite, and negative values use the normal exponential
+                # fallback.  A valid server delay is authoritative (do not
+                # exponentiate it) but is capped to keep a malicious response
+                # from stalling the CLI indefinitely.
+                delay: float = self._RETRY_BACKOFF * (2 ** attempt)
+                with suppress(TypeError, ValueError):
+                    server_delay = float(resp.headers.get("Retry-After", ""))
+                    if math.isfinite(server_delay) and server_delay >= 0:
+                        delay = min(server_delay, self._MAX_RETRY_AFTER)
                 _close_response(resp)
                 time.sleep(delay)
                 continue
 
-            if not skip_raise:
-                try:
-                    resp.raise_for_status()
-                except requests.HTTPError:
-                    # Do not let requests copy the URL (or any adapter
-                    # diagnostics) into the exception text.
-                    error = _safe_http_error(resp)
-                    _close_response(resp)
-                    raise error from None
-                except Exception:
-                    # A custom response adapter should not be able to leak a
-                    # raw response/URL through an unexpected validation
-                    # exception either.
-                    _close_response(resp)
-                    raise NetworkError("Network response validation failed.") from None
+            try:
+                _raise_for_redirect(resp, allow_other=skip_raise)
+                if resp.status_code == 401:
+                    raise _session_expired("HTTP 401 Unauthorized")
+                if not skip_raise:
+                    _check_status(resp)
+            except Exception:
+                _close_response(resp)
+                raise
             return resp
 
         # All retries exhausted
@@ -880,9 +824,7 @@ class LighthouseClient:
     def get_my_grades(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET my grade values for a course (handles pagination)."""
         course_id = _require_positive_endpoint_id(org_unit_id, "org_unit_id")
-        return self._paginate_list(
-            f"/{course_id}/grades/values/myGradeValues/", "Objects"
-        )
+        return self._paginate_list(f"/{course_id}/grades/values/myGradeValues/", "Objects")
 
     def get_quizzes(self, org_unit_id: int) -> list[dict[str, Any]]:
         """GET quizzes for a course (handles pagination)."""
@@ -977,16 +919,15 @@ class LighthouseClient:
         # HTML topics have appeared as a direct string, Body.Text, or nested
         # RichText (Body.Text.Html).  Try the body first, then top-level HTML
         # fields when the body is absent/empty.
-        body_shape_error = False
+        shape_error = False
         try:
             html_content = _extract_rich_text(data.get("Body"))
         except ContentResponseShapeError:
             # Some Brightspace responses include an unrelated/legacy Body
             # object while exposing the usable markup at the top level.
-            body_shape_error = True
+            shape_error = True
             html_content = None
 
-        top_level_shape_error = False
         if not html_content:
             for key in ("Html", "html", "HTML"):
                 if key not in data:
@@ -994,7 +935,7 @@ class LighthouseClient:
                 try:
                     candidate = _extract_rich_text(data[key])
                 except ContentResponseShapeError:
-                    top_level_shape_error = True
+                    shape_error = True
                     continue
                 if candidate:
                     html_content = candidate
@@ -1003,7 +944,7 @@ class LighthouseClient:
                     html_content = candidate
 
         if html_content is None:
-            if body_shape_error or top_level_shape_error:
+            if shape_error:
                 raise ContentResponseShapeError()
             html_content = ""
 
@@ -1114,13 +1055,12 @@ class LighthouseClient:
         # homepage CSRF bootstrap. Reuse a token already held in memory when a
         # preceding assessment operation obtained one, without adding a GET to
         # the file-submission fast path.
-        csrf_token = self._csrf_token
         headers = {
             "Content-Type": f"multipart/mixed; boundary={boundary}",
             "Content-Length": str(len(payload)),
         }
-        if csrf_token is not None:
-            headers["X-Csrf-Token"] = csrf_token
+        if self._csrf_token is not None:
+            headers["X-Csrf-Token"] = self._csrf_token
         resp = self._request(
             "POST",
             f"{self.api_le}/{course_id}/dropbox/folders/{dropbox_id}/submissions/mysubmissions/",
@@ -1285,10 +1225,8 @@ def refresh_auth_from_browser(cdp_port: int | None = None) -> dict[str, str]:
         raise NetworkError("CDP port must be an integer from 1 to 65535.")
 
     # Strategy 1: try browser-harness CLI if available
-    try:
+    with suppress(FileNotFoundError, _BrowserHarnessFallbackError):
         return _refresh_via_browser_harness(port)
-    except (FileNotFoundError, _BrowserHarnessFallbackError):
-        pass
 
     # Strategy 2: direct CDP WebSocket via Python websockets library
     return _refresh_via_cdp_websocket(port)
@@ -1453,7 +1391,6 @@ def _validate_cdp_websocket_url(
 async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
     """Extract cookies via CDP using the websockets Python library."""
     import asyncio
-    import json as _json
 
     import websockets
 
@@ -1465,23 +1402,17 @@ async def _cdp_get_cookies_ws(ws_url: str) -> dict[str, str]:
             open_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
             close_timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
         ) as ws:
-            await ws.send(_json.dumps({"id": 1, "method": "Network.getAllCookies"}))
-            response_text = await ws.recv()
-            return _json.loads(response_text)
+            await ws.send(json.dumps({"id": 1, "method": "Network.getAllCookies"}))
+            return json.loads(await ws.recv())
 
     try:
-        resp = await asyncio.wait_for(
-            exchange(),
-            timeout=CDP_RESPONSE_TIMEOUT_SECONDS,
-        )
+        resp = await asyncio.wait_for(exchange(), timeout=CDP_RESPONSE_TIMEOUT_SECONDS)
     except NetworkError:
         raise
     except Exception:
         raise NetworkError("The local browser cookie connection failed.") from None
 
-    if not isinstance(resp, dict):
-        raise NetworkError("The local browser returned invalid cookie data.")
-    result = resp.get("result")
+    result = resp.get("result") if isinstance(resp, dict) else None
     if not isinstance(result, dict):
         raise NetworkError("The local browser returned invalid cookie data.")
     d2l = d2l_cookies_from_entries(result.get("cookies"))
