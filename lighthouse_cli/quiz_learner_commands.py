@@ -15,6 +15,8 @@ from .quiz_learner_session import UNCERTAIN, LearnerWorkflow, LearnerWorkflowErr
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
 _WRITES = {"start", "answer", "next"}
+_NOT_CURRENT = ("Brightspace did not return a supported current page of this attempt. If the attempt "
+                "changed elsewhere, run attempt start to continue it where Brightspace has it.")
 
 
 @click.group()
@@ -63,8 +65,11 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
         _emit(getattr(workflow, operation)(**options), json_output)
     except Exception as exc:
         # These carry only fixed, local messages; anything else is sanitized.
-        fixed = (LearnerWorkflowError, PreviewRefusedError, PreviewPageError, *UNCERTAIN)
-        message = str(exc) if isinstance(exc, fixed) else format_user_error(exc)
+        fixed = (LearnerWorkflowError, PreviewRefusedError, *UNCERTAIN)
+        if isinstance(exc, PreviewPageError):
+            message = _NOT_CURRENT
+        else:
+            message = str(exc) if isinstance(exc, fixed) else format_user_error(exc)
         click.echo(message, err=True)
         if json_output:
             output_json({"mode": "learner", "course_id": course_id, "quiz_id": quiz_id, "error": message})

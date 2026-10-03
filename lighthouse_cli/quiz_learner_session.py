@@ -54,25 +54,37 @@ _NOT_OPEN = "No attempt of this quiz is open in the CLI. Run attempt start."
 _REOPEN = "The last change could not be verified. Run attempt start to reopen the attempt where Brightspace has it."
 _SAVE_UNVERIFIED = "The last answer save could not be verified. Run attempt page to read what Brightspace stored."
 _OTHER_ACCOUNT = "The saved attempt belongs to a different signed-in account."
+_OTHER_UNSETTLED = ("A change by a different signed-in account to this quiz could not be verified. "
+                    "Sign in as that account and run attempt start to settle it.")
+_NOT_CONTINUABLE = ("The attempt whose last change could not be verified cannot be continued, "
+                    "so no new attempt was started. Check it in Brightspace.")
 _SETTINGS = "The quiz settings could not be read, so nothing was started."
 _TIMED = "Timed quizzes are not supported yet, so nothing was started."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
             'a list of option ids, or a list of blank texts, e.g. {"101": "o2"}.')
 _IMAGE_FAILED = "The image could not be downloaded."
+_IMAGE_NOT_SAVED = "The image could not be saved."
 _IMAGE_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+
+
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise LearnerWorkflowError(_ANSWERS)
+    return dict(pairs)
 
 
 def parse_answers(text: str) -> dict[int, object]:
     """``{"<question id>": answer}`` JSON as the page's answers; each answer is checked on the page."""
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_unique_keys)
     except (TypeError, ValueError):
         data = None
     if not isinstance(data, dict) or not data:
         raise LearnerWorkflowError(_ANSWERS)
     answers: dict[int, object] = {}
     for key, value in data.items():
-        valid_key = key.isascii() and key.isdigit() and key == str(int(key)) and 0 < int(key) < 10**18
+        valid_key = (key.isascii() and key.isdigit() and len(key) <= 18
+                     and key == str(int(key)) and 0 < int(key) < 10**18)
         valid_value = isinstance(value, str) or (isinstance(value, list) and all(isinstance(item, str) for item in value))
         if not (valid_key and valid_value):
             raise LearnerWorkflowError(_ANSWERS)
@@ -92,18 +104,45 @@ def quiz_info(quiz: object) -> dict[str, Any]:
     if quiz["SubmissionTimeLimit"]["IsEnforced"]:
         raise LearnerWorkflowError(_TIMED)
     attempts = quiz.get("AttemptsAllowed")
-    allowed = None
-    if isinstance(attempts, dict) and attempts.get("IsUnlimited") is False:
-        allowed = attempts.get("NumberOfAttemptsAllowed")
+    if not isinstance(attempts, dict) or type(attempts.get("IsUnlimited")) is not bool:
+        raise LearnerWorkflowError(_SETTINGS)
+    allowed = None if attempts["IsUnlimited"] else attempts.get("NumberOfAttemptsAllowed")
+    if not attempts["IsUnlimited"] and (type(allowed) is not int or allowed < 1):
+        raise LearnerWorkflowError(_SETTINGS)
     name = quiz.get("Name")
     return {"name": name if isinstance(name, str) else None, "forward_only": quiz["PreventMovingBackwards"],
-            "attempts_allowed": allowed if type(allowed) is int else None}
+            "attempts_allowed": allowed}
 
 
 def _write_image(path: Path, data: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    # O_NONBLOCK: a FIFO planted under the image's name fails instead of blocking.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600)
     with os.fdopen(descriptor, "wb") as handle:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("Not a regular file.")
+        os.fchmod(descriptor, 0o600)  # also when replacing an existing file
         handle.write(data)
+
+
+def _save_image(client: LighthouseClient, directory: Path, question: Mapping[str, Any],
+                image: Mapping[str, Any]) -> dict[str, Any]:
+    """One image's entry: the file it was saved to, or why it was not."""
+    entry: dict[str, Any] = {"question_id": question["question_id"], "image": image["number"], "alt": image["alt"]}
+    try:
+        data, media_type = read_quiz_image(client, image["src"])
+    except SessionExpiredError:
+        raise
+    except PreviewRefusedError as exc:
+        return {**entry, "error": str(exc)}
+    except (NetworkError, OSError, ValueError):
+        return {**entry, "error": _IMAGE_FAILED}
+    path = directory / f"question-{question['number']}-image-{image['number']}{_IMAGE_SUFFIXES[media_type]}"
+    try:
+        _write_image(path, data)
+    except OSError:
+        return {**entry, "error": _IMAGE_NOT_SAVED}
+    return {**entry, "path": str(path), "media_type": media_type}
 
 
 class LearnerWorkflow:
@@ -178,13 +217,13 @@ class LearnerWorkflow:
         state = self._load()
         if state is None:
             raise LearnerWorkflowError(_NOT_OPEN)
+        if self._actor(client) != state["actor_id"]:
+            raise LearnerWorkflowError(_OTHER_ACCOUNT)
         if state["status"] == "uncertain":
             if state["operation"] != "answer":
                 raise LearnerWorkflowError(_REOPEN)
             if not unverified_save:
                 raise LearnerWorkflowError(_SAVE_UNVERIFIED)
-        if self._actor(client) != state["actor_id"]:
-            raise LearnerWorkflowError(_OTHER_ACCOUNT)
         return state
 
     def _identity(self, state: dict[str, Any]) -> dict[str, int]:
@@ -229,8 +268,16 @@ class LearnerWorkflow:
             except LearnerWorkflowError:  # replaced, as starting reads everything from Brightspace
                 previous = None
             actor = self._actor(client)
+            unsettled = previous if previous is not None and previous["status"] == "uncertain" else None
+            if unsettled is not None and unsettled["actor_id"] != actor:
+                raise LearnerWorkflowError(_OTHER_UNSETTLED)
             info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
             summary = read_learner_summary(client, course_id=self.course_id, quiz_id=self.quiz_id)
+            # A known attempt with an unverified change may only be continued:
+            # if it cannot be, a new start would use another graded attempt.
+            continue_only = unsettled is not None and unsettled["attempt_id"] is not None
+            if continue_only and not summary.can_continue:
+                raise LearnerWorkflowError(_NOT_CONTINUABLE)
             state: dict[str, Any] = {
                 "version": 1, "origin": self.connection.origin, "mode": "learner", "actor_id": actor,
                 "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "uncertain",
@@ -244,7 +291,7 @@ class LearnerWorkflow:
 
             try:
                 page = start_learner(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                     on_identity=seal, summary=summary)
+                                     continue_only=continue_only, on_identity=seal, summary=summary)
             except LearnerStartUnknownError:
                 raise
             except Exception:
@@ -311,25 +358,9 @@ class LearnerWorkflow:
             if directory is None:
                 directory = Path(tempfile.mkdtemp(prefix="lighthouse-quiz-images-"))
             else:
-                directory.mkdir(parents=True, exist_ok=True)
-            images = []
-            for question in questions:
-                for image in question["images"]:
-                    entry: dict[str, Any] = {"question_id": question["question_id"], "image": image["number"],
-                                             "alt": image["alt"]}
-                    try:
-                        data, media_type = read_quiz_image(client, image["src"])
-                    except SessionExpiredError:
-                        raise
-                    except PreviewRefusedError as exc:
-                        entry["error"] = str(exc)
-                    except (NetworkError, OSError, ValueError):
-                        entry["error"] = _IMAGE_FAILED
-                    else:
-                        path = directory / f"question-{question['number']}-image-{image['number']}{_IMAGE_SUFFIXES[media_type]}"
-                        _write_image(path, data)
-                        entry.update(path=str(path), media_type=media_type)
-                    images.append(entry)
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            images = [_save_image(client, directory, question, image)
+                      for question in questions for image in question["images"]]
             return {"mode": "learner", "course_id": self.course_id, "quiz_id": self.quiz_id,
                     "attempt_id": current.attempt_id, "page": current.page, "directory": str(directory),
                     "images": images}

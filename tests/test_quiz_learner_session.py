@@ -18,6 +18,7 @@ from lighthouse_cli.quiz_attempt_page import (
     REFUSE_LEARNER_LAST_PAGE,
     REFUSE_LEARNER_NOT_ON_PAGE,
     REFUSE_LEARNER_UNANSWERED,
+    PreviewPageError,
     PreviewRefusedError,
 )
 from lighthouse_cli.quiz_learner_session import (
@@ -110,6 +111,10 @@ def test_start_continues_the_attempt_in_progress(remote):
     ({**QUIZ, "SubmissionTimeLimit": {"IsEnforced": True}}, "Timed quizzes are not supported yet"),
     ({**QUIZ, "SubmissionTimeLimit": None}, "could not be read"),
     ({**QUIZ, "PreventMovingBackwards": 1}, "could not be read"),
+    ({**QUIZ, "AttemptsAllowed": None}, "could not be read"),
+    ({**QUIZ, "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": None}}, "could not be read"),
+    ({**QUIZ, "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": 2.0}}, "could not be read"),
+    ({**QUIZ, "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": 0}}, "could not be read"),
     ([], "could not be read"),
 ])
 def test_a_quiz_the_cli_cannot_take_is_refused_before_anything_is_sent(remote, quiz, message):
@@ -127,7 +132,7 @@ def test_a_quiz_the_cli_cannot_take_is_refused_before_anything_is_sent(remote, q
 def test_unlimited_attempts_read_as_none():
     assert quiz_info({**QUIZ, "AttemptsAllowed": {"IsUnlimited": True, "NumberOfAttemptsAllowed": None}})[
         "attempts_allowed"] is None
-    assert quiz_info({**QUIZ, "AttemptsAllowed": None, "Name": None}) == {
+    assert quiz_info({**QUIZ, "AttemptsAllowed": {"IsUnlimited": True}, "Name": None}) == {
         "name": None, "forward_only": True, "attempts_allowed": None}
 
 
@@ -173,6 +178,46 @@ def test_an_unknown_start_without_an_identity_is_kept(remote):
             workflow.start()
     status = workflow.status()
     assert (status["status"], status["attempt_id"], status["page"]) == ("uncertain", None, None)
+    # No attempt is known to exist, so starting again may start one.
+    with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
+        workflow.start()
+    assert started.call_args.kwargs["continue_only"] is False
+
+
+@pytest.mark.parametrize("operation", ["start", "answer", "next"])
+def test_a_known_attempt_with_an_unverified_change_is_only_continued(remote, operation):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    workflow._save({**saved(workflow), "status": "uncertain", "operation": operation})
+    before = saved(workflow)
+    with patch(f"{SESSION}.start_learner") as started:
+        with pytest.raises(LearnerWorkflowError, match="no new attempt was started"):
+            workflow.start()
+    started.assert_not_called()
+    assert saved(workflow) == before
+    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+            patch(f"{SESSION}.start_learner", return_value=open_page(2)) as started:
+        workflow.start()
+    assert started.call_args.kwargs["continue_only"] is True
+    assert (workflow.status()["status"], workflow.status()["page"]) == ("active", 2)
+
+
+def test_another_accounts_unverified_change_is_never_replaced(remote):
+    client, state, _ = remote
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    state["actor"] = 8
+    start(workflow)  # an active cursor of another account is replaced
+    assert saved(workflow)["actor_id"] == 8
+    workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
+    before = saved(workflow)
+    state["actor"] = 7
+    with patch(f"{SESSION}.start_learner") as started:
+        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
+            workflow.start()
+    started.assert_not_called()
+    client.get_quiz_detail.assert_called()
+    assert saved(workflow) == before
 
 
 # -- answers and Next -----------------------------------------------------------
@@ -210,6 +255,19 @@ def test_answer_and_next_is_checked_before_anything_is_saved(remote, current, an
     save.assert_not_called()
     advance.assert_not_called()
     assert workflow.status()["status"] == "active"
+
+
+def test_a_next_refused_after_the_save_keeps_the_saved_answers(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
+            patch(f"{SESSION}.save_learner_answers", return_value=open_page(content=ANSWERED)) as save, \
+            patch(f"{SESSION}.advance_learner", side_effect=PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)):
+        with pytest.raises(PreviewRefusedError):
+            workflow.answer({101: "o2"}, advance=True, allow_unanswered=True)
+    save.assert_called_once()
+    assert workflow.status() == {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
+                                 "attempt_id": 30, "page": 1, "operation": None}
 
 
 def test_unanswered_questions_can_be_left_explicitly(remote):
@@ -279,6 +337,10 @@ def test_another_account_cannot_use_the_cursor(remote):
     start(workflow)
     state["actor"] = 8
     with patch(f"{SESSION}.read_learner_page") as read:
+        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
+            workflow.page()
+        # Also when the cursor would otherwise ask for a restart.
+        workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
         with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
             workflow.page()
     read.assert_not_called()
@@ -362,6 +424,7 @@ def test_images_are_saved_privately_with_failures_reported_per_image(remote, tmp
     ]
     assert path.read_bytes() == PNG
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
 
 
 def test_one_questions_images_go_to_a_new_private_directory(remote):
@@ -398,12 +461,39 @@ def test_a_symlinked_image_file_is_never_followed(remote, tmp_path):
     start(workflow)
     outside = tmp_path / "outside"
     outside.write_bytes(b"keep")
-    (tmp_path / "question-2-image-1.png").symlink_to(outside)
+    (tmp_path / "question-1-image-1.png").symlink_to(outside)
     with patch(f"{SESSION}.read_learner_page", return_value=image_page()), \
             patch(f"{SESSION}.read_quiz_image", return_value=(PNG, "image/png")):
-        with pytest.raises(OSError):
-            workflow.images(question_id=102, directory=tmp_path)
+        result = workflow.images(directory=tmp_path)
     assert outside.read_bytes() == b"keep"
+    # Reported for that image alone; the others are still saved.
+    assert result["images"][0] == {"question_id": 101, "image": 1, "alt": "graph",
+                                   "error": "The image could not be saved."}
+    assert [image["path"] for image in result["images"][1:]] == [
+        str(tmp_path / "question-1-image-2.png"), str(tmp_path / "question-2-image-1.png")]
+
+
+def test_an_image_name_taken_by_a_fifo_fails_without_blocking(remote, tmp_path):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    os.mkfifo(tmp_path / "question-2-image-1.png")
+    with patch(f"{SESSION}.read_learner_page", return_value=image_page()), \
+            patch(f"{SESSION}.read_quiz_image", return_value=(PNG, "image/png")):
+        result = workflow.images(question_id=102, directory=tmp_path)
+    assert result["images"] == [{"question_id": 102, "image": 1, "alt": "", "error": "The image could not be saved."}]
+
+
+def test_a_replaced_image_file_is_made_private(remote, tmp_path):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    path = tmp_path / "question-2-image-1.png"
+    path.write_bytes(b"old")
+    path.chmod(0o644)
+    with patch(f"{SESSION}.read_learner_page", return_value=image_page()), \
+            patch(f"{SESSION}.read_quiz_image", return_value=(PNG, "image/png")):
+        workflow.images(question_id=102, directory=tmp_path)
+    assert path.read_bytes() == PNG
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 # -- answers JSON ---------------------------------------------------------------
@@ -417,7 +507,7 @@ def test_answers_json_maps_question_ids_to_answers():
 @pytest.mark.parametrize("text", [
     "", "[]", "{}", '"101"', "{101: 1}", '{"101": 2}', '{"101": null}', '{"101": [["o1"]]}', '{"101": [1]}',
     '{"0": "o1"}', '{"0101": "o1"}', '{"-1": "o1"}', '{"1e3": "o1"}', '{" 101": "o1"}', '{"１": "o1"}',
-    '{"1000000000000000000": "o1"}',
+    '{"1000000000000000000": "o1"}', '{"101": "o1", "101": "o2"}', pytest.param('{"' + "1" * 5000 + '": "o1"}', id="5000-digit-key"),
 ])
 def test_answers_json_is_rejected_unless_well_formed(text):
     with pytest.raises(LearnerWorkflowError, match="JSON object"):
@@ -481,6 +571,9 @@ def test_cli_errors_are_fixed_or_sanitized():
         result = invoke("page", "10", "20", "--json")
         assert result.exit_code == 1 and json.loads(result.stdout)["error"]
         assert "SECRET_SENTINEL" not in result.stdout + result.stderr
+        workflow.return_value.page.side_effect = PreviewPageError()
+        result = invoke("page", "10", "20", "--json")
+        assert "preview" not in result.stdout and "run attempt start" in json.loads(result.stdout)["error"]
         workflow.return_value.next.side_effect = LearnerAdvanceUnknownError()
         result = invoke("next", "10", "20", "--yes", "--json")
     assert json.loads(result.stdout)["error"] == str(LearnerAdvanceUnknownError())

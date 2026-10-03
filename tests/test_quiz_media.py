@@ -12,6 +12,7 @@ from lighthouse_cli.api import LighthouseClient, NetworkError
 from lighthouse_cli.quiz_attempt_page import PreviewRefusedError, hidden_form
 from lighthouse_cli.quiz_learner_transport import (
     MAX_IMAGE_BYTES,
+    REFUSE_IMAGE_ROUTE,
     REFUSE_IMAGE_SOURCE,
     read_quiz_image,
 )
@@ -385,6 +386,18 @@ def test_an_image_elsewhere_is_never_requested(src):
     client = image_client()
     with pytest.raises(PreviewRefusedError, match=REFUSE_IMAGE_SOURCE):
         read_quiz_image(client, src)
+    client.get_raw.assert_not_called()
+
+
+@pytest.mark.parametrize("src", [
+    "/d2l/lms/quizzing/user/attempt/quiz_attempt_page_auto.d2l?qi=20&ai=30&pg=999999&ou=10",
+    "/D2L/LMS/Quizzing/user/x.png", "/d2l/lms/%71uizzing/x.png", "/d2l//lms/./quizzing/x.png",
+    "/content/../d2l/lms/quizzing/x.png", "/d2l/logout", "/d2l/LogOut?x.png", "{base}/d2l/lms/quizzing/x.png",
+])
+def test_an_image_address_that_is_a_brightspace_action_is_never_requested(src):
+    client = image_client()
+    with pytest.raises(PreviewRefusedError, match=REFUSE_IMAGE_ROUTE):
+        read_quiz_image(client, src.format(base=client.base_url))
     client.get_raw.assert_not_called()
 
 
