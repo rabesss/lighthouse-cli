@@ -359,6 +359,20 @@ def test_quiz_text_is_kept_as_authored(authored, shown):
     assert q["supported"] and q["text"] == shown and q["choices"][0]["text"] == shown
 
 
+def test_preview_quiz_text_is_kept_as_authored():
+    q = parse(html(question(1).replace("choose true.", "choose a password manager.").replace(">True<", ">Two&nbsp;plus two<"))).questions[0]
+    assert q["text"] == "Question 1: choose a password manager."
+    assert [choice["text"] for choice in q["choices"]] == ["Two plus two", "False"]
+
+
+def test_quiz_text_leaves_out_scripts_and_hidden_inputs():
+    private = '<script>var t="SESSION_SENTINEL";</script><input type="hidden" name="z_x" value="SESSION_SENTINEL">'
+    q = parse(html(question(1).replace("choose true.", "choose true." + private))).questions[0]
+    assert q["text"] == "Question 1: choose true."
+    q = learner(learner_question(1, radios(1, ["o1", "o2"]), prompt=f"<p>Pick one.{private}</p>")).questions[0]
+    assert q["text"] == "Pick one."
+
+
 def test_quiz_text_with_control_characters_is_unsupported():
     q = learner(learner_question(1, radios(1, ["o1", "o2"]), prompt="<p>bad\x1bthing</p>")).questions[0]
     assert not q["supported"] and q["text"] == ""
