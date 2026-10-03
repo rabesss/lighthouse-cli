@@ -422,6 +422,12 @@ def test_learner_unknown_mixed_or_disabled_controls_are_unsupported(options):
     assert q["kind"] == "unsupported" and q["supported"] is False
 
 
+def test_learner_unsupported_question_without_a_prompt_keeps_the_page():
+    mixed = learner_question(1, radios(1, ["o1", "o2"]) + checkboxes(1, ["o3"]), prompt="")
+    page = learner(mixed + learner_question(2, radios(2, ["o4", "o5"])))
+    assert [(q["kind"], q["text"]) for q in page.questions] == [("unsupported", ""), ("single-choice", "Pick the right answer.")]
+
+
 def test_preview_parser_still_rejects_learner_markup():
     with pytest.raises(PreviewPageError):
         parse(html(learner_question(1, radios(1, ["401", "402"])), isprv=""))

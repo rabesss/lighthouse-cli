@@ -481,10 +481,12 @@ def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved:
     if kind == "fill-blank":
         text = _text(container, blanks=True)
     else:
+        # A known kind needs its prompt; any other question is reported as
+        # unsupported, not allowed to abort the whole page.
         prompt = _prompt(container)
-        if prompt is None:
+        if prompt is None and kind is not None:
             raise PreviewPageError()
-        text = _text(prompt)
+        text = _text(prompt) if prompt is not None else ""
     supported = kind is not None and not (
         unsupported or disabled or not text or any(not choice["text"] for choice in choices))
     return {
