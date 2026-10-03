@@ -61,9 +61,10 @@ posts:
    number>`, a fresh per-request hit code and the question's
    response-present flag. A learner page's "Save All Responses" button is in
    the markup but hidden (`d2l-hidden`), so matching on its text alone would
-   wrongly count it as a visible Save control. The page saves on each change (text on change or blur) and posts the
-   whole page form, every question's current value included, with
-   `isFinalAutoSave=false`, `useNewFinalAutoSave=true` and
+   wrongly count it as a visible Save control. The page saves on each change
+   (text on change or blur) and posts the whole page form, every question's
+   current value included, with `isFinalAutoSave=false`,
+   `useNewFinalAutoSave=true` and
    `timeLimitFromQuiz` (`0` on the untimed quizzes observed). Checked
    multi-select options send `1`; unchecked ones are left out of the form.
    In the captured saves the response named the question object ids the
