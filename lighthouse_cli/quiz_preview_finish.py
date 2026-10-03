@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -22,6 +21,7 @@ from .quiz_attempt_page import (
     REFUSE_UNANSWERED,
     PreviewRefusedError,
     hidden_form,
+    rpc_script,
 )
 from .quiz_preview_transport import page_path, read_current_preview
 from .request_protection import form_protection_from_homepage
@@ -79,20 +79,8 @@ def verify_receipt(client: LighthouseClient, *, course_id: int, quiz_id: int, at
 def _rpc_result(response: Any, quiz_id: int, attempt_id: int) -> None:
     if response.status_code != 200:
         raise PreviewSubmitUnknownError()
-    data = bytearray()
-    for chunk in response.iter_content(chunk_size=8192):
-        if not isinstance(chunk, bytes) or len(data) + len(chunk) > 65536:
-            raise PreviewSubmitUnknownError()
-        data.extend(chunk)
-    raw = bytes(data).decode("utf-8").removeprefix("while(true){}")
-    reply = json.loads(raw)
-    if (not isinstance(reply, dict) or type(reply.get("ResponseType")) is not int
-            or reply["ResponseType"] != 0 or reply.get("IsResultMin") is not False
-            or reply.get("RedirectUrl") != "" or not isinstance(reply.get("Result"), str)):
-        raise PreviewSubmitUnknownError()
     expected = f"parent.QuizDone({quiz_id},{attempt_id},'1','0','0','gotoSv','')"
-    actual = re.sub(r"\s+", "", reply["Result"]).removesuffix(";")
-    if actual != expected:
+    if rpc_script(response.iter_content(chunk_size=8192)) != expected:
         raise PreviewSubmitUnknownError()
 
 

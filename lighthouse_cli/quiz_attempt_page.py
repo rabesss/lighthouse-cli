@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from bs4 import BeautifulSoup, Tag
 
-from .request_protection import FormProtection
+from .request_protection import FormProtection, form_protection_from_homepage
 
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 MAX_QUESTIONS = 200
@@ -42,6 +42,15 @@ REFUSE_NOT_A_CHOICE = "That choice is not an option for this question."
 REFUSE_UNANSWERED = "Answer and save every question on this page first."
 REFUSE_LAST_PAGE = "This is the last page. Use preview submit."
 REFUSE_NOT_LAST_PAGE = "Move to the last page with preview next before submitting."
+REFUSE_LEARNER_UNSUPPORTED = "This page has a question the CLI cannot answer yet, so its form cannot be sent."
+REFUSE_LEARNER_NOT_ON_PAGE = "That question is not on the current page."
+REFUSE_ANSWER_SHAPE = ("Answer a single-choice question with one choice id, a multi-select question with "
+                       "a list of option ids and a fill-in-the-blank question with one text per blank.")
+REFUSE_BLANK_TEXT = "Each blank takes one line of printable text of at most 1000 characters."
+REFUSE_NO_ANSWERS = "Give at least one answer to save."
+REFUSE_LEARNER_LAST_PAGE = "This is the last page. Submit the quiz instead."
+REFUSE_LEARNER_NOT_LAST_PAGE = "Move to the last page before submitting."
+REFUSE_LEARNER_UNANSWERED = "This page has unanswered questions. Answer them, or explicitly allow leaving them unanswered."
 
 
 def _id(value: object) -> int:
@@ -121,6 +130,27 @@ def _text(node: Tag, *, blanks: bool = False) -> str:
     if len(text) > 16384 or not text.isprintable():
         return ""
     return text
+
+
+def rpc_script(chunks: Iterable[object]) -> str:
+    """The script a bounded legacy RPC reply returns, without whitespace.
+
+    It is compared as data and never executed. Any other reply shape raises.
+    """
+    data = bytearray()
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or len(data) + len(chunk) > 65536:
+            raise ValueError("Unexpected RPC reply.")
+        data.extend(chunk)
+    try:
+        reply = json.loads(bytes(data).decode("utf-8").removeprefix("while(true){}"))
+    except RecursionError:
+        raise ValueError("Unexpected RPC reply.") from None
+    if (not isinstance(reply, dict) or type(reply.get("ResponseType")) is not int
+            or reply["ResponseType"] != 0 or reply.get("IsResultMin") is not False
+            or reply.get("RedirectUrl") != "" or not isinstance(reply.get("Result"), str)):
+        raise ValueError("Unexpected RPC reply.")
+    return re.sub(r"\s+", "", reply["Result"]).removesuffix(";")
 
 
 def hidden_form(body: bytes) -> tuple[Tag, dict[str, str]]:
@@ -354,6 +384,13 @@ def _hidden(node: Tag) -> bool:
                for tag in (node, *node.parents))
 
 
+def active_buttons(root: Tag, labels: Collection[str]) -> list[str]:
+    """The labels of enabled, rendered buttons that have one of ``labels``, in page order."""
+    return [text for button in root.find_all("button")
+            if (text := button.get_text(" ", strip=True)) in labels
+            and not _disabled(button) and not _hidden(button) and button.find_parent("template") is None]
+
+
 def _button_present(form: Tag, label: str, *, visible_only: bool = False) -> bool:
     # A button inside a question is its content, not page navigation, and
     # template content is never rendered.
@@ -417,6 +454,8 @@ class LearnerPage:
     # Private, as on PreviewPage: session-bound form tokens, never logged.
     _hidden_fields: dict[str, str] = field(repr=False, compare=False)
     _groups: dict[int, tuple[str, int, int, int]] = field(repr=False, compare=False)
+    # The page's own form protection, when it embeds one.
+    _protection: FormProtection | None = field(default=None, repr=False, compare=False)
 
     def public_data(self) -> dict[str, Any]:
         return {
@@ -426,6 +465,117 @@ class LearnerPage:
             "has_next_control": self.has_next_control,
             "has_previous_control": self.has_previous_control,
         }
+
+    def intended(self, answers: Mapping[int, object]) -> dict[int, tuple[str, ...]]:
+        """Every question's value once ``answers`` are applied; others keep theirs.
+
+        A value is the selected choice or option ids in page order, or the
+        text of each blank. The browser posts every control of the page, so
+        a page with an unsupported question is never sent: its answer could
+        be cleared.
+        """
+        if not all(q["supported"] for q in self.questions):
+            raise PreviewRefusedError(REFUSE_LEARNER_UNSUPPORTED)
+        questions = {q["question_id"]: q for q in self.questions}
+        values = {qid: _learner_value(q) for qid, q in questions.items()}
+        for qid, answer in answers.items():
+            question = questions.get(qid) if type(qid) is int else None
+            if question is None:
+                raise PreviewRefusedError(REFUSE_LEARNER_NOT_ON_PAGE)
+            values[qid] = _answer_value(question, answer)
+        return values
+
+    def unanswered(self) -> list[int]:
+        """Questions with no answer, or with an empty blank."""
+        return [q["question_id"] for q in self.questions if not (value := _learner_value(q)) or not all(value)]
+
+    def confirms(self, values: Mapping[int, tuple[str, ...]], answered: Iterable[int]) -> bool:
+        """A 200 response is insufficient: every value must read back as sent.
+
+        An answered question must also be marked saved. Brightspace marks a
+        question unsaved once its answer is cleared, so an intended empty
+        answer is checked by value only.
+        """
+        questions = {q["question_id"]: q for q in self.questions}
+        answered = set(answered)
+        if set(questions) != set(values) or not answered <= set(questions):
+            return False
+        if any(not q["supported"] or _learner_value(q) != values[qid] for qid, q in questions.items()):
+            return False
+        return all(questions[qid]["saved"] is True for qid in answered if any(values[qid]))
+
+    def save_fields(self, values: Mapping[int, tuple[str, ...]], protection: FormProtection) -> dict[str, str]:
+        """The "Save All Responses" form. Returned fields are secret-bearing."""
+        return self._form(values, protection, f"1,{self.page}")
+
+    def advance_fields(self, protection: FormProtection, *, allow_unanswered: bool = False) -> dict[str, str]:
+        """Forward to the next page, which a visible, enabled Next control proves exists."""
+        if not self.has_next_control:
+            raise PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)
+        if self.unanswered() and allow_unanswered is not True:
+            raise PreviewRefusedError(REFUSE_LEARNER_UNANSWERED)
+        return self._form(self.intended({}), protection, f"2,{self.page + 1},{self.page}")
+
+    def finish_fields(self, protection: FormProtection) -> dict[str, str]:
+        """The save that opens the submission confirmation page."""
+        if self.has_next_control:
+            raise PreviewRefusedError(REFUSE_LEARNER_NOT_LAST_PAGE)
+        return self._form(self.intended({}), protection, f"5,{self.page}")
+
+    def _form(self, values: Mapping[int, tuple[str, ...]], protection: FormProtection, action: str) -> dict[str, str]:
+        # Checked again, as values may come from another page object.
+        self.intended({})
+        if set(values) != set(self._groups) or self._hidden_fields.get("d2l_referrer") != protection.csrf_token:
+            raise PreviewPageError()
+        fields = dict(self._hidden_fields)
+        answers: dict[str, str] = {}
+        for q in self.questions:
+            group = self._groups[q["question_id"]][0]
+            value = values[q["question_id"]]
+            if q["kind"] == "single-choice":
+                if value:
+                    answers[group] = value[0]
+            elif q["kind"] == "multi-select":
+                # Unchecked options are left out, as the browser does.
+                answers.update({f"{group}_{option}": "1" for option in value})
+            else:
+                answers.update({f"{group}_{b['blank_id']}": text for b, text in zip(q["blanks"], value, strict=True)})
+        if set(answers) & set(fields):
+            raise PreviewPageError()
+        fields.update(answers)
+        fields.update(d2l_action="Update", d2l_actionparam=action, d2l_hitCode=protection.next_hit_code())
+        return fields
+
+
+def _learner_value(question: dict[str, Any]) -> tuple[str, ...]:
+    if question["kind"] == "fill-blank":
+        return tuple(b["value"] for b in question["blanks"])
+    return tuple(question["selected_choice_ids"])
+
+
+def _answer_value(question: dict[str, Any], answer: object) -> tuple[str, ...]:
+    """Check one answer against its question; ids must be offered on the page."""
+    kind = question["kind"]
+    choices = [c["choice_id"] for c in question["choices"]]
+    if kind == "single-choice" and isinstance(answer, str):
+        if answer not in choices:
+            raise PreviewRefusedError(REFUSE_NOT_A_CHOICE)
+        return (answer,)
+    if not isinstance(answer, (list, tuple)) or not all(isinstance(item, str) for item in answer):
+        raise PreviewRefusedError(REFUSE_ANSWER_SHAPE)
+    if kind == "multi-select":
+        if len(set(answer)) != len(answer):
+            raise PreviewRefusedError(REFUSE_ANSWER_SHAPE)
+        if not set(answer) <= set(choices):
+            raise PreviewRefusedError(REFUSE_NOT_A_CHOICE)
+        return tuple(choice for choice in choices if choice in answer)
+    if kind != "fill-blank" or len(answer) != len(question["blanks"]):
+        raise PreviewRefusedError(REFUSE_ANSWER_SHAPE)
+    if any(len(text) > 1000 or not text.isprintable() for text in answer):
+        raise PreviewRefusedError(REFUSE_BLANK_TEXT)
+    # Brightspace trims a blank's outer spaces (the only whitespace a
+    # printable string can hold) and keeps inner ones, so the readback matches.
+    return tuple(text.strip(" ") for text in answer)
 
 
 _LEARNER_KINDS = {"radio": "single-choice", "checkbox": "multi-select", "text": "fill-blank"}
@@ -526,6 +676,41 @@ def parse_learner_page(
     for container, qid, ordinal, tid, tvid, saved in _question_containers(form, page):
         groups[qid] = (f"tAtom{tid}_{tvid}", tid, tvid, ordinal)
         questions.append(_learner_question(container, qid, ordinal, groups[qid][0], saved))
+    try:
+        # A live attempt page carries the session's form protection, which
+        # saves a separate homepage request before each write.
+        protection: FormProtection | None = form_protection_from_homepage(body)
+    except ValueError:
+        protection = None
     return LearnerPage(course_id, quiz_id, attempt_id, page, tuple(questions),
                        _button_present(form, "Next Page", visible_only=True),
-                       _button_present(form, "Previous Page", visible_only=True), hidden, groups)
+                       _button_present(form, "Previous Page", visible_only=True), hidden, groups, protection)
+
+
+_UNANSWERED_LINK = re.compile(
+    r"if\(Events!==undefined\)\{Events\.ClickQuestion\.Raise\([0-9]{1,6},([0-9]{1,6}),([0-9]{1,18}),([0-9]{1,18}),"
+    r"'q([0-9]{1,18})'\);\}returnfalse;"
+)
+
+
+def unanswered_questions(form: Tag, *, quiz_id: int, attempt_id: int) -> list[dict[str, int]]:
+    """The unanswered questions a submission confirmation page links to.
+
+    Each link carries its page and question id in a fixed script call, read
+    here as data. The links must agree with the page's own count.
+    """
+    found: list[dict[str, int]] = []
+    for link in form.find_all("a", onclick=True):
+        script = re.sub(r"\s+", "", str(link.get("onclick")))
+        if "ClickQuestion" not in script:
+            continue
+        match = _UNANSWERED_LINK.fullmatch(script)
+        number = re.fullmatch(r"Question ([0-9]{1,6})", link.get_text(" ", strip=True))
+        if match is None or number is None or (int(match[2]), int(match[3])) != (quiz_id, attempt_id):
+            raise PreviewPageError()
+        found.append({"page": _id(match[1]), "question_id": _id(match[4]), "number": int(number[1])})
+    text = " ".join(form.get_text(" ", strip=True).split())
+    counts = re.findall(r"You have ([0-9]{1,6}) unanswered questions?\.", text)
+    if counts != [str(len(found))] and not (counts in ([], ["0"]) and not found):
+        raise PreviewPageError()
+    return found
