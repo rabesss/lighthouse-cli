@@ -340,6 +340,10 @@ def test_learner_next_control_follows_the_rendered_buttons():
     # A button inside a question is its content, not page navigation.
     content = learner_question(1, options).replace("<fieldset>", '<div><button type="button">Next Page</button></div><fieldset>', 1)
     assert not learner(content, extra=LEARNER_BUTTONS + last).has_next_control
+    for unusable in ('<template><button type="button">Next Page</button></template>',
+                     '<button type="button" inert>Next Page</button>',
+                     '<div inert><button type="button">Next Page</button></div>'):
+        assert not learner(learner_question(1, options), extra=LEARNER_BUTTONS + unusable).has_next_control
 
 
 def test_learner_option_tokens_allow_long_ids():
@@ -429,6 +433,12 @@ def test_learner_unsupported_question_without_a_prompt_keeps_the_page():
     mixed = learner_question(1, radios(1, ["o1", "o2"]) + checkboxes(1, ["o3"]), prompt="")
     page = learner(mixed + learner_question(2, radios(2, ["o4", "o5"])))
     assert [(q["kind"], q["text"]) for q in page.questions] == [("unsupported", ""), ("single-choice", "Pick the right answer.")]
+
+
+def test_learner_text_box_not_named_as_a_blank_keeps_the_page():
+    box = learner_question(1, '<input type="text" name="tAtom201_300" value="12">')
+    page = learner(box + learner_question(2, radios(2, ["o4", "o5"])))
+    assert [(q["kind"], q["blanks"]) for q in page.questions] == [("unsupported", []), ("single-choice", [])]
 
 
 def test_preview_parser_still_rejects_learner_markup():

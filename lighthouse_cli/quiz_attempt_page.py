@@ -296,8 +296,9 @@ def _prompt(container: Tag) -> Tag | None:
 
 
 def _disabled(control: Tag) -> bool:
-    return bool(control.has_attr("disabled") or control.get("aria-disabled") == "true"
-                or control.find_parent("fieldset", attrs={"disabled": True}))
+    return bool(control.has_attr("disabled") or control.get("aria-disabled") == "true" or control.has_attr("inert")
+                or control.find_parent("fieldset", attrs={"disabled": True})
+                or control.find_parent(attrs={"inert": True}))
 
 
 def _choices(
@@ -351,11 +352,13 @@ def _hidden(node: Tag) -> bool:
 
 
 def _button_present(form: Tag, label: str, *, visible_only: bool = False) -> bool:
-    # A button inside a question is its content, not page navigation.
+    # A button inside a question is its content, not page navigation, and
+    # template content is never rendered.
     return any(
         button.get_text(" ", strip=True) == label
         and not _disabled(button)
         and button.find_parent(class_="d2l-quiz-question-autosave-container") is None
+        and button.find_parent("template") is None
         and not (visible_only and _hidden(button))
         for button in form.find_all("button")
     )
@@ -466,6 +469,9 @@ def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved:
     controls = [control for control in container.find_all("input") if _input_type(control) != "hidden"]
     types = {_input_type(control) for control in controls}
     kind = _LEARNER_KINDS.get(types.pop()) if len(types) == 1 else None
+    if kind == "fill-blank" and not all(str(control.get("name", "")).startswith(f"{group}_") for control in controls):
+        # Other text-box questions may name their boxes differently.
+        kind = None
     expanded = _expanded(container)
     # Inputs inside custom HTML blocks are content, not form controls.
     unsupported = (bool(expanded.select("textarea, select, img, math, iframe, audio, video"))
