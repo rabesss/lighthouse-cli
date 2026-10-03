@@ -82,6 +82,15 @@ class _LazyPreview(JsonOutputGroup):
 instructor.add_command(_LazyPreview(name="preview", help="Experimental checkpointed instructor quiz previews."))
 
 
+class _LazyAttempt(_LazyPreview):
+    def _implementation(self) -> click.Group:
+        from .quiz_learner_commands import attempt
+        return attempt
+
+
+student.add_command(_LazyAttempt(name="attempt", help="Take your own graded quiz attempts as a learner."))
+
+
 def _register_read(group: click.Group, name: str, resource: str, detail: bool) -> None:
     def command(course_id: int, json_output: bool, identifier: int | None = None) -> None:
         _run(course_id, json_output, lambda api: api.read(resource, identifier))

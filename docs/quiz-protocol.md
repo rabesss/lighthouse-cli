@@ -185,7 +185,11 @@ with one question on each of two pages, forward-only) added:
 - Resume keeps the clock: an attempt reopened on page 1, before any Next,
   had the same `timeStartedTicks`, the next `DoUtcTimeRequest` counted on
   from the original start, and the page 1 answer was still selected.
-  Resuming after a Next was not tried.
+  Resuming after a Next (later, on a quiz with one question on each of
+  two pages) reopened the attempt on page 2, the page the server held, and
+  that attempt was then saved and submitted. So Continue Quiz is how a
+  learner client recovers when it cannot tell whether a start or Next
+  went through.
 - Time-up with the attempt open: `7,1` and `5,1` saves, then
   `ProcessQuizSubmission` with params `<qi>, <ai>, false, true, true,
   true, ""`. The ids were JSON numbers there and strings in a manual
@@ -266,7 +270,7 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
 
 | Area | Missing workflows / validation |
 | --- | --- |
-| Learner quizzes | Commands over the attempt transport (start, resume, save all, Next, submit and receipt check exist), timers |
+| Learner quizzes | Submit and receipt check commands (the transport has them), timed quizzes |
 | Quiz authoring | Question creation/import/edit, sections/pools, settings updates, special access, grading |
 | Assignments | Learner text submission, group submission, instructor feedback/rubric grading |
 | Discussions | Create/reply/edit, attachments, moderation |

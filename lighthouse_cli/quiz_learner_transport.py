@@ -217,7 +217,7 @@ def _follow_start(client: LighthouseClient, location: str, course_id: int, quiz_
 
 def start_learner(
     client: LighthouseClient, *, course_id: int, quiz_id: int, continue_only: bool = False,
-    on_identity: Callable[[int, int], None] | None = None,
+    on_identity: Callable[[int, int], None] | None = None, summary: LearnerSummary | None = None,
 ) -> LearnerPage:
     """Continue the attempt in progress, else start a new one (once).
 
@@ -225,12 +225,16 @@ def start_learner(
     confirm it first; ``continue_only`` refuses unless one is in progress.
     ``on_identity`` receives the attempt id and page before the readback,
     as for previews. A start whose outcome is unclear can be resolved from
-    the summary, which then offers to continue that attempt.
+    the summary, which then offers to continue that attempt. A ``summary``
+    just read saves reading it again.
     """
     if type(continue_only) is not bool:
         raise ValueError("Invalid quiz start settings.")
     summary_path = _summary_path(course_id, quiz_id)
-    summary = read_learner_summary(client, course_id=course_id, quiz_id=quiz_id)
+    if summary is None:
+        summary = read_learner_summary(client, course_id=course_id, quiz_id=quiz_id)
+    elif (summary.course_id, summary.quiz_id) != (course_id, quiz_id):
+        raise ValueError("Invalid quiz start settings.")
     fields, resume = _start_fields(summary, continue_only=continue_only)
     post_url = client.canonical_url(summary_path + "&" + urlencode({"inProgress": "true" if resume else "false"}))
     response = None

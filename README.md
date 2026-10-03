@@ -128,8 +128,9 @@ stderr. `--help` remains human-readable.
   `course-config.json`, and `download`/`sync` write files and manifests under
   the local download root (`--output-dir`, default `~/Downloads/lighthouse`).
 - **[REMOTE WRITE]:** `submit` sends a file to Brightspace. Instructor
-  `quiz-create` and `assignment-create` create hidden assessments. These
-  commands require confirmation unless `--yes` is supplied.
+  `quiz-create` and `assignment-create` create hidden assessments.
+  `student attempt start`, `answer` and `next` change your own graded quiz
+  attempt. These commands require confirmation unless `--yes` is supplied.
 
 `download --dry-run` writes nothing: it does not
 create or replace a manifest, create directories, or download file bodies.
@@ -227,7 +228,34 @@ lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --attempt-id ATTEMPT_I
 lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --confirm-no-remote-attempt --json
 ```
 
-Real learner quiz attempts, question authoring, teacher grading and full
+**Learner quiz attempts** (`student attempt`) take your own graded attempt
+of an untimed quiz, a page at a time:
+
+```bash
+# Continue the attempt in progress, or start a new one (uses one of your attempts):
+lighthouse student attempt start COURSE_ID QUIZ_ID --yes --json
+lighthouse student attempt page COURSE_ID QUIZ_ID --json
+# Save every answer on the page in one request; --next then moves on:
+lighthouse student attempt answer COURSE_ID QUIZ_ID --answers '{"101": "CHOICE_ID", "102": ["OPTION_ID"], "103": ["blank text"]}' --next --yes --json
+lighthouse student attempt next COURSE_ID QUIZ_ID --yes --json
+# Download the page's question images to view them:
+lighthouse student attempt images COURSE_ID QUIZ_ID --json
+```
+
+`start` also returns the quiz's name, whether it is forward-only and its
+attempt limit. Answers use the ids `page` returns: a choice id for a
+single-choice question, a list of option ids for a multi-select one, and a
+list of texts, one per blank, for a fill-in-the-blank one; questions left out
+keep their saved answers. Equations read as LaTeX and images as
+`[image N]` markers, whose files `images` saves (in a new private temporary
+directory, or `--dir`). Next is refused on the last page and, unless
+`--allow-unanswered`, while a question is unanswered; `answer --next` checks
+that before saving anything. Every change is read back before it is
+reported. If one cannot be verified, `page` settles an answer save, and
+`start` reopens the attempt on the page Brightspace has. `status` reads the
+local cursor. Submitting and timed quizzes are not supported yet.
+
+Question authoring, teacher grading and full
 course-administration parity are **not implemented** yet. Instructor question
 definitions must not be treated as a student's currently accessible attempt
 page. See [Brightspace assessment protocol notes](docs/quiz-protocol.md).
@@ -1315,7 +1343,7 @@ non-draft PR on lint, strict types, architecture layers, dependency hygiene,
 secret scanning, and the test matrix — see [CONTRIBUTING.md](CONTRIBUTING.md)
 for the local equivalents. For exact options of any command, run
 `lighthouse <command> --help` (groups nest, e.g.
-`lighthouse instructor preview --help`).
+`lighthouse instructor preview --help`, `lighthouse student attempt --help`).
 
 The AI review bots each read their own committed config; the reviewer map
 lives in [`REVIEW.md`](REVIEW.md).
