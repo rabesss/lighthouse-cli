@@ -69,6 +69,9 @@ _OTHER_UNSETTLED = ("A change by a different signed-in account to this quiz coul
                     "Sign in as that account and run attempt start to settle it.")
 _NOT_CONTINUABLE = ("The attempt the CLI was taking is no longer in progress, so no new attempt was started. "
                     "Run attempt verify to check whether it was submitted, or attempt forget to drop the CLI's record of it.")
+_OTHER_ATTEMPT = ("Brightspace has a different attempt in progress than the one the CLI was taking, so the CLI did "
+                  "not take it over. Run attempt verify to check whether the CLI's attempt was submitted, "
+                  "or attempt forget to drop the CLI's record of it.")
 _SETTINGS = "The quiz settings could not be read, so nothing was started."
 _TIMED = "Timed quizzes are not supported yet, so nothing was started."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
@@ -296,26 +299,29 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_OTHER_UNSETTLED)
             info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
             summary = read_learner_summary(client, course_id=self.course_id, quiz_id=self.quiz_id)
-            # Until the CLI's attempt is verified submitted it may only be
-            # continued: if it ended elsewhere, a new start would use another
-            # graded attempt.
-            continue_only = own is not None and own["status"] != "submitted" and own["attempt_id"] is not None
-            if continue_only and not summary.can_continue:
+            # Until the CLI's attempt is verified submitted only that attempt
+            # may be continued: if it ended elsewhere, a new start would use
+            # another graded attempt.
+            kept = own if own is not None and own["status"] != "submitted" and own["attempt_id"] is not None else None
+            if kept is not None and not summary.can_continue:
                 raise LearnerWorkflowError(_NOT_CONTINUABLE)
+            # The intent keeps the CLI's attempt, so a start that fails midway
+            # still names it for the next start and for verify.
             state: dict[str, Any] = {
                 "version": 1, "origin": self.connection.origin, "mode": "learner", "actor_id": actor,
-                "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "uncertain",
-                "operation": "start", "attempt_id": None, "page": None,
+                "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "uncertain", "operation": "start",
+                "attempt_id": None if kept is None else kept["attempt_id"], "page": None if kept is None else kept["page"],
             }
             self._save(state)  # durable intent before the start request
 
             def seal(attempt_id: int, page: int) -> None:
-                state.update(attempt_id=attempt_id, page=page)
-                self._save(state)
+                if kept is None or attempt_id == kept["attempt_id"]:  # never another attempt over the CLI's
+                    state.update(attempt_id=attempt_id, page=page)
+                    self._save(state)
 
             try:
                 page = start_learner(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                     continue_only=continue_only, on_identity=seal, summary=summary)
+                                     continue_only=kept is not None, on_identity=seal, summary=summary)
             except LearnerStartUnknownError:
                 raise
             except Exception:
@@ -325,6 +331,8 @@ class LearnerWorkflow:
                 else:
                     self._save(previous)
                 raise
+            if kept is not None and page.attempt_id != kept["attempt_id"]:
+                raise LearnerWorkflowError(_OTHER_ATTEMPT)
             state.update(status="active", operation=None, attempt_id=page.attempt_id, page=page.page)
             self._save(state)
             return {**page.public_data(), "resumed": summary.can_continue, "quiz": info}

@@ -22,7 +22,11 @@ from lighthouse_cli.quiz_attempt_page import (
     PreviewPageError,
     PreviewRefusedError,
 )
-from lighthouse_cli.quiz_learner_finish import LearnerSubmitUnknownError, LearnerUnansweredError
+from lighthouse_cli.quiz_learner_finish import (
+    LearnerNotSubmittedError,
+    LearnerSubmitUnknownError,
+    LearnerUnansweredError,
+)
 from lighthouse_cli.quiz_learner_session import (
     LearnerWorkflow,
     LearnerWorkflowError,
@@ -293,13 +297,13 @@ def test_an_unverified_save_is_settled_by_reading_the_page(remote):
         with pytest.raises(LearnerSaveUnknownError):
             workflow.answer({101: "o2"})
     assert (workflow.status()["status"], workflow.status()["operation"]) == ("uncertain", "answer")
-    with patch(f"{SESSION}.save_learner_answers") as save, patch(f"{SESSION}.advance_learner") as advance:
-        with pytest.raises(LearnerWorkflowError, match="Run attempt page"):
-            workflow.answer({101: "o2"})
-        with pytest.raises(LearnerWorkflowError, match="Run attempt page"):
-            workflow.next()
-    save.assert_not_called()
-    advance.assert_not_called()
+    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.save_learner_answers") as save, \
+            patch(f"{SESSION}.advance_learner") as advance, patch(f"{SESSION}.submit_learner") as submit:
+        for action in (workflow.next, workflow.submit, workflow.images, lambda: workflow.answer({101: "o2"})):
+            with pytest.raises(LearnerWorkflowError, match="Run attempt page"):
+                action()
+    for write in (read, save, advance, submit):
+        write.assert_not_called()
     with patch(f"{SESSION}.read_learner_page", return_value=open_page(content=ANSWERED)) as read:
         result = workflow.page()
     assert read.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1}
@@ -470,15 +474,17 @@ def test_an_unverified_submission_is_settled_only_by_its_receipt(remote):
             workflow.submit()
     assert (workflow.status()["status"], workflow.status()["operation"]) == ("uncertain", "submit")
     with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit:
-        for action in (workflow.page, workflow.next, workflow.submit, lambda: workflow.answer({101: "o1"})):
+        for action in (workflow.page, workflow.next, workflow.submit, workflow.images,
+                       lambda: workflow.answer({101: "o1"})):
             with pytest.raises(LearnerWorkflowError, match="Run attempt verify"):
                 action()
     read.assert_not_called()
     submit.assert_not_called()
-    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerSubmitUnknownError()):
-        with pytest.raises(LearnerSubmitUnknownError):
-            workflow.verify()
-    assert workflow.status()["status"] == "uncertain"
+    for failure in (LearnerSubmitUnknownError(), LearnerNotSubmittedError()):
+        with patch(f"{SESSION}.verify_learner_submission", side_effect=failure):
+            with pytest.raises(type(failure)):
+                workflow.verify()
+        assert workflow.status()["status"] == "uncertain"
     with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
         assert workflow.verify() == RECEIPT
     assert verify.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
@@ -520,7 +526,52 @@ def test_verify_reads_only_this_accounts_started_attempt(remote):
     # An attempt submitted elsewhere, e.g. in the browser, closes the cursor too.
     with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT):
         workflow.verify()
+        assert workflow.verify() == RECEIPT  # again, once submitted
     assert workflow.status()["status"] == "submitted"
+
+
+def test_a_recovery_start_that_fails_midway_still_names_the_clis_attempt(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow, open_page(2), resumed=True)
+    workflow._save({**saved(workflow), "status": "uncertain", "operation": "submit"})
+    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+            patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+    assert workflow.status() == {"mode": "learner", "status": "uncertain", "course_id": 10, "quiz_id": 20,
+                                 "attempt_id": 30, "page": 2, "operation": "start"}
+    # Once the attempt ends, start still only continues it, and verify reads it.
+    with patch(f"{SESSION}.start_learner") as started:
+        with pytest.raises(LearnerWorkflowError, match="no new attempt was started"):
+            workflow.start()
+    started.assert_not_called()
+    with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
+        workflow.verify()
+    assert verify.call_args.kwargs["attempt_id"] == 30
+
+
+def test_another_attempt_in_progress_is_not_taken_over(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    workflow._save({**saved(workflow), "status": "uncertain", "operation": "submit"})
+    other = dataclasses.replace(open_page(), attempt_id=31)
+
+    def continued(client, *, on_identity, **kwargs):
+        on_identity(31, 1)
+        return other
+    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+            patch(f"{SESSION}.start_learner", side_effect=continued):
+        with pytest.raises(LearnerWorkflowError, match="different attempt in progress"):
+            workflow.start()
+    assert (workflow.status()["status"], workflow.status()["attempt_id"]) == ("uncertain", 30)
+    with patch(f"{SESSION}.read_learner_page") as read:
+        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
+            workflow.page()
+    read.assert_not_called()
+    # Once the CLI's record is dropped, start continues the attempt in progress.
+    workflow.forget()
+    start(workflow, other, resumed=True)
+    assert workflow.status()["attempt_id"] == 31
 
 
 # -- images ---------------------------------------------------------------------
@@ -725,8 +776,12 @@ def test_cli_errors_are_fixed_or_sanitized():
         assert json.loads(result.stdout)["error"] == str(LearnerAdvanceUnknownError())
         workflow.return_value.verify.side_effect = LearnerSubmitUnknownError()
         assert json.loads(invoke("verify", "10", "20", "--json").stdout)["error"] == str(LearnerSubmitUnknownError())
+        workflow.return_value.verify.side_effect = LearnerNotSubmittedError()
+        assert json.loads(invoke("verify", "10", "20", "--json").stdout)["error"] == str(LearnerNotSubmittedError())
         unanswered = [{"page": 2, "question_id": 104, "number": 4}]
         workflow.return_value.submit.side_effect = LearnerUnansweredError(unanswered)
+        # Without --json the questions are listed on stderr.
+        assert "Question 4 (page 2) is unanswered." in invoke("submit", "10", "20", "--yes").stderr
         result = invoke("submit", "10", "20", "--yes", "--json")
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"mode": "learner", "course_id": 10, "quiz_id": 20,

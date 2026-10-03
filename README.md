@@ -258,16 +258,17 @@ directory, or `--dir`). Next is refused on the last page and, unless
 `--allow-unanswered`, while a question is unanswered; `answer --next` checks
 that before saving anything. Every change is read back before it is
 reported. If one cannot be verified, `page` settles an answer save, and
-`start` continues the attempt on the page Brightspace has. Until the CLI's
-attempt is submitted, `start` never begins a new one: if that attempt ended
-elsewhere, `verify` checks whether it was submitted, and `forget` drops the
-CLI's record of it. `submit` is refused
-before anything is sent unless the cursor is on the last page; unless
+`start` continues the attempt on the page Brightspace has. Once `start` has
+opened an attempt, until it is submitted `start` continues only that attempt
+and never begins a new one: if it ended elsewhere, `verify` checks whether it was submitted, and
+`forget` drops the CLI's record of it. `submit` is refused
+before anything is saved unless the cursor is on the last page; unless
 `--allow-unanswered`, it then stops while any question of the quiz is
 unanswered, listing them under `unanswered` (only the page's own answers were
 saved again). It reports the attempt number and, when the quiz shows it, the
 score. A submission that cannot be verified is settled with `verify`, which
-reads the receipt and the submissions list. `status` reads the local cursor.
+reads the submissions list and the receipt, and reports an attempt that is
+still in progress. `status` reads the local cursor.
 Timed quizzes are not supported yet.
 
 Question authoring, teacher grading and full
