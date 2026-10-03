@@ -26,6 +26,11 @@ _CLIENT_INIT_ERROR = "Could not initialize Lighthouse client."
 _DRY_RUN_UNVERIFIED_WARNING = (
     "The folder name could not be read; check the folder ID. No submission was sent."
 )
+_NEEDS_YES = "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm."
+_OUTCOME_UNKNOWN = (
+    "Submission outcome is unknown because the API returned an unsupported result shape. "
+    "Verify the assignment status before trying again."
+)
 
 
 def cmd_submit(
@@ -72,10 +77,7 @@ def cmd_submit(
     # Keep the explicit confirmation requirement for non-interactive callers.
     # This check happens after local validation, but before any API work.
     if not dry_run and not yes and not sys.stdin.isatty():
-        return _submit_error(
-            "Refusing to submit without --yes in non-interactive mode. Use --yes flag to confirm.",
-            json_output,
-        )
+        return _submit_error(_NEEDS_YES, json_output)
 
     try:
         client = LighthouseClient(read_only_auth=dry_run)
@@ -142,28 +144,23 @@ def cmd_submit(
     # into an ``AttributeError`` (or tell callers to blindly retry): the
     # request may already have been accepted by D2L.
     if not isinstance(result, dict):
-        return _submit_error(
-            "Submission outcome is unknown because the API returned an unsupported result shape. "
-            "Verify the assignment status before trying again.",
-            json_output,
-        )
+        return _submit_error(_OUTCOME_UNKNOWN, json_output)
 
     # Build output
     submitted_at = _safe_display_name(result.get("submittedAt"), _utc_now_iso())
     submission_id = _safe_submission_id(result.get("submissionId"))
-    output_filename = display_filename
     if json_output:
         _output_json({
             "submission_id": submission_id, "folder_id": folder_id_int,
             "folder_name": folder_name, "course_id": org_id,
             "course_name": course_name,
-            "file": {"name": output_filename, "size_bytes": len(file_bytes)},
+            "file": {"name": display_filename, "size_bytes": len(file_bytes)},
             "submitted_at": submitted_at,
         })
     else:
         print(f"Submitted successfully!\n"
               f"  Submission ID: {submission_id}\n  Folder: {folder_name}\n"
-              f"  Course: {course_name}\n  File: {output_filename}\n"
+              f"  Course: {course_name}\n  File: {display_filename}\n"
               f"  Submitted at: {submitted_at}")
 
     return 0
@@ -226,10 +223,7 @@ def _safe_submit_error(message: BaseException | str) -> str:
     if isinstance(message, PermissionError):
         return "Permission denied. Check your enrollment and submission rights."
     if isinstance(message, SubmissionOutcomeUnknownError):
-        return (
-            "Submission outcome is unknown because the API returned an unsupported result shape. "
-            "Verify the assignment status before trying again."
-        )
+        return _OUTCOME_UNKNOWN
     if isinstance(message, _InvalidFolderIdentifierError):
         return "Folder identifier is invalid. Use a positive numeric FolderId or a folder name."
     if isinstance(message, CourseNotFoundError):
@@ -248,15 +242,9 @@ def _safe_submit_error(message: BaseException | str) -> str:
         if lowered.startswith("could not initialize lighthouse client"):
             return _CLIENT_INIT_ERROR
         if lowered.startswith("refusing to submit without --yes"):
-            return (
-                "Refusing to submit without --yes in non-interactive mode. "
-                "Use --yes flag to confirm."
-            )
+            return _NEEDS_YES
         if lowered.startswith("submission outcome is unknown"):
-            return (
-                "Submission outcome is unknown because the API returned an unsupported result shape. "
-                "Verify the assignment status before trying again."
-            )
+            return _OUTCOME_UNKNOWN
     return format_user_error(message)
 
 
@@ -306,9 +294,7 @@ def _resolve_folder_id(client: LighthouseClient, org_id: int, identifier: object
 
     # Do not echo folder IDs, names, or the caller's identifier in a normal
     # diagnostic; those values originate in untrusted API/user input.
-    raise FileNotFoundError(
-        "Folder not found. Run: lighthouse assignments"
-    )
+    raise FileNotFoundError("Folder not found. Run: lighthouse assignments")
 
 
 class _InvalidFolderIdentifierError(ValueError):

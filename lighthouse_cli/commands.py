@@ -23,14 +23,7 @@ from .display import print_table as _print_table
 from .display import short as _short
 from .display import utc_now_iso as _utc_now_iso
 from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
-from .show import (  # noqa: F401 — re-export
-    cmd_announcements,
-    cmd_assignments,
-    cmd_calendar,
-    cmd_grades,
-    cmd_quizzes,
-)
-from .submit import cmd_submit  # noqa: F401 — re-export
+from .quiz_rules import navigation_rules
 from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .utils import _course_identifier, get_enrolled_course_catalog
 
@@ -75,11 +68,8 @@ def _positive_id(value: Any) -> int | None:
     if isinstance(value, int):
         return value if value > 0 else None
     if isinstance(value, str):
-        candidate = value.strip()
-        if not candidate:
-            return None
         with suppress(ValueError):
-            number = int(candidate)
+            number = int(value.strip())
             return number if number > 0 else None
     return None
 
@@ -94,16 +84,6 @@ def _safe_course_name(value: Any, course_id: Any) -> str:
     identifier = _course_identifier(course_id)
     fallback = f"Course-{identifier}" if identifier is not None else "Course"
     return _safe_server_text(value, fallback=fallback)
-
-
-def _safe_output_path(value: object) -> str | None:
-    """Return a path only when its complete text passes the secret guard."""
-    return safe_output_path_text(value)
-
-
-def _safe_content_id(value: Any) -> int | None:
-    """Keep only positive integer content identifiers."""
-    return _positive_id(value)
 
 
 def _safe_content_url(value: Any) -> str | None:
@@ -131,13 +111,7 @@ def _safe_content_url(value: Any) -> str | None:
                 break
             decoded = expanded
         try:
-            query_keys = (
-                key
-                for key, _value in parse_qsl(
-                    decoded.replace(";", "&"),
-                    keep_blank_values=True,
-                )
-            )
+            query_keys = (key for key, _value in parse_qsl(decoded.replace(";", "&"), keep_blank_values=True))
             if any(_CONTENT_SECRET_QUERY_KEY_RE.fullmatch(key) for key in query_keys):
                 return None
         except ValueError:
@@ -150,7 +124,7 @@ def _safe_content_url(value: Any) -> str | None:
 def _content_module_projection(module: dict[str, Any]) -> dict[str, Any]:
     """Project one untrusted module onto the documented JSON fields."""
     return {
-        "ModuleId": _safe_content_id(module.get("ModuleId")),
+        "ModuleId": _positive_id(module.get("ModuleId")),
         "Title": _safe_server_text(module.get("Title")),
         "Modules": [],
         "Topics": [],
@@ -160,7 +134,7 @@ def _content_module_projection(module: dict[str, Any]) -> dict[str, Any]:
 def _content_topic_projection(topic: dict[str, Any]) -> dict[str, Any]:
     """Project one untrusted topic onto scalar, renderer-safe fields."""
     return {
-        "TopicId": _safe_content_id(topic.get("TopicId")),
+        "TopicId": _positive_id(topic.get("TopicId")),
         "Title": _safe_server_text(topic.get("Title")),
         "TypeIdentifier": _safe_server_text(topic.get("TypeIdentifier"), max_len=64),
         "Url": _safe_content_url(topic.get("Url")),
@@ -197,10 +171,7 @@ def _normalise_content_modules(modules: Any) -> list[dict[str, Any]]:
     projected: list[dict[str, Any]] = []
     # ``target`` always points at a list in the newly-created projection, so
     # untrusted objects never become part of the JSON result by reference.
-    stack: list[tuple[str, Any, list[dict[str, Any]], int]] = [
-        ("module", module, projected, 0)
-        for module in reversed(modules)
-    ]
+    stack: list[tuple[str, Any, list[dict[str, Any]], int]] = [("module", module, projected, 0) for module in reversed(modules)]
     seen_modules: set[int] = set()
     node_count = 0
 
@@ -224,12 +195,6 @@ def _normalise_content_modules(modules: Any) -> list[dict[str, Any]]:
             target.append(_content_topic_projection(current))
             node_count += 1
             continue
-        if kind == "topics":
-            if not isinstance(current, list):
-                continue
-            for topic in reversed(current):
-                stack.append(("topic", topic, target, depth))
-            continue
         if not isinstance(current, dict):
             continue
         module_key = id(current)
@@ -247,15 +212,14 @@ def _normalise_content_modules(modules: Any) -> list[dict[str, Any]]:
 
         topics = current.get("Topics", [])
         if isinstance(topics, list):
-            stack.append(("topics", topics, output_module["Topics"], depth + 1))
+            stack.extend(("topic", topic, output_module["Topics"], depth + 1) for topic in reversed(topics))
 
         children = current.get("Modules", [])
         if isinstance(children, list):
             if depth >= _CONTENT_MAX_DEPTH and children:
                 append_module_marker(output_module["Modules"])
             else:
-                for child in reversed(children):
-                    stack.append(("module", child, output_module["Modules"], depth + 1))
+                stack.extend(("module", child, output_module["Modules"], depth + 1) for child in reversed(children))
 
     return projected
 
@@ -318,25 +282,11 @@ def _scope_error_payload() -> dict[str, Any]:
 
 def _single_error_payload(course_id: Any, *, action: str) -> dict[str, Any]:
     """Stable empty envelope for a single-course download/sync failure."""
+    payload: dict[str, Any] = {"course_id": _course_identifier(course_id), "downloaded": []}
     if action == "sync":
-        return {
-            "course_id": _course_identifier(course_id),
-            "downloaded": [],
-            "skipped": [],
-            "updated": [],
-            "orphaned": [],
-            "errors": [],
-        }
-    return {
-        "course_id": _course_identifier(course_id),
-        "downloaded": [],
-        "errors": [],
-    }
-
-
-def _course_list_error_payload() -> dict[str, Any]:
-    """Stable empty envelope for a courses command failure."""
-    return {"courses": []}
+        payload.update(skipped=[], updated=[], orphaned=[])
+    payload["errors"] = []
+    return payload
 
 
 def _output_multi_course_json(
@@ -344,24 +294,14 @@ def _output_multi_course_json(
 ) -> None:
     _output_json(
         {
-            "semester": {
-                "id": sem_id,
-                "name": _safe_server_text(sem_name, fallback="Unknown Semester"),
-            },
+            "semester": {"id": sem_id, "name": _safe_server_text(sem_name, fallback="Unknown Semester")},
             "synced_at": _utc_now_iso(),
             "summary": {
                 "courses_checked": len(courses_results),
                 **{
                     k: sum(len(c.get(k, [])) for c in courses_results)
-                    for k in (
-                        "downloaded",
-                        "skipped",
-                        "updated",
-                        "duplicates",
-                        "errors",
-                        "assignments_downloaded",
-                        "assignment_errors",
-                    )
+                    for k in ("downloaded", "skipped", "updated", "duplicates", "errors",
+                              "assignments_downloaded", "assignment_errors")
                 },
             },
             "courses": courses_results,
@@ -392,14 +332,10 @@ def _single_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _pipeline_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Project an engine entry onto the sync/multi schema (no raw byte size)."""
-    projected: dict[str, Any] = {}
-    for key in ("topic_id", "size_kb"):
+    projected: dict[str, Any] = {key: entry[key] for key in ("topic_id", "size_kb") if key in entry}
+    for key in ("filename", "path"):
         if key in entry:
-            projected[key] = entry[key]
-    if "filename" in entry:
-        projected["filename"] = _safe_server_text(entry.get("filename"))
-    if "path" in entry:
-        projected["path"] = _safe_server_text(entry.get("path"))
+            projected[key] = _safe_server_text(entry.get(key))
     if "sha256" in entry:
         projected["sha256"] = normalize_sha256(entry.get("sha256"))
     if "extension" in entry:
@@ -408,31 +344,16 @@ def _pipeline_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 _ERROR_ID_FIELDS = ("topic_id", "folder_id", "file_id")
-_SAFE_ERROR_TYPES = frozenset(
-    {
-        "path",
-        "manifest_corrupt",
-        "assignment_list",
-        "assignment_data",
-        "assignment_not_found",
-        "topic_data",
-    }
-)
+_SAFE_ERROR_TYPES = frozenset({
+    "path", "manifest_corrupt", "assignment_list", "assignment_data", "assignment_not_found", "topic_data",
+})
 
 
 def _safe_error_identifier(value: Any) -> int | str | None:
     """Keep only positive integer-like IDs from a structured error."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value > 0 else None
     if isinstance(value, str):
-        candidate = value.strip()
-        if not candidate:
-            return None
-        with suppress(ValueError):
-            return candidate if int(candidate) > 0 else None
-    return None
+        return value.strip() if _positive_id(value) is not None else None
+    return _positive_id(value)
 
 
 def _safe_orphan_topic_id(value: Any) -> str | None:
@@ -453,12 +374,7 @@ def _safe_orphan_entry(entry: Any) -> dict[str, Any]:
     """Project a manifest orphan without exposing its filename or path."""
     record = entry if isinstance(entry, dict) else {}
     size = record.get("size")
-    if (
-        isinstance(size, bool)
-        or not isinstance(size, int)
-        or size < 0
-        or size > MAX_MANIFEST_SIZE
-    ):
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > MAX_MANIFEST_SIZE:
         size = 0
     return {
         "topic_id": _safe_orphan_topic_id(record.get("topic_id")),
@@ -505,9 +421,7 @@ def _safe_error_entries(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _assignment_selector_snapshot(
-    client: LighthouseClient,
-    org_id: int,
-    assignment_id: int,
+    client: LighthouseClient, org_id: int, assignment_id: int,
 ) -> tuple[list[dict[str, Any]] | tuple[dict[str, Any], ...] | None, dict[str, str] | None]:
     """Validate and retain one assignment folder list before writing.
 
@@ -528,22 +442,12 @@ def _assignment_selector_snapshot(
         if not isinstance(folder, dict):
             continue
         folder_id = folder.get("Id")
-        if (
-            isinstance(folder_id, int)
-            and not isinstance(folder_id, bool)
-            and folder_id > 0
-            and folder_id == assignment_id
-        ):
+        if isinstance(folder_id, int) and not isinstance(folder_id, bool) and folder_id > 0 and folder_id == assignment_id:
             return folders, None
     return None, {"error": _ASSIGNMENT_NOT_FOUND, "type": "assignment_not_found"}
 
 
-def _render_assignment_selector_error(
-    org_id: int,
-    error: dict[str, str],
-    *,
-    json_output: bool,
-) -> int:
+def _render_assignment_selector_error(org_id: int, error: dict[str, str], *, json_output: bool) -> int:
     """Render a safe assignment preflight error without creating a course dir."""
     safe_entries = _safe_error_entries([error])
     safe_message = safe_entries[0].get("error", "Command failed.") if safe_entries else "Command failed."
@@ -559,117 +463,104 @@ def _render_assignment_selector_error(
     return 1
 
 
+def _has_errors(result: dict[str, Any]) -> bool:
+    """Whether the course or its assignment phase recorded a failure."""
+    return bool(result["errors"] or result["assignments"]["errors"])
+
+
+def _assignment_fields(assignments: dict[str, Any], action: str) -> dict[str, Any]:
+    """Project the assignment phase; sync also reports skipped and updated attachments."""
+    fields: dict[str, Any] = {"assignments_downloaded": assignments["downloaded"]}
+    if action == "sync":
+        fields.update(assignments_skipped=assignments["skipped"], assignments_updated=assignments["updated"])
+    fields["assignment_errors"] = _safe_error_entries(assignments["errors"])
+    return fields
+
+
 def _single_course_json(result: dict[str, Any], *, action: str, include_assignments: bool) -> Any:
     """Project one engine result into the single-course JSON schema."""
-    if result["mode"] is Mode.PLAN:
-        # Keep the historical plan-array shape for a clean dry run.  If a
-        # local validation (for example, a symlinked course destination) makes
-        # the plan fail, preserve the diagnostic in one command-shaped object
-        # instead of returning an indistinguishable empty array.
-        if not result["errors"] and not result["assignments"]["errors"]:
-            return result["planned"]
-        return {
-            "course_id": result["org_id"],
-            "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
-            "folder": str(result["dest"]),
-            "planned": result["planned"],
-            "errors": [_single_error(e) for e in result["errors"]]
-            + _safe_error_entries(result["assignments"]["errors"]),
-        }
-    if result["empty"]:
-        data: dict[str, Any] = {
-            "course_id": result["org_id"],
-            "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
-            "folder": str(result["dest"]),
-            "errors": [_single_error(e) for e in result["errors"]],
-        }
-        if action == "sync":
-            orphaned = result.get("orphaned") or []
-            data.update(
-                downloaded=[],
-                skipped=[],
-                updated=[],
-                orphaned=[_safe_orphan_entry(e) for e in orphaned],
-            )
-        else:
-            data.update(manifest=str(result["manifest_path"]), downloaded=[])
-        return data
-
-    assignments = result["assignments"]
-    data = {
+    # Keep the historical plan-array shape for a clean dry run.  If a
+    # local validation (for example, a symlinked course destination) makes
+    # the plan fail, preserve the diagnostic in one command-shaped object
+    # instead of returning an indistinguishable empty array.
+    if result["mode"] is Mode.PLAN and not _has_errors(result):
+        return result["planned"]
+    data: dict[str, Any] = {
         "course_id": result["org_id"],
         "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
         "folder": str(result["dest"]),
     }
+    errors = [_single_error(e) for e in result["errors"]]
+    if result["mode"] is Mode.PLAN:
+        data.update(planned=result["planned"], errors=errors + _safe_error_entries(result["assignments"]["errors"]))
+        return data
+    if result["empty"]:
+        data["errors"] = errors
+        if action == "sync":
+            orphaned = result.get("orphaned") or []
+            data.update(downloaded=[], skipped=[], updated=[],
+                        orphaned=[_safe_orphan_entry(e) for e in orphaned])
+        else:
+            data.update(manifest=str(result["manifest_path"]), downloaded=[])
+        return data
+
     if action == "sync":
         data.update(
             downloaded=[_pipeline_entry(e) for e in result["downloaded"]],
             skipped=[_pipeline_entry(e) for e in result["skipped"]],
             updated=[_pipeline_entry(e) for e in result["updated"]],
             orphaned=[_safe_orphan_entry(e) for e in result["orphaned"]],
-            errors=[_single_error(e) for e in result["errors"]],
+            errors=errors,
         )
-        if include_assignments:
-            data.update(assignments_downloaded=assignments["downloaded"], assignments_skipped=assignments["skipped"],
-                        assignments_updated=assignments["updated"], assignment_errors=_safe_error_entries(assignments["errors"]))
     else:
         data.update(
             manifest=str(result["manifest_path"]),
             downloaded=[_single_entry(e) for e in result["downloaded"]],
-            errors=[_single_error(e) for e in result["errors"]],
+            errors=errors,
         )
-        if include_assignments:
-            data.update(assignments_downloaded=assignments["downloaded"], assignment_errors=_safe_error_entries(assignments["errors"]))
+    if include_assignments:
+        data.update(_assignment_fields(result["assignments"], action))
     return data
 
 
 def _multi_course_json(result: dict[str, Any], *, sem_name: str, action: str) -> dict[str, Any]:
     """Project one engine result into the multi-course per-course JSON schema."""
-    assignments = result["assignments"]
     course: dict[str, Any] = {
         "course_id": result["org_id"],
         "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
         "semester": _safe_server_text(sem_name, fallback="Unknown Semester"),
         "root": str(result["dest"]),
-        "manifest_total": result["manifest_total"],
-        "downloaded": [_pipeline_entry(e) for e in result["downloaded"]],
-        "skipped": [_pipeline_entry(e) for e in result["skipped"]],
-        "updated": [_pipeline_entry(e) for e in result["updated"]],
     }
+    if result["mode"] is Mode.PLAN:
+        course.update(manifest_total=0, planned=result["planned"], downloaded=[], skipped=[], updated=[],
+                      duplicates=[], errors=_safe_error_entries(result["errors"]))
+        return course
+    course.update(
+        manifest_total=result["manifest_total"],
+        downloaded=[_pipeline_entry(e) for e in result["downloaded"]],
+        skipped=[_pipeline_entry(e) for e in result["skipped"]],
+        updated=[_pipeline_entry(e) for e in result["updated"]],
+    )
     if action == "sync":
         course["orphaned"] = [_safe_orphan_entry(e) for e in result["orphaned"]]
     course["duplicates"] = result["duplicates"]
     course["errors"] = _safe_error_entries(result["errors"])
-    if action == "sync":
-        course.update(assignments_downloaded=assignments["downloaded"], assignments_skipped=assignments["skipped"],
-                      assignments_updated=assignments["updated"], assignment_errors=_safe_error_entries(assignments["errors"]))
-    else:
-        course.update(assignments_downloaded=assignments["downloaded"], assignment_errors=_safe_error_entries(assignments["errors"]))
+    course.update(_assignment_fields(result["assignments"], action))
     return course
 
 
 def _multi_course_failure_json(
-    course_id: int,
-    *,
-    root: Path,
-    sem_name: str,
-    action: str,
-    error: Exception,
+    course_id: int, *, root: Path, sem_name: str, action: str, error: Exception,
 ) -> dict[str, Any]:
     """Keep a failed scoped course visible in the multi-course JSON envelope."""
     course: dict[str, Any] = {
         "course_id": course_id,
         "course_name": "",
         "semester": _safe_server_text(sem_name, fallback="Unknown Semester"),
-        "root": _safe_output_path(root),
-        "manifest_total": 0,
-        "downloaded": [],
-        "skipped": [],
-        "updated": [],
-        "duplicates": [],
+        "root": safe_output_path_text(root),
+        "manifest_total": 0, "downloaded": [], "skipped": [], "updated": [], "duplicates": [],
         "errors": [{"error": format_user_error(error)}],
-        "assignments_downloaded": [],
-        "assignment_errors": [],
+        "assignments_downloaded": [], "assignment_errors": [],
     }
     if action == "sync":
         course.update(orphaned=[], assignments_skipped=[], assignments_updated=[])
@@ -678,6 +569,7 @@ def _multi_course_failure_json(
 
 def _render_course_human(result: dict[str, Any], *, action: str, include_assignments: bool) -> int:
     """Render one engine result as human-readable text. Returns per-course exit code."""
+    failed = 1 if _has_errors(result) else 0
     if result["mode"] is Mode.PLAN:
         print(f"Would download {result['topic_count']} files to {result['dest']}/\n")
         print("\n".join(
@@ -690,7 +582,7 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
                 print(f"  FAILED: {format_user_error(str(error['error']))}", file=sys.stderr)
         if include_assignments:
             print("\n  (Assignment downloads not shown in dry-run)")
-        return 1 if result["errors"] or result["assignments"]["errors"] else 0
+        return failed
     if result["empty"]:
         orphaned = result.get("orphaned") or []
         if action == "sync" and orphaned:
@@ -699,10 +591,9 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
             print("No downloadable files found.")
         # Uniform policy: a recorded failure (e.g. corrupt manifest surfaced
         # on an empty course) is an error-class exit even with no downloads.
-        return 1 if (result["errors"] or result["assignments"]["errors"]) else 0
+        return failed
 
     assignments = result["assignments"]
-    failed = 1 if (result["errors"] or assignments["errors"]) else 0
     if action == "sync":
         parts = [f"{len(result['downloaded'])} new"]
         if assignments["downloaded"]:
@@ -728,10 +619,7 @@ def _render_course_human(result: dict[str, Any], *, action: str, include_assignm
         print(f"\nAssignments: {len(assignments['downloaded'])} attachment(s) downloaded")
     for assignment_error in assignments["errors"]:
         if "error" in assignment_error:
-            print(
-                f"  FAILED assignment: {format_user_error(str(assignment_error['error']))}",
-                file=sys.stderr,
-            )
+            print(f"  FAILED assignment: {format_user_error(str(assignment_error['error']))}", file=sys.stderr)
     print(f"\nDone: {len(result['downloaded'])}/{result['topic_count']} files downloaded to {result['dest']}")
     if assignments["errors"]:
         print(f"  {len(assignments['errors'])} assignment error(s)")
@@ -752,29 +640,19 @@ def _run_and_render_single(
     assignment_folders: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> int:
     """Run one course through the sync engine and render it. Returns exit code."""
+    folders = {} if assignment_folders is None else {"assignment_folders": assignment_folders}
     try:
-        run_kwargs: dict[str, Any] = {
-            "mode": mode,
-            "types": types,
-            "include_assignments": include_assignments,
-            "assignment_id": assignment_id,
-        }
-        if assignment_folders is not None:
-            run_kwargs["assignment_folders"] = assignment_folders
-        result = run_course(client, org_id, root, **run_kwargs)
+        result = run_course(client, org_id, root, mode=mode, types=types, include_assignments=include_assignments,
+                            assignment_id=assignment_id, **folders)
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload=_single_error_payload(org_id, action=action),
-        )
+        return _error(e, json_output=json_output, payload=_single_error_payload(org_id, action=action))
 
     _print_warnings(result)
     if json_output:
         _output_json(_single_course_json(result, action=action, include_assignments=include_assignments))
     else:
         _render_course_human(result, action=action, include_assignments=include_assignments)
-    return 1 if (result["errors"] or result["assignments"]["errors"]) else 0
+    return 1 if _has_errors(result) else 0
 
 
 def _run_and_render_multi(
@@ -804,15 +682,7 @@ def _run_and_render_multi(
             # stderr and continue collecting the remaining courses.
             rc = 1
             print(f"Error: {format_user_error(e)}", file=sys.stderr)
-            failed_courses.append(
-                _multi_course_failure_json(
-                    cid,
-                    root=root,
-                    sem_name=sem_name,
-                    action=action,
-                    error=e,
-                )
-            )
+            failed_courses.append(_multi_course_failure_json(cid, root=root, sem_name=sem_name, action=action, error=e))
 
     if json_output:
         courses = list(failed_courses)
@@ -820,22 +690,8 @@ def _run_and_render_multi(
             # Engine warnings reach stderr in every mode — an unknown
             # --types value must never change the downloaded set silently.
             _print_warnings(result)
-            if result["mode"] is Mode.PLAN:
-                plan_course = {
-                    "course_id": result["org_id"],
-                    "course_name": _safe_course_name(result.get("course_name"), result.get("org_id")),
-                    "semester": _safe_server_text(sem_name, fallback="Unknown Semester"),
-                    "root": str(result["dest"]), "manifest_total": 0,
-                    "planned": result["planned"], "downloaded": [], "skipped": [],
-                    "updated": [], "duplicates": [],
-                    "errors": _safe_error_entries(result["errors"]),
-                }
-                courses.append(plan_course)
-                if result["errors"] or result["assignments"]["errors"]:
-                    rc = 1
-                continue
             courses.append(_multi_course_json(result, sem_name=sem_name, action=action))
-            if result["errors"] or result["assignments"]["errors"]:
+            if _has_errors(result):
                 rc = 1
         courses.sort(key=lambda course: course["course_id"])
         _output_multi_course_json(sem_id, sem_name, courses, also_errors)
@@ -877,101 +733,60 @@ def cmd_download(
     # Assignment-specific operations are intentionally single-course only.
     # Validate before constructing a client so malformed combinations cannot
     # touch credentials, make API calls, or enter a write-capable path.
-    for option, value in (("assignment", assignment_id), ("attachment", attachment_id)):
-        if validation_error := _selector_error(value, option):
-            return _error(
-                validation_error,
-                json_output=json_output,
-                payload=_single_error_payload(course_id, action="download"),
-            )
-    if attachment_id is not None and assignment_id is None:
-        return _error(
-            "--attachment requires --assignment",
-            json_output=json_output,
-            payload=_single_error_payload(course_id, action="download"),
-        )
-    if (assignment_id is not None or attachment_id is not None) and course_id is None:
-        return _error(
-            "COURSE_ID is required when using --assignment or --attachment",
-            json_output=json_output,
-            payload=_single_error_payload(course_id, action="download"),
-        )
-    if dry_run and assignment_id is not None:
-        return _error(
-            "--dry-run cannot be used with --assignment",
-            json_output=json_output,
-            payload=_single_error_payload(course_id, action="download"),
-        )
-    if course_id is not None and (semester is not None or also_courses):
-        return _error(
-            "--semester and --also are only supported when COURSE_ID is omitted",
-            json_output=json_output,
-            payload=_single_error_payload(course_id, action="download"),
-        )
+    if option_error := _download_option_error(course_id, dry_run, semester, also_courses, assignment_id, attachment_id):
+        return _error(option_error, json_output=json_output, payload=_single_error_payload(course_id, action="download"))
 
     payload = _single_error_payload(course_id, action="download") if course_id is not None else _scope_error_payload()
     try:
-        root = validate_output_root(
-            Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR,
-        )
-    except Exception as e:
-        return _error(e, json_output=json_output, payload=payload)
-    try:
+        root = validate_output_root(Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR)
         client = LighthouseClient(read_only_auth=dry_run)
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload=payload,
-        )
-    also_courses = also_courses or []
+        return _error(e, json_output=json_output, payload=payload)
     mode = Mode.PLAN if dry_run else (Mode.FORCE if force else Mode.DOWNLOAD)
 
-    if course_id is not None:
-        try:
-            org_id = resolve_course_id(client, course_id)
-        except Exception as e:
-            return _error(
-                e,
-                json_output=json_output,
-                payload=_single_error_payload(course_id, action="download"),
-            )
-        # The bulk assignment path must validate before fetching the content
-        # TOC.  A direct attachment download already resolves the selected
-        # folder through ``get_dropbox_folder_detail`` and has its own safe
-        # error path; keep that legacy API shape intact here.
-        assignment_folders = None
-        if assignment_id is not None and attachment_id is None:
-            assignment_folders, assignment_error = _assignment_selector_snapshot(
-                client, org_id, assignment_id,
-            )
-            if assignment_error is not None:
-                return _render_assignment_selector_error(
-                    org_id, assignment_error, json_output=json_output,
-                )
-        if assignment_id is not None and attachment_id is not None:
-            return _download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
-        return _run_and_render_single(
-            client, org_id, root, mode, "download", types, json_output,
-            include_assignments=include_assignments or assignment_id is not None,
-            assignment_id=assignment_id,
-            assignment_folders=assignment_folders,
-        )
+    if course_id is None:
+        return _run_semester_scope(client, root, mode, "download", types, semester, also_courses or [],
+                                   json_output, include_assignments)
+    try:
+        org_id = resolve_course_id(client, course_id)
+    except Exception as e:
+        return _error(e, json_output=json_output, payload=payload)
+    # The bulk assignment path must validate before fetching the content
+    # TOC.  A direct attachment download already resolves the selected
+    # folder through ``get_dropbox_folder_detail`` and has its own safe
+    # error path; keep that legacy API shape intact here.
+    assignment_folders = None
+    if assignment_id is not None and attachment_id is None:
+        assignment_folders, assignment_error = _assignment_selector_snapshot(client, org_id, assignment_id)
+        if assignment_error is not None:
+            return _render_assignment_selector_error(org_id, assignment_error, json_output=json_output)
+    if assignment_id is not None and attachment_id is not None:
+        return _download_single_attachment(client, org_id, assignment_id, attachment_id, root, json_output)
+    return _run_and_render_single(
+        client, org_id, root, mode, "download", types, json_output,
+        include_assignments=include_assignments or assignment_id is not None,
+        assignment_id=assignment_id,
+        assignment_folders=assignment_folders,
+    )
 
-    scope = _resolve_course_scope(
-        client,
-        semester,
-        also_courses,
-        "download",
-        json_output=json_output,
-    )
-    if isinstance(scope, int):
-        return scope
-    course_ids, sem_name, sem_id, also_errors = scope
-    return _run_and_render_multi(
-        client, course_ids, root, mode, "download", types,
-        sem_id, sem_name, also_errors, json_output, include_assignments,
-    )
+
+def _download_option_error(
+    course_id: str | None, dry_run: bool, semester: str | None, also_courses: list[str] | None,
+    assignment_id: int | None, attachment_id: int | None,
+) -> str | None:
+    """Return the message for the first invalid ``download`` option combination."""
+    for option, value in (("assignment", assignment_id), ("attachment", attachment_id)):
+        if validation_error := _selector_error(value, option):
+            return validation_error
+    if attachment_id is not None and assignment_id is None:
+        return "--attachment requires --assignment"
+    if (assignment_id is not None or attachment_id is not None) and course_id is None:
+        return "COURSE_ID is required when using --assignment or --attachment"
+    if dry_run and assignment_id is not None:
+        return "--dry-run cannot be used with --assignment"
+    if course_id is not None and (semester is not None or also_courses):
+        return "--semester and --also are only supported when COURSE_ID is omitted"
+    return None
 
 
 def cmd_sync(
@@ -987,53 +802,38 @@ def cmd_sync(
     """Incremental sync: skip unchanged files using manifest. Same scope options as download."""
     payload = _single_error_payload(course_id, action="sync") if course_id is not None else _scope_error_payload()
     try:
-        root = validate_output_root(
-            Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR,
-        )
-    except Exception as e:
-        return _error(e, json_output=json_output, payload=payload)
-    try:
+        root = validate_output_root(Path(output_dir).expanduser() if output_dir else DEFAULT_DOWNLOAD_DIR)
         client = LighthouseClient()
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload=payload,
-        )
+        return _error(e, json_output=json_output, payload=payload)
     also_courses = also_courses or []
     mode = Mode.FORCE if force else Mode.SYNC
 
-    if course_id is not None and (semester is not None or also_courses):
-        return _error(
-            "--semester and --also are only supported when COURSE_ID is omitted",
-            json_output=json_output,
-            payload=_single_error_payload(course_id, action="sync"),
-        )
+    if course_id is None:
+        return _run_semester_scope(client, root, mode, "sync", types, semester, also_courses,
+                                   json_output, include_assignments)
+    if semester is not None or also_courses:
+        return _error("--semester and --also are only supported when COURSE_ID is omitted",
+                      json_output=json_output, payload=payload)
+    try:
+        org_id = resolve_course_id(client, course_id)
+    except Exception as e:
+        return _error(e, json_output=json_output, payload=payload)
+    return _run_and_render_single(client, org_id, root, mode, "sync", types, json_output,
+                                  include_assignments=include_assignments)
 
-    if course_id is not None:
-        try:
-            org_id = resolve_course_id(client, course_id)
-        except Exception as e:
-            return _error(
-                e,
-                json_output=json_output,
-                payload=_single_error_payload(course_id, action="sync"),
-            )
-        return _run_and_render_single(client, org_id, root, mode, "sync", types, json_output,
-                                      include_assignments=include_assignments)
 
-    scope = _resolve_course_scope(
-        client,
-        semester,
-        also_courses,
-        "sync",
-        json_output=json_output,
-    )
+def _run_semester_scope(
+    client: LighthouseClient, root: Path, mode: Mode, action: str, types: str, semester: str | None,
+    also_courses: list[str], json_output: bool, include_assignments: bool,
+) -> int:
+    """Resolve the multi-course scope, then run and render every course in it."""
+    scope = _resolve_course_scope(client, semester, also_courses, action, json_output=json_output)
     if isinstance(scope, int):
         return scope
     course_ids, sem_name, sem_id, also_errors = scope
     return _run_and_render_multi(
-        client, course_ids, root, mode, "sync", types,
+        client, course_ids, root, mode, action, types,
         sem_id, sem_name, also_errors, json_output, include_assignments,
     )
 
@@ -1042,41 +842,19 @@ def cmd_sync(
 # Scope resolution (multi-course)
 # ---------------------------------------------------------------------------
 
-def _resolve_semester(
-    client: LighthouseClient,
-    semester_filter: str | None,
-    semester_records: list[dict[str, Any]] | None = None,
-) -> dict[str, Any] | None:
+def _resolve_semester(semester_filter: str | None, semester_records: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Resolve semester filter to a semester record, or None if not found. Matches by OrgUnitId (numeric) or name substring."""
-    if semester_records is None:
-        semester_records = client.get_semesters()
-    if not isinstance(semester_records, (list, tuple)):
-        return None
-    semesters: list[dict[str, Any]] = []
-    for semester in semester_records:
-        if not isinstance(semester, dict):
-            continue
-        semester_id = _positive_id(semester.get("OrgUnitId"))
-        if semester_id is None:
-            continue
-        semesters.append(
-            {
-                "OrgUnitId": semester_id,
-                "Name": _safe_server_text(semester.get("Name")),
-                "Code": _safe_server_text(semester.get("Code")),
-            }
-        )
-    if not semesters:
+    if not (semesters := _normalise_semester_records(semester_records)):
         return None
 
     if semester_filter is None:
         # Default: latest semester = highest OrgUnitId
-        return max(semesters, key=lambda s: _positive_id(s.get("OrgUnitId")) or 0)
+        return max(semesters, key=lambda s: s["OrgUnitId"])
 
     # Try numeric OrgUnitId match
     with suppress(TypeError, ValueError):
         for s in semesters:
-            if (_positive_id(s.get("OrgUnitId")) or 0) == int(semester_filter):
+            if s["OrgUnitId"] == int(semester_filter):
                 return s
 
     # Try name substring match (case-insensitive)
@@ -1084,7 +862,7 @@ def _resolve_semester(
     if exact := next((s for s in semesters if lower_filter == s["Name"].lower()), None):
         return exact
     if matches := [s for s in semesters if lower_filter in s["Name"].lower()]:
-        return max(matches, key=lambda s: _positive_id(s.get("OrgUnitId")) or 0)
+        return max(matches, key=lambda s: s["OrgUnitId"])
 
     return None
 
@@ -1093,21 +871,15 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
     """Resolve an --also course identifier (name or numeric ID) to an OrgUnitId."""
     normalized_identifier = identifier.strip()
     if not normalized_identifier:
-        raise CourseNotFoundError(
-            "Course identifier cannot be empty. Run: lighthouse courses"
-        )
-    courses = get_enrolled_course_catalog(client)
-    courses = [course for course in courses if isinstance(course, dict)]
+        raise CourseNotFoundError("Course identifier cannot be empty. Run: lighthouse courses")
+    courses = [course for course in get_enrolled_course_catalog(client) if isinstance(course, dict)]
+    not_found = f"Course '{identifier}' not found. Run: lighthouse courses"
     # Try numeric
-    try:
+    with suppress(ValueError):
         cid = int(normalized_identifier)
         if not any(_positive_id(c.get("OrgUnitId")) == cid for c in courses):
-            raise CourseNotFoundError(
-                f"Course '{identifier}' not found. Run: lighthouse courses"
-            )
+            raise CourseNotFoundError(not_found)
         return cid
-    except ValueError:
-        pass
 
     # Try name substring
     needle = normalized_identifier.lower()
@@ -1128,50 +900,34 @@ def _resolve_also_course(client: LighthouseClient, identifier: str) -> int:
             )
             + "\n\nUse the numeric OrgUnitId for an exact match."
         )
-    raise CourseNotFoundError(
-        f"Course '{identifier}' not found. Run: lighthouse courses"
-    )
+    raise CourseNotFoundError(not_found)
 
 
 def _filter_courses_by_semester(
     enrollments: list[dict[str, Any]],
     semester: dict[str, Any],
-    semester_filter: str | None = None,
-    config: dict[str, dict[str, str]] | None = None,
+    semester_filter: str | None,
+    config: dict[str, dict[str, str]],
 ) -> list[int]:
     """Filter enrollments to courses in a specific semester using course-config.json."""
-    if config is None:
-        config = _load_course_config()
-
     if not config:
         # Never widen a local write operation to every enrollment when the
         # semester mapping is absent.  Scope resolution fails closed before
         # this helper, and direct callers remain safe as well.
         return []
 
-    # Determine the target semester label to match against config entries
+    # A text filter is compared directly against config labels.  With no
+    # filter (latest semester) or a numeric OrgUnitId filter, the resolved
+    # semester's API Name is authoritative: config labels are matched against
+    # its "|"-separated segments, so "AY 2024-25 | Sem II" matches "Sem II".
+    target_lower = None
     if semester_filter:
-        # If the filter is a numeric OrgUnitId, the resolved semester's Name
-        # is the authoritative source — use substring matching against config
-        # labels (same as the no-filter path).
         try:
             int(semester_filter)
-            # Numeric filter — use resolved semester Name
-            target_lower = None
         except ValueError:
-            # Text filter — compare directly against config labels
             target_lower = semester_filter.lower().strip()
-    else:
-        # No filter (latest semester) — use the API semester Name for
-        # substring matching against config labels, so "AY 2024-25 | Sem II"
-        # matches a config label of "Sem II".
-        target_lower = None
 
-    sem_name = (
-        _safe_server_text(semester.get("Name"))
-        if isinstance(semester, dict)
-        else ""
-    )
+    sem_name = _safe_server_text(semester.get("Name"))
     sem_segments = [s.strip() for s in sem_name.lower().split("|")] if target_lower is None else []
     return [
         oid for e in enrollments
@@ -1195,10 +951,11 @@ def _resolve_course_scope(
     json_output: bool = False,
 ) -> tuple[list[int], str, int, list[str]] | int:
     """Resolve course scope for multi-course ops. Returns (ids, sem_name, sem_id, errors) or int exit code."""
+    payload = _scope_error_payload()
     try:
         config = _load_course_config()
     except Exception as e:
-        return _error(e, json_output=json_output, payload=_scope_error_payload())
+        return _error(e, json_output=json_output, payload=payload)
 
     # A multi-course write must be bounded by a local semester mapping.  The
     # loader normalizes disk input, but callers/tests can inject arbitrary
@@ -1223,32 +980,28 @@ def _resolve_course_scope(
             "No trustworthy local semester configuration found. Use an explicit "
             "COURSE_ID or run: lighthouse config courses.",
             json_output=json_output,
-            payload=_scope_error_payload(),
+            payload=payload,
         )
 
     try:
         semesters = client.get_semesters()
         enrollments = client.get_course_enrollments()
     except Exception as e:
-        return _error(e, json_output=json_output, payload=_scope_error_payload())
+        return _error(e, json_output=json_output, payload=payload)
 
     if not isinstance(semesters, (list, tuple)) or not semesters:
-        return _error("No semesters found.", json_output=json_output, payload=_scope_error_payload())
+        return _error("No semesters found.", json_output=json_output, payload=payload)
     if not isinstance(enrollments, (list, tuple)):
-        return _error(
-            "Invalid course enrollment response.",
-            json_output=json_output,
-            payload=_scope_error_payload(),
-        )
+        return _error("Invalid course enrollment response.", json_output=json_output, payload=payload)
 
-    # Pass the already-fetched records so one invocation cannot make a second
-    # API request or observe a different semester snapshot.
-    if (sem := _resolve_semester(client, semester_filter, list(semesters))) is None:
+    # Resolve from the already-fetched records so one invocation cannot make
+    # a second API request or observe a different semester snapshot.
+    if (sem := _resolve_semester(semester_filter, list(semesters))) is None:
         return _error(
             f"No semester matching '{semester_filter}'. Run: lighthouse semesters"
             if semester_filter else "No semesters found.",
             json_output=json_output,
-            payload=_scope_error_payload(),
+            payload=payload,
         )
 
     semester_course_ids = sorted(set(_filter_courses_by_semester(
@@ -1262,29 +1015,14 @@ def _resolve_course_scope(
         except CourseNotFoundError as e:
             also_errors.append(str(e))
         except Exception as e:
-            return _error(e, json_output=json_output, payload=_scope_error_payload())
+            return _error(e, json_output=json_output, payload=payload)
 
-    all_course_ids = list(semester_course_ids)
-    seen_course_ids = set(semester_course_ids)
-    for cid in also_ids:
-        if cid not in seen_course_ids:
-            all_course_ids.append(cid)
-            seen_course_ids.add(cid)
-
-    if not all_course_ids:
-        return _error(
-            f"No courses to {action_label}.",
-            json_output=json_output,
-            payload=_scope_error_payload(),
-        )
+    if not (all_course_ids := list(dict.fromkeys([*semester_course_ids, *also_ids]))):
+        return _error(f"No courses to {action_label}.", json_output=json_output, payload=payload)
 
     sem_id = _positive_id(sem.get("OrgUnitId"))
     if sem_id is None:
-        return _error(
-            "Resolved semester has an invalid identifier.",
-            json_output=json_output,
-            payload=_scope_error_payload(),
-        )
+        return _error("Resolved semester has an invalid identifier.", json_output=json_output, payload=payload)
     sem_name = _safe_server_text(sem.get("Name")) or "Unknown Semester"
     return all_course_ids, sem_name, sem_id, also_errors
 
@@ -1295,30 +1033,19 @@ def _resolve_course_scope(
 
 def cmd_auth_status(json_output: bool = False) -> int:
     """Check if stored cookies are valid."""
+    payload = {"valid": False}
     try:
         client = LighthouseClient()
         cookies = client.cookies
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload={"valid": False},
-        )
+        return _error(e, json_output=json_output, payload=payload)
     if not cookies:
-        return _error(
-            "No cookies found. Run: lighthouse auth login",
-            json_output=json_output,
-            payload={"valid": False},
-        )
+        return _error("No cookies found. Run: lighthouse auth login", json_output=json_output, payload=payload)
 
     try:
         valid = client.check_auth()
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload={"valid": False},
-        )
+        return _error(e, json_output=json_output, payload=payload)
     if valid:
         if json_output:
             _output_json({"valid": True, "cookies": list(cookies.keys())})
@@ -1339,18 +1066,10 @@ def cmd_semesters(json_output: bool = False) -> int:
         client = LighthouseClient()
         semesters = client.get_semesters()
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload={"semesters": []},
-        )
+        return _error(e, json_output=json_output, payload={"semesters": []})
 
     if not isinstance(semesters, list):
-        return _error(
-            "Invalid semester response.",
-            json_output=json_output,
-            payload={"semesters": []},
-        )
+        return _error("Invalid semester response.", json_output=json_output, payload={"semesters": []})
     semesters = _normalise_semester_records(semesters)
 
     if json_output:
@@ -1365,39 +1084,24 @@ def cmd_semesters(json_output: bool = False) -> int:
     return 0
 
 
-def cmd_courses(
-    semester: str | None = None,
-    json_output: bool = False,
-    tracked_only: bool = False,
-) -> int:
+def cmd_courses(semester: str | None = None, json_output: bool = False, tracked_only: bool = False) -> int:
     """List courses, optionally filtered by semester or tracked status."""
+    payload: dict[str, Any] = {"courses": []}
     try:
         client = LighthouseClient()
         enrolled_courses = get_enrolled_course_catalog(client)
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload=_course_list_error_payload(),
-        )
+        return _error(e, json_output=json_output, payload=payload)
 
     if not isinstance(enrolled_courses, list):
-        return _error(
-            "Invalid course enrollment response.",
-            json_output=json_output,
-            payload=_course_list_error_payload(),
-        )
+        return _error("Invalid course enrollment response.", json_output=json_output, payload=payload)
 
     try:
         config = _load_course_config()
         if not isinstance(config, dict):
             config = {}
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload=_course_list_error_payload(),
-        )
+        return _error(e, json_output=json_output, payload=payload)
     courses: list[dict[str, Any]] = []
     for enrolled_course in enrolled_courses:
         if not isinstance(enrolled_course, dict):
@@ -1420,11 +1124,7 @@ def cmd_courses(
         })
 
     if (tracked_only or semester) and not config:
-        return _error(
-            "No course config found. Run: lighthouse config courses",
-            json_output=json_output,
-            payload=_course_list_error_payload(),
-        )
+        return _error("No course config found. Run: lighthouse config courses", json_output=json_output, payload=payload)
     if tracked_only:
         courses = [c for c in courses if str(c.get("OrgUnitId", "")) in config]
     if semester:
@@ -1436,7 +1136,7 @@ def cmd_courses(
                 f"No tracked courses mapped to semester '{semester}'.\n"
                 "Run: lighthouse config courses --list to see your mappings.",
                 json_output=json_output,
-                payload=_course_list_error_payload(),
+                payload=payload,
             )
 
     if json_output:
@@ -1456,25 +1156,11 @@ def cmd_content(course_id: str, json_output: bool = False) -> int:
         org_id = resolve_course_id(client, course_id)
         toc = client.get_content_toc(org_id)
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload={"course_id": _course_identifier(course_id), "modules": []},
-        )
+        return _error(e, json_output=json_output, payload={"course_id": _course_identifier(course_id), "modules": []})
 
-    if not isinstance(toc, dict):
-        return _error(
-            "Invalid content response.",
-            json_output=json_output,
-            payload={"course_id": org_id, "modules": []},
-        )
-    modules = toc.get("Modules", [])
+    modules = toc.get("Modules", []) if isinstance(toc, dict) else None
     if not isinstance(modules, list):
-        return _error(
-            "Invalid content response.",
-            json_output=json_output,
-            payload={"course_id": org_id, "modules": []},
-        )
+        return _error("Invalid content response.", json_output=json_output, payload={"course_id": org_id, "modules": []})
 
     if json_output:
         try:
@@ -1484,20 +1170,13 @@ def cmd_content(course_id: str, json_output: bool = False) -> int:
             # The projection above is deliberately iterative, but retain the
             # command's one-document JSON contract if an unexpected encoder or
             # custom mapping failure is introduced in the future.
-            return _error(
-                e,
-                json_output=True,
-                payload={"course_id": _course_identifier(org_id), "modules": []},
-            )
+            return _error(e, json_output=True, payload={"course_id": _course_identifier(org_id), "modules": []})
         return 0
 
     try:
         items = _walk_content_tree(modules)
     except Exception as e:
-        return _error(
-            e,
-            payload={"course_id": _course_identifier(org_id), "modules": []},
-        )
+        return _error(e, payload={"course_id": _course_identifier(org_id), "modules": []})
     if not items:
         print("No content found for this course.")
         return 0
@@ -1514,7 +1193,7 @@ def cmd_content(course_id: str, json_output: bool = False) -> int:
     return 0
 
 
-def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
+def _walk_content_tree(modules: Any) -> list[dict[str, Any]]:
     """Flatten the nested content TOC into a list of display records.
 
     Each record: ``{depth, type, id, title, url}``.  The input is an
@@ -1525,12 +1204,7 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
     if not isinstance(modules, list):
         return items
 
-    start_depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 0
-    start_depth = max(0, min(start_depth, _CONTENT_MAX_DEPTH))
-    stack: list[tuple[str, Any, int]] = [
-        ("module", module, start_depth)
-        for module in reversed(modules)
-    ]
+    stack: list[tuple[str, Any, int]] = [("module", module, 0) for module in reversed(modules)]
     seen_modules: set[int] = set()
     truncated = False
 
@@ -1548,12 +1222,6 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
 
     while stack:
         kind, current, current_depth = stack.pop()
-        if kind == "topics":
-            if not isinstance(current, list):
-                continue
-            for topic in reversed(current):
-                stack.append(("topic", topic, current_depth))
-            continue
         if kind == "topic":
             if not isinstance(current, dict):
                 continue
@@ -1564,12 +1232,10 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
             items.append({
                 "depth": current_depth,
                 "type": "topic",
-                "id": _safe_content_id(current.get("TopicId")),
+                "id": _positive_id(current.get("TopicId")),
                 "title": _safe_server_text(current.get("Title")),
                 "url": _safe_content_url(current.get("Url")),
-                "topic_type": _safe_server_text(
-                    current.get("TypeIdentifier"), max_len=64,
-                ),
+                "topic_type": _safe_server_text(current.get("TypeIdentifier"), max_len=64),
             })
             continue
         if not isinstance(current, dict):
@@ -1586,22 +1252,21 @@ def _walk_content_tree(modules: Any, depth: int = 0) -> list[dict[str, Any]]:
         items.append({
             "depth": current_depth,
             "type": "module",
-            "id": _safe_content_id(current.get("ModuleId")),
+            "id": _positive_id(current.get("ModuleId")),
             "title": _safe_server_text(current.get("Title")),
             "url": None,
         })
 
         topics = current.get("Topics", [])
         if isinstance(topics, list):
-            stack.append(("topics", topics, current_depth + 1))
+            stack.extend(("topic", topic, current_depth + 1) for topic in reversed(topics))
 
         child_modules = current.get("Modules", [])
         if isinstance(child_modules, list):
             if current_depth >= _CONTENT_MAX_DEPTH and child_modules:
                 append_truncation(current_depth + 1)
             else:
-                for child in reversed(child_modules):
-                    stack.append(("module", child, current_depth + 1))
+                stack.extend(("module", child, current_depth + 1) for child in reversed(child_modules))
     return items
 
 
@@ -1641,20 +1306,13 @@ def _safe_quiz_rich_text(value: Any) -> str:
 
 def _safe_quiz_date(value: Any) -> str | None:
     """Return a bounded printable quiz date or ``None``."""
-    safe_value = _safe_server_text(value, max_len=128)
-    return safe_value or None
+    return _safe_server_text(value, max_len=128) or None
 
 
-def _safe_quiz_scalar(value: Any, *, fallback: str = "?") -> str:
+def _safe_quiz_scalar(value: Any) -> str:
     """Render a scalar quiz value without interpolating nested objects."""
-    if isinstance(value, bool):
-        return fallback
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float) and math.isfinite(value):
-        return str(value)
-    safe_value = _safe_server_text(value, max_len=64)
-    return safe_value or fallback
+    scalar = _safe_quiz_json_scalar(value)
+    return "?" if scalar is None else str(scalar)
 
 
 def _safe_quiz_json_scalar(value: Any) -> int | float | str | None:
@@ -1671,19 +1329,11 @@ def _safe_quiz_json_scalar(value: Any) -> int | float | str | None:
 
 def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     """Project quiz JSON onto bounded scalar fields and safe RichText."""
-    from .quiz_rules import navigation_rules
     payload: dict[str, Any] = {
-        "QuizId": _safe_content_id(quiz.get("QuizId")),
+        "QuizId": _positive_id(quiz.get("QuizId")),
         "Name": _safe_server_text(quiz.get("Name"), fallback="Quiz") or "Quiz",
     }
-    for key in (
-        "IsActive",
-        "Shuffle",
-        "PreventMovingBackwards",
-        "IsSingleSession",
-        "AllowHints",
-        "AutoExportToGrades",
-    ):
+    for key in ("IsActive", "Shuffle", "PreventMovingBackwards", "IsSingleSession", "AllowHints", "AutoExportToGrades"):
         payload[key] = _coerce_boolish(quiz.get(key))
     for key in ("StartDate", "EndDate", "DueDate"):
         payload[key] = _safe_quiz_date(quiz.get(key))
@@ -1691,9 +1341,7 @@ def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     attempts = quiz.get("AttemptsAllowed")
     if not isinstance(attempts, dict):
         attempts = {}
-    attempts_payload: dict[str, Any] = {
-        "IsUnlimited": _coerce_boolish(attempts.get("IsUnlimited")),
-    }
+    attempts_payload: dict[str, Any] = {"IsUnlimited": _coerce_boolish(attempts.get("IsUnlimited"))}
     if (number := _safe_quiz_json_scalar(attempts.get("NumberOfAttemptsAllowed"))) is not None:
         attempts_payload["NumberOfAttemptsAllowed"] = number
     payload["AttemptsAllowed"] = attempts_payload
@@ -1701,9 +1349,7 @@ def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     time_limit = quiz.get("SubmissionTimeLimit")
     if not isinstance(time_limit, dict):
         time_limit = {}
-    time_payload: dict[str, Any] = {
-        "IsEnforced": _coerce_boolish(time_limit.get("IsEnforced")),
-    }
+    time_payload: dict[str, Any] = {"IsEnforced": _coerce_boolish(time_limit.get("IsEnforced"))}
     if (time_value := _safe_quiz_json_scalar(time_limit.get("TimeLimitValue"))) is not None:
         time_payload["TimeLimitValue"] = time_value
     payload["SubmissionTimeLimit"] = time_payload
@@ -1711,8 +1357,9 @@ def _normalise_quiz_payload(quiz: dict[str, Any]) -> dict[str, Any]:
     for key in ("Description", "Instructions"):
         if key in quiz:
             payload[key] = _safe_quiz_rich_text(quiz.get(key))
-    payload["PagingTypeId"] = navigation_rules(quiz)["paging_type_id"]
-    payload["Navigation"] = navigation_rules(quiz)
+    rules = navigation_rules(quiz)
+    payload["PagingTypeId"] = rules["paging_type_id"]
+    payload["Navigation"] = rules
     return payload
 
 
@@ -1723,28 +1370,16 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
         org_id = resolve_course_id(client, course_id)
         quiz = client.get_quiz_detail(org_id, quiz_id)
     except Exception as e:
-        return _error(
-            e,
-            json_output=json_output,
-            payload={"course_id": _course_identifier(course_id), "quiz": {}},
-        )
+        return _error(e, json_output=json_output, payload={"course_id": _course_identifier(course_id), "quiz": {}})
 
     if not isinstance(quiz, dict):
-        return _error(
-            "Invalid quiz response.",
-            json_output=json_output,
-            payload={"course_id": org_id, "quiz": {}},
-        )
+        return _error("Invalid quiz response.", json_output=json_output, payload={"course_id": org_id, "quiz": {}})
 
     if json_output:
         try:
             _output_json({"course_id": org_id, "quiz": _normalise_quiz_payload(quiz)})
         except Exception as e:
-            return _error(
-                e,
-                json_output=True,
-                payload={"course_id": _course_identifier(org_id), "quiz": {}},
-            )
+            return _error(e, json_output=True, payload={"course_id": _course_identifier(org_id), "quiz": {}})
         return 0
 
     time_limit = quiz.get("SubmissionTimeLimit", {})
@@ -1752,7 +1387,7 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
         time_limit = {}
 
     quiz_name = _safe_server_text(quiz.get("Name"), fallback="Quiz") or "Quiz"
-    quiz_identifier = _safe_content_id(quiz.get("QuizId"))
+    quiz_identifier = _positive_id(quiz.get("QuizId"))
     desc_text = _safe_quiz_rich_text(quiz.get("Description", {}))
     instr_text = _safe_quiz_rich_text(quiz.get("Instructions", {}))
 
@@ -1770,7 +1405,6 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
         else _safe_quiz_scalar(attempts.get("NumberOfAttemptsAllowed"))
     )
     print(f"   Attempts: {attempts_text}")
-    from .quiz_rules import navigation_rules
     rules = navigation_rules(quiz)
     print(f"   Question Layout: {rules['layout']}")
     if rules["prevent_moving_backwards"] is True:

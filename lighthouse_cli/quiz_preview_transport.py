@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
-from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
+from .api import LighthouseClient, NetworkError, _close_response
 from .quiz_attempt_page import (
     MAX_PAGE_BYTES,
     PreviewPage,
@@ -20,6 +20,9 @@ from .quiz_attempt_page import (
     PreviewRefusedError,
     hidden_form,
     parse_preview_page,
+    process_frame_src,
+    start_frame_src,
+    started_attempt,
 )
 from .request_protection import form_protection_from_homepage
 
@@ -95,16 +98,11 @@ def start_preview(
         fields["bypass"] = "1"
     post_url = client.canonical_url(summary + "&cfql=0&inProgress=0")
     response = None
-    state_created = False
-    start_dispatched = False
-    attempt_id: int | None = None
-    page: int | None = None
     try:
         # The summary POST registers the preview/bypass choice. Skipping it
         # can appear to work for visible quizzes but fails for hidden ones.
-        # Mark it before dispatch because a session expiry can arrive after
-        # Brightspace has already created the pending preview state.
-        start_dispatched = True
+        # Anything that fails from here on, a session expiry included, may
+        # come after Brightspace created the pending preview state: unknown.
         response = client._request("POST", post_url, _skip_raise=True,
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(summary)})
@@ -114,65 +112,21 @@ def start_preview(
         _close_response(response)
         response = None
         root, _ = client.get_raw(root_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
-        candidates = [
-            src
-            for f in BeautifulSoup(root, "html.parser").find_all("iframe")
-            if isinstance(src := f.get("src"), str)
-            and urlparse(src).path.endswith("/quiz_start_iframe_2_auto.d2l")
-        ]
-        if len(candidates) != 1:
-            raise PreviewStartUnknownError()
-        frame_path = _start_target(
-            client, candidates[0], "quiz_start_iframe_2_auto.d2l", course_id, quiz_id
-        )
-        frame, _ = client.get_raw(
-            frame_path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Referer": root_url}
-        )
-        frames = BeautifulSoup(frame, "html.parser").select(
-            'iframe[name="hiddenFrame"], frame[name="hiddenFrame"]'
-        )
-        frames_src = frames[0].get("src") if len(frames) == 1 else None
-        if not isinstance(frames_src, str):
-            raise PreviewStartUnknownError()
-        process_url = _start_target(
-            client, frames_src, "quiz_start_process_auto.d2l", course_id, quiz_id
-        )
+        frame_path = _start_target(client, start_frame_src(root), "quiz_start_iframe_2_auto.d2l", course_id, quiz_id)
+        frame, _ = client.get_raw(frame_path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Referer": root_url})
+        process_url = _start_target(client, process_frame_src(frame), "quiz_start_process_auto.d2l", course_id, quiz_id)
         # This legacy GET creates server state: it is deliberately not replayed.
-        state_created = True
         result, _ = client.get_raw(process_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
                                   headers={"Referer": client.canonical_url(frame_path)})
-        matches: set[tuple[int, int]] = set()
-        for script in BeautifulSoup(result, "html.parser").find_all("script"):
-            for match in re.finditer(
-                r"^\s*parent\.GoToAttemptQuizAuto\(\s*([0-9]{1,18})\s*,\s*([0-9]{1,6})\s*,\s*0\s*\)\s*;?\s*$",
-                script.get_text(), re.MULTILINE,
-            ):
-                matches.add((int(match[1]), int(match[2])))
-        if len(matches) != 1:
-            raise PreviewStartUnknownError()
-        attempt_id, page = matches.pop()
+        attempt_id, page = started_attempt(result)
+        page_path(course_id, quiz_id, attempt_id, page)
         try:
-            page_path(course_id, quiz_id, attempt_id, page)
-        except ValueError:
-            raise PreviewStartUnknownError() from None
-        if on_identity is not None:
-            try:
+            if on_identity is not None:
                 on_identity(attempt_id, page)
-            except Exception:
-                raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
-        try:
             return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
-        except SessionExpiredError:
-            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
-        except Exception:  # all post-create readback failures are ambiguous
+        except Exception:  # all post-create failures are ambiguous
             raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
     except PreviewStartUnknownError:
-        raise
-    except SessionExpiredError:
-        if state_created:
-            raise PreviewStartUnknownError(attempt_id=attempt_id, page=page) from None
-        if start_dispatched:
-            raise PreviewStartUnknownError() from None
         raise
     except Exception:
         raise PreviewStartUnknownError() from None
@@ -258,11 +212,10 @@ def save_current_preview_answer(
         + urlencode({"d2l_body_type": 3, "ou": course_id, "fromQB": 0})
     )
     response = None
-    write_dispatched = False
     try:
-        # A session-expiry raised by the request itself is ambiguous: the
-        # server may have accepted the answer before returning a login page.
-        write_dispatched = True
+        # Any failure from here on, even a session expiry raised by the
+        # request itself, is ambiguous: the server may have accepted the
+        # answer before returning a login page.
         response = client._request(
             "POST", url,
             files=[(key, (None, value)) for key, value in fields.items()],
@@ -270,18 +223,10 @@ def save_current_preview_answer(
         )
         if response.status_code != 200:
             raise PreviewSaveUnknownError()
-        try:
-            verified = read_current_preview(client, **identity)
-        except SessionExpiredError:
-            # The POST was accepted before the readback lost authentication.
-            raise PreviewSaveUnknownError() from None
+        verified = read_current_preview(client, **identity)
         if not verified.confirms_answer(question_id, choice_id):
             raise PreviewSaveUnknownError()
         return verified
-    except SessionExpiredError:
-        if write_dispatched:
-            raise PreviewSaveUnknownError() from None
-        raise
     except Exception:
         raise PreviewSaveUnknownError() from None
     finally:
@@ -304,24 +249,14 @@ def advance_current_preview(
         "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id,
     }))
     response = None
-    write_dispatched = False
     try:
-        # Treat an auth failure from this request as post-dispatch unknown;
-        # the navigation may already have moved the remote cursor.
-        write_dispatched = True
+        # Treat any failure from here on, an auth failure included, as
+        # unknown: the navigation may already have moved the remote cursor.
         response = client._request("POST", url, files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(page_path(course_id, quiz_id, attempt_id, page))})
         if response.status_code != 200:
             raise PreviewAdvanceUnknownError()
-        try:
-            return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
-        except SessionExpiredError:
-            # The navigation POST completed before the readback lost auth.
-            raise PreviewAdvanceUnknownError() from None
-    except SessionExpiredError:
-        if write_dispatched:
-            raise PreviewAdvanceUnknownError() from None
-        raise
+        return read_current_preview(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
     except Exception:
         raise PreviewAdvanceUnknownError() from None
     finally:

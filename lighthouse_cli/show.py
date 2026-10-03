@@ -8,6 +8,7 @@ import re
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from threading import Lock, local
 from typing import Any, cast
 
@@ -52,22 +53,11 @@ def _close_client(client: Any) -> None:
     mask the command result.
     """
     close = getattr(client, "close", None)
-    if not callable(close):
-        return
-    try:
-        close()
-    except Exception:
+    if callable(close):
         # Closing a requests session is not part of the command's result.  A
         # failed cleanup must never replace a useful API/error result.
-        return
-
-
-def _all_course_limit_message(course_count: int) -> str:
-    """Return the fixed, safe diagnostic for an over-budget all-course read."""
-    return (
-        f"All-course reads are limited to {MAX_ALL_COURSES} courses; "
-        f"found {course_count}. Specify COURSE_ID to narrow the request."
-    )
+        with suppress(Exception):
+            close()
 
 
 def _emit_all_course_limit_error(
@@ -76,14 +66,13 @@ def _emit_all_course_limit_error(
     course_count: int,
 ) -> int:
     """Emit one deterministic, secret-safe all-course scope error."""
-    message = _all_course_limit_message(course_count)
+    message = (
+        f"All-course reads are limited to {MAX_ALL_COURSES} courses; "
+        f"found {course_count}. Specify COURSE_ID to narrow the request."
+    )
     print(f"Error: {message}", file=sys.stderr)
     if json_output:
-        _output_json([{
-            "course_id": None,
-            collection_key: [],
-            "error": message,
-        }])
+        _output_json([{"course_id": None, collection_key: [], "error": message}])
     return 1
 
 
@@ -120,11 +109,7 @@ def _for_course_or_all(
         client = LighthouseClient()
     except Exception as e:
         return _emit_command_error(
-            course_id,
-            collection_key,
-            json_output,
-            e,
-            all_courses=course_id is None,
+            course_id, collection_key, json_output, e, all_courses=course_id is None
         )
 
     if course_id is not None:
@@ -133,7 +118,7 @@ def _for_course_or_all(
             resolved_id = resolve_course_id(client, course_id)
             result = single_fn(client, resolved_id, json_output)
         except Exception as e:
-            return _emit_single_error(resolved_id, collection_key, json_output, e)
+            return _emit_command_error(resolved_id, collection_key, json_output, e)
         finally:
             _close_client(client)
 
@@ -229,11 +214,6 @@ def _for_course_or_all(
     return rc
 
 
-def _exception_message(exc: Exception) -> str:
-    """Return a concise, secret-safe message for an exception."""
-    return format_user_error(exc)
-
-
 def _safe_course_label(value: Any, course_id: Any) -> str:
     """Return a bounded printable course label or an opaque fixed fallback."""
     identifier = _course_identifier(course_id)
@@ -258,7 +238,7 @@ def _course_error_payload(
     error: Exception | str,
 ) -> dict[str, Any]:
     """Build the stable JSON shape used for a failed course fetch."""
-    message = _exception_message(error) if isinstance(error, Exception) else format_user_error(str(error))
+    message = format_user_error(error)
     return {"course_id": _course_identifier(course_id), collection_key: [], "error": message}
 
 
@@ -269,14 +249,8 @@ def _normalise_json_payload(
 ) -> tuple[dict[str, Any], bool]:
     """Ensure every JSON result has a course id, collection, and failure flag."""
     if not isinstance(result, dict):
-        return (
-            _course_error_payload(
-                course_id,
-                collection_key,
-                "Command did not return a JSON payload",
-            ),
-            True,
-        )
+        message = "Command did not return a JSON payload"
+        return _course_error_payload(course_id, collection_key, message), True
 
     payload = dict(result)
     payload["course_id"] = _course_identifier(payload.get("course_id", course_id))
@@ -296,7 +270,7 @@ def _normalise_json_payload(
 
 def _report_course_error(course_id: Any, error: Exception) -> None:
     """Report a worker failure without writing human text to JSON stdout."""
-    message = _exception_message(error)
+    message = format_user_error(error)
     if isinstance(error, SessionExpiredError):
         print(f"Error: {message}", file=sys.stderr)
     else:
@@ -304,20 +278,6 @@ def _report_course_error(course_id: Any, error: Exception) -> None:
             f"Warning: course {_course_identifier(course_id)} failed: {message}",
             file=sys.stderr,
         )
-
-
-def _emit_single_error(
-    course_id: Any,
-    collection_key: str,
-    json_output: bool,
-    error: Exception,
-) -> int:
-    """Emit one single-course failure result in the selected output mode."""
-    if json_output:
-        _report_course_error(course_id, error)
-        _output_json(_course_error_payload(course_id, collection_key, error))
-        return 1
-    return _error(error)
 
 
 def _emit_command_error(
@@ -336,7 +296,6 @@ def _emit_command_error(
     return _error(error)
 
 
-
 def _show_with_error_handling(
     org_id: int,
     fetch_fn: Callable[[int], Any],
@@ -349,8 +308,6 @@ def _show_with_error_handling(
     """Fetch data with standard error handling, return JSON or render."""
     try:
         data = fetch_fn(org_id)
-    except SessionExpiredError as e:
-        return _fetch_error_result(org_id, data_key, json_output, e, generic_human_rc=1)
     except Exception as e:
         return _fetch_error_result(org_id, data_key, json_output, e)
     if json_output:
@@ -367,20 +324,14 @@ def _fetch_error_result(
     data_key: str,
     json_output: bool,
     error: Exception,
-    generic_human_rc: int = 1,
 ) -> int | dict[str, Any]:
     """Report a fetch error and return either a JSON failure or human exit code."""
-    message = _exception_message(error)
+    message = format_user_error(error)
     if isinstance(error, SessionExpiredError):
         print(f"Error: {message}", file=sys.stderr)
-        if json_output:
-            return _course_error_payload(org_id, data_key, error)
-        return 1
-
-    print(f"Warning: failed to fetch {data_key}: {message}", file=sys.stderr)
-    if json_output:
-        return _course_error_payload(org_id, data_key, error)
-    return generic_human_rc
+    else:
+        print(f"Warning: failed to fetch {data_key}: {message}", file=sys.stderr)
+    return _course_error_payload(org_id, data_key, error) if json_output else 1
 
 
 def _safe_announcement_text(value: Any) -> str:
@@ -409,12 +360,9 @@ def _normalise_announcement_attachment(value: Any) -> dict[str, Any] | None:
         return None
 
     size = value.get("Size", 0)
-    if (
-        isinstance(size, bool)
-        or not isinstance(size, int)
-        or size < 0
-        or size > _MAX_ANNOUNCEMENT_ATTACHMENT_SIZE
-    ):
+    if isinstance(size, bool) or not isinstance(size, int):
+        return None
+    if not 0 <= size <= _MAX_ANNOUNCEMENT_ATTACHMENT_SIZE:
         return None
 
     attachment_type = value.get("Type", "File")
@@ -447,27 +395,27 @@ def _normalise_announcement(value: dict[str, Any]) -> dict[str, Any]:
         projected["CreatedDate"] = _safe_announcement_text(value.get("CreatedDate")) or None
     if "Attachments" in value:
         raw_attachments = value.get("Attachments")
-        attachments: list[dict[str, Any]] = []
-        if isinstance(raw_attachments, list):
-            for raw_attachment in raw_attachments:
-                if attachment := _normalise_announcement_attachment(raw_attachment):
-                    attachments.append(attachment)
-        projected["Attachments"] = attachments
+        if not isinstance(raw_attachments, list):
+            raw_attachments = []
+        attachments = (_normalise_announcement_attachment(item) for item in raw_attachments)
+        projected["Attachments"] = [attachment for attachment in attachments if attachment]
     return projected
+
+
+def _normalise_records(
+    value: Any,
+    project: Callable[[dict[str, Any]], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project each non-empty record object, dropping empty projections."""
+    if not isinstance(value, list):
+        return []
+    projected = (project(record) for record in value if isinstance(record, dict) and record)
+    return [record for record in projected if record]
 
 
 def _normalise_announcements(value: Any) -> list[dict[str, Any]]:
     """Validate and project announcement records before output/rendering."""
-    if not isinstance(value, list):
-        return []
-    announcements: list[dict[str, Any]] = []
-    for record in value:
-        if not isinstance(record, dict) or not record:
-            continue
-        projected = _normalise_announcement(record)
-        if projected:
-            announcements.append(projected)
-    return announcements
+    return _normalise_records(value, _normalise_announcement)
 
 
 def _safe_calendar_identifier(value: Any) -> int | str | None:
@@ -478,9 +426,7 @@ def _safe_calendar_identifier(value: Any) -> int | str | None:
     if not isinstance(value, str):
         return None
     candidate = value.strip()
-    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", candidate):
-        return candidate
-    return None
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", candidate) else None
 
 
 def _normalise_calendar_event(value: dict[str, Any]) -> dict[str, Any]:
@@ -498,16 +444,7 @@ def _normalise_calendar_event(value: dict[str, Any]) -> dict[str, Any]:
 
 def _normalise_calendar_events(value: Any) -> list[dict[str, Any]]:
     """Validate and project calendar records before output/rendering."""
-    if not isinstance(value, list):
-        return []
-    events: list[dict[str, Any]] = []
-    for record in value:
-        if not isinstance(record, dict) or not record:
-            continue
-        projected = _normalise_calendar_event(record)
-        if projected:
-            events.append(projected)
-    return events
+    return _normalise_records(value, _normalise_calendar_event)
 
 
 def _normalise_quiz(value: dict[str, Any]) -> dict[str, Any]:
@@ -526,16 +463,7 @@ def _normalise_quiz(value: dict[str, Any]) -> dict[str, Any]:
 
 def _normalise_quizzes(value: Any) -> list[dict[str, Any]]:
     """Validate and project quiz records before output/rendering."""
-    if not isinstance(value, list):
-        return []
-    quizzes: list[dict[str, Any]] = []
-    for record in value:
-        if not isinstance(record, dict) or not record:
-            continue
-        projected = _normalise_quiz(record)
-        if projected:
-            quizzes.append(projected)
-    return quizzes
+    return _normalise_records(value, _normalise_quiz)
 
 
 def _safe_grade_number(value: Any) -> int | float | None:
@@ -548,12 +476,10 @@ def _safe_grade_number(value: Any) -> int | float | None:
         return value
     if isinstance(value, str):
         candidate = value.strip()
-        if not candidate or not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", candidate):
+        if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", candidate):
             return None
-        try:
-            number = float(candidate)
-        except (OverflowError, ValueError):
-            return None
+        # float() accepts every string the pattern admits; overflow yields inf.
+        number = float(candidate)
         if not math.isfinite(number):
             return None
         return int(number) if number.is_integer() else number
@@ -562,15 +488,9 @@ def _safe_grade_number(value: Any) -> int | float | None:
 
 def _safe_grade_scalar(value: Any) -> str | int | float | None:
     """Keep printable text or finite numeric grade metadata only."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
-        return value
-    if isinstance(value, str) and value.isprintable():
-        return value
-    return None
+    if isinstance(value, str):
+        return value if value.isprintable() else None
+    return _safe_grade_number(value)
 
 
 def _normalise_grade_schema(value: Any) -> list[dict[str, Any]]:
@@ -616,11 +536,6 @@ def _normalise_grade_values(value: Any) -> dict[int, dict[str, int | float | Non
     return values
 
 
-def _display_text(value: Any) -> str:
-    """Return a renderer-safe text field without echoing malformed objects."""
-    return safe_display_text(value)
-
-
 # ---------------------------------------------------------------------------
 # Grades, announcements, calendar, quizzes — all use _for_course_or_all
 # ---------------------------------------------------------------------------
@@ -644,10 +559,8 @@ def _show_course_grades(
     try:
         schema = _normalise_grade_schema(client.get_grade_schema(org_id))
         values = _normalise_grade_values(client.get_my_grades(org_id))
-    except SessionExpiredError as e:
-        return _fetch_error_result(org_id, "grades", json_output, e, generic_human_rc=1)
     except Exception as e:
-        return _fetch_error_result(org_id, "grades", json_output, e, generic_human_rc=1)
+        return _fetch_error_result(org_id, "grades", json_output, e)
 
     # Merge schema + values
     merged = []
@@ -698,22 +611,11 @@ def _show_announcements(
             body = _rich_text_string(a.get("Body"))
             if body:
                 print(f"    {_short(_strip_html(body), 80)}")
-            raw_attachments = a.get("Attachments", [])
-            if isinstance(raw_attachments, list):
-                for att in raw_attachments:
-                    if not isinstance(att, dict):
-                        continue
-                    size = att.get("Size", 0)
-                    if not isinstance(size, (int, float)) or isinstance(size, bool):
-                        size = 0
-                    print(f"    📎 {att.get('FileName', '')} ({size / 1024:.0f} KB)")
+            # Normalised attachments are dicts with a validated int ``Size``.
+            for att in a.get("Attachments", []):
+                print(f"    📎 {att['FileName']} ({att['Size'] / 1024:.0f} KB)")
     return _show_with_error_handling(
-        org_id,
-        _fetch,
-        "announcements",
-        json_output,
-        _render,
-        title,
+        org_id, _fetch, "announcements", json_output, _render, title,
         "No announcements found for this course.",
     )
 
@@ -739,7 +641,7 @@ def _show_calendar(
             [
                 [
                     _fmt_date(e.get("StartDateTime")),
-                    _short(_display_text(e.get("Title", "")), 40),
+                    _short(_safe_announcement_text(e.get("Title", "")), 40),
                     e.get("OrgUnitName", ""),
                 ]
                 for e in events
@@ -748,12 +650,7 @@ def _show_calendar(
         )
 
     return _show_with_error_handling(
-        org_id,
-        _fetch,
-        "events",
-        json_output,
-        _render,
-        title,
+        org_id, _fetch, "events", json_output, _render, title,
         "No calendar events found for this course.",
     )
 
@@ -793,13 +690,11 @@ def _rich_text_string(value: Any) -> str | None:
         # visited first while still allowing a malformed/deep Html branch to
         # fall back to a valid Text sibling.
         text_value = current.get("Text")
-        if isinstance(text_value, dict) or isinstance(text_value, str):
+        if isinstance(text_value, (dict, str)):
             pending.append((text_value, depth + 1))
 
         html_value = current.get("Html")
-        if isinstance(html_value, dict) or (
-            isinstance(html_value, str) and html_value
-        ):
+        if isinstance(html_value, dict) or (isinstance(html_value, str) and html_value):
             pending.append((html_value, depth + 1))
     return None
 
@@ -853,8 +748,6 @@ def _show_course_assignments(
     """
     try:
         folders = client.get_dropbox_folders(org_id)
-    except SessionExpiredError as e:
-        return _fetch_error_result(org_id, "assignments", json_output, e)
     except Exception as e:
         return _fetch_error_result(org_id, "assignments", json_output, e)
 
@@ -902,13 +795,7 @@ def _show_course_assignments(
             # Returning success after dropping one would make an incomplete
             # response indistinguishable from a complete one to automation.
             return _fetch_error_result(org_id, "assignments", json_output, e)
-        if not isinstance(f, dict):
-            print("Warning: skipped malformed assignment folder.", file=sys.stderr)
-            continue
-        folder_id = _positive_projection_id(f.get("Id"))
-        if folder_id is None:
-            print("Warning: skipped malformed assignment folder.", file=sys.stderr)
-            continue
+        # ``f`` is ``folder_input`` or a merge of it whose "Id" is ``folder_id``.
         if not isinstance(attachment_items, list):
             print("Warning: skipped malformed assignment folder.", file=sys.stderr)
             continue
@@ -921,44 +808,29 @@ def _show_course_assignments(
             file_id = _positive_projection_id(att.get("Id"))
             if file_id is None:
                 continue
-            raw_file_name = att.get("FileName", "")
             size = att.get("Size", 0)
-            attachment_type = att.get("Type", "File")
-            file_name = safe_attachment_filename(
-                raw_file_name,
-                file_id,
-                fallback=False,
-            )
+            # The chained comparison is also false for NaN and infinities.
             if (
                 isinstance(size, bool)
                 or not isinstance(size, (int, float))
-                or size < 0
-                or (isinstance(size, float) and not math.isfinite(size))
-                or size > _MAX_ANNOUNCEMENT_ATTACHMENT_SIZE
+                or not 0 <= size <= _MAX_ANNOUNCEMENT_ATTACHMENT_SIZE
             ):
                 size = 0
-            attachment_type = _safe_announcement_text(attachment_type)
-            if not attachment_type:
-                attachment_type = "File"
             attachments.append({
                 "file_id": file_id,
-                "file_name": file_name,
+                "file_name": safe_attachment_filename(
+                    att.get("FileName", ""), file_id, fallback=False
+                ),
                 "size": size,
-                "attachment_type": attachment_type,
+                "attachment_type": _safe_announcement_text(att.get("Type", "File")) or "File",
             })
-
-
 
         # Availability info
         availability = f.get("Availability")
         if not isinstance(availability, dict):
             availability = {}
-        instructions = _safe_rich_text(
-            _rich_text_string(f.get("CustomInstructions"))
-        )
-        instructions_preview = _short(_strip_html(instructions), 80) if instructions else None
-        if not instructions_preview:
-            instructions_preview = None
+        instructions = _safe_rich_text(_rich_text_string(f.get("CustomInstructions")))
+        instructions_preview = _short(_strip_html(instructions), 80) or None
 
         due_date = _safe_announcement_text(f.get("DueDate"))
         if not due_date:
@@ -1030,7 +902,7 @@ def _show_course_quizzes(
             [
                 [
                     str(q.get("QuizId", "")),
-                    _short(_display_text(q.get("Name", "")), 35),
+                    _short(_safe_announcement_text(q.get("Name", "")), 35),
                     _fmt_date(q.get("StartDate")),
                     _fmt_date(q.get("EndDate")),
                 ]
@@ -1040,11 +912,6 @@ def _show_course_quizzes(
         )
 
     return _show_with_error_handling(
-        org_id,
-        _fetch,
-        "quizzes",
-        json_output,
-        _render,
-        title,
+        org_id, _fetch, "quizzes", json_output, _render, title,
         "No quizzes found for this course.",
     )

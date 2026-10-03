@@ -8,18 +8,14 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any
 
 from .api import LighthouseClient
-from .display import (
-    format_user_error,
-    safe_display_text,
-)
-from .display import (
-    output_json as _output_json,
-)
+from .display import format_user_error, safe_display_text
+from .display import output_json as _output_json
 from .manifest import (
     MANIFEST_FILENAME,
     Manifest,
@@ -68,9 +64,6 @@ class _AssignmentDataError(ValueError):
     """Raised when a folder detail cannot be trusted as the listed folder."""
 
 
-_USE_MANIFEST_ENTRY = object()
-
-
 def _positive_int(value: object) -> int | None:
     """Return a strictly positive integer identifier, or ``None``.
 
@@ -86,15 +79,13 @@ def _positive_int(value: object) -> int | None:
 
 def _safe_course_name(value: object, org_id: int) -> str:
     """Return a bounded, printable, non-secret course name for a local path."""
-    fallback = f"Course-{org_id}"
     candidate = safe_display_text(value, "", max_len=_MAX_COURSE_NAME_LENGTH)
-    if not candidate:
-        return fallback
-    if _SECRET_SHAPED_COURSE_NAME_RE.search(candidate):
-        return fallback
-    sanitized = _sanitize_filename(candidate)
-    if not safe_display_text(sanitized, "", max_len=_MAX_COURSE_NAME_LENGTH):
-        return fallback
+    if (
+        not candidate
+        or _SECRET_SHAPED_COURSE_NAME_RE.search(candidate)
+        or not safe_display_text(_sanitize_filename(candidate), "", max_len=_MAX_COURSE_NAME_LENGTH)
+    ):
+        return f"Course-{org_id}"
     return candidate
 
 
@@ -105,23 +96,17 @@ def safe_assignment_folder_name(
     fallback: bool = True,
 ) -> str:
     """Project a server folder label without secrets or control characters."""
-    safe_fallback = f"Folder-{folder_id}"
-    if not isinstance(value, str):
-        return safe_fallback if fallback else ""
-    if not safe_display_text(value, "", max_len=_MAX_FOLDER_NAME_LENGTH):
-        return safe_fallback if fallback else ""
-    candidate = value
-    if _SECRET_SHAPED_FOLDER_NAME_RE.search(candidate):
-        return safe_fallback if fallback else ""
-
-    sanitized = _sanitize_filename(candidate)
+    sanitized = _sanitize_filename(value) if isinstance(value, str) else ""
     if (
-        not sanitized
+        not isinstance(value, str)
+        or not safe_display_text(value, "", max_len=_MAX_FOLDER_NAME_LENGTH)
+        or _SECRET_SHAPED_FOLDER_NAME_RE.search(value)
+        or not sanitized
         or len(sanitized) > _MAX_FOLDER_NAME_LENGTH
         or _SECRET_SHAPED_FOLDER_NAME_RE.search(sanitized)
         or not safe_display_text(sanitized, "", max_len=_MAX_FOLDER_NAME_LENGTH)
     ):
-        return safe_fallback if fallback else ""
+        return f"Folder-{folder_id}" if fallback else ""
     return _fit_filename(sanitized, max_bytes=255)
 
 
@@ -145,31 +130,17 @@ def safe_attachment_filename(
     such as ``show assignments`` may request an empty value instead of a local
     fallback via ``fallback=False``.
     """
-    safe_fallback = f"attachment_{attachment_id}"
-    sanitized_input = _sanitize_filename(value) if isinstance(value, str) else ""
-    safe_candidate = safe_display_text(value, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
-    if not isinstance(value, str) or not safe_candidate:
-        return (
-            safe_fallback + _safe_filename_suffix(sanitized_input)
-            if fallback
-            else ""
-        )
-
-    candidate = value
-    sanitized = _sanitize_filename(candidate)
+    sanitized = _sanitize_filename(value) if isinstance(value, str) else ""
     if (
-        not sanitized
-        or _SECRET_SHAPED_FILENAME_RE.search(candidate)
+        not isinstance(value, str)
+        or not safe_display_text(value, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
+        or not sanitized
+        or _SECRET_SHAPED_FILENAME_RE.search(value)
         or _SECRET_SHAPED_FILENAME_RE.search(sanitized)
         or not safe_display_text(sanitized, "", max_len=_MAX_FILENAME_INPUT_LENGTH)
     ):
-        if not fallback:
-            return ""
-        return safe_fallback + _safe_filename_suffix(sanitized)
-    return _fit_filename(
-        sanitized,
-        max_bytes=MAX_ATOMIC_TARGET_NAME_BYTES - 18,
-    )
+        return f"attachment_{attachment_id}{_safe_filename_suffix(sanitized)}" if fallback else ""
+    return _fit_filename(sanitized, max_bytes=MAX_ATOMIC_TARGET_NAME_BYTES - 18)
 
 
 def disambiguate_filename(
@@ -180,23 +151,16 @@ def disambiguate_filename(
 ) -> Path:
     """Return a Path with disambiguation suffix if filename already exists."""
     filepath = dest_dir / filename
-    if (
-        not filepath.exists()
-        and not filepath.is_symlink()
-        and (reserved_paths is None or filepath.absolute() not in reserved_paths)
-    ):
-        return filepath
     name, ext = filepath.stem, filepath.suffix
-    counter = 1
-    while True:
-        new_path = dest_dir / f"{name}_{counter}{ext}"
-        if (
-            not new_path.exists()
-            and not new_path.is_symlink()
-            and (reserved_paths is None or new_path.absolute() not in reserved_paths)
-        ):
-            return new_path
+    counter = 0
+    while (
+        filepath.exists()
+        or filepath.is_symlink()
+        or (reserved_paths is not None and filepath.absolute() in reserved_paths)
+    ):
         counter += 1
+        filepath = dest_dir / f"{name}_{counter}{ext}"
+    return filepath
 
 
 def _assignment_dir(dest: Path, folder: dict[str, Any]) -> Path:
@@ -265,8 +229,7 @@ def folder_with_attachments(
     detail = client.get_dropbox_folder_detail(org_id, folder_id)
     if not isinstance(detail, dict):
         raise _AssignmentDataError(_INVALID_FOLDERS)
-    detail_id = _positive_int(detail.get("Id"))
-    if detail_id is None or detail_id != folder_id:
+    if _positive_int(detail.get("Id")) != folder_id:
         raise _AssignmentDataError(_INVALID_IDENTIFIER)
     # The list/request identity is authoritative even when the detail payload
     # contains an equivalent ID.  Never let a detail response substitute a
@@ -342,12 +305,11 @@ def _manifest_attachment_path(
         if _has_symlink_component(candidate, course_root):
             return None
         resolved = candidate.resolve(strict=False)
-        dest_resolved = course_root
     except (OSError, RuntimeError, ValueError):
         return None
-    if resolved == dest_resolved or not resolved.is_relative_to(dest_resolved):
+    if resolved == course_root or not resolved.is_relative_to(course_root):
         return None
-    canonical_relative = resolved.relative_to(dest_resolved)
+    canonical_relative = resolved.relative_to(course_root)
     if canonical_relative.parts[:1] != ("Assignments",):
         return None
     candidate = course_root / canonical_relative
@@ -408,14 +370,8 @@ def _matching_local_attachment(
             expected_parent = _assignment_dir(dest, expected_folder)
         except (OSError, RuntimeError, ValueError):
             return None
-    candidate = _manifest_attachment_path(
-        dest,
-        entry,
-        expected_parent=expected_parent,
-    )
-    if candidate is None:
-        return None
-    if candidate.name != filename:
+    candidate = _manifest_attachment_path(dest, entry, expected_parent=expected_parent)
+    if candidate is None or candidate.name != filename:
         return None
     try:
         stat_result = candidate.lstat()
@@ -438,11 +394,8 @@ def _assignment_path_owners(dest: Path, manifest: Manifest) -> dict[Path, str | 
         if prior_path is None:
             continue
         absolute_path = prior_path.absolute()
-        owner = owners.get(absolute_path)
-        if absolute_path in owners and owner != key:
-            owners[absolute_path] = None
-        else:
-            owners[absolute_path] = key
+        contested = absolute_path in owners and owners[absolute_path] != key
+        owners[absolute_path] = None if contested else key
     return owners
 
 
@@ -471,14 +424,10 @@ def _claim_assignment_entry(
     if prior_path is None:
         return None
     path_key = prior_path.absolute()
+    # ``owner`` is None both for an unowned path and for a contested one.
     owner = owners.get(path_key)
     can_claim = owner == att_key or (
-        allow_contested_claim
-        and (
-            (path_key in owners and owner is None)
-            or path_key not in owners
-        )
-        and path_key not in claimed_paths
+        allow_contested_claim and owner is None and path_key not in claimed_paths
     )
     if not can_claim:
         return None
@@ -515,8 +464,8 @@ def _download_and_record(
     dest: Path,
     manifest: Manifest,
     *,
-    existing_entry: dict[str, Any] | object | None = _USE_MANIFEST_ENTRY,
-    claimed_paths: set[Path] | None = None,
+    existing_entry: dict[str, Any] | None,
+    claimed_paths: set[Path],
 ) -> dict[str, Any]:
     """Download an attachment, save to disk, update manifest. Returns entry dict."""
     folder_id = _positive_int(folder.get("Id"))
@@ -524,10 +473,6 @@ def _download_and_record(
     if folder_id is None or att_key_id is None:
         raise ValueError(_INVALID_IDENTIFIER)
     att_key = assignment_key(folder_id, att_key_id)
-    if existing_entry is _USE_MANIFEST_ENTRY:
-        existing = manifest.get(att_key)
-    else:
-        existing = existing_entry if isinstance(existing_entry, dict) else None
     course_root = _course_boundary(dest)
     assignments_dir = _assignment_dir(course_root, folder)
     content, filename = client.download_attachment(org_id, folder_id, att_id)
@@ -535,19 +480,10 @@ def _download_and_record(
         raise _AssignmentDataError(_INVALID_ATTACHMENTS)
     sanitized_name = safe_attachment_filename(filename, att_id)
     assignments_dir.mkdir(parents=True, exist_ok=True)
-    filepath = _manifest_attachment_path(
-        course_root,
-        existing,
-        expected_parent=assignments_dir,
-    )
+    filepath = _manifest_attachment_path(course_root, existing_entry, expected_parent=assignments_dir)
     if filepath is None:
-        filepath = disambiguate_filename(
-            assignments_dir,
-            sanitized_name,
-            reserved_paths=claimed_paths,
-        )
-        if claimed_paths is not None:
-            claimed_paths.add(filepath.absolute())
+        filepath = disambiguate_filename(assignments_dir, sanitized_name, reserved_paths=claimed_paths)
+        claimed_paths.add(filepath.absolute())
     if (
         not filepath.absolute().is_relative_to(course_root)
         or _has_symlink_component(filepath.parent, course_root)
@@ -575,11 +511,8 @@ def _download_and_record(
     )
     manifest_entry["path"] = relative_path
     return {
-        "file_id": att_id,
-        "folder_id": folder_id,
-        "filename": filepath.name,
-        "path": relative_path,
-        "size_kb": round(len(content) / 1024, 1),
+        "file_id": att_id, "folder_id": folder_id, "filename": filepath.name,
+        "path": relative_path, "size_kb": round(len(content) / 1024, 1),
     }
 
 def download_single_attachment(
@@ -602,8 +535,7 @@ def download_single_attachment(
         folder_detail = client.get_dropbox_folder_detail(org_id, normalized_folder_id)
         if not isinstance(folder_detail, dict):
             raise _AssignmentDataError(_INVALID_FOLDERS)
-        detail_id = _positive_int(folder_detail.get("Id"))
-        if detail_id is None or detail_id != normalized_folder_id:
+        if _positive_int(folder_detail.get("Id")) != normalized_folder_id:
             raise _AssignmentDataError(_INVALID_IDENTIFIER)
         folder_id = normalized_folder_id
     except _AssignmentDataError as e:
@@ -613,7 +545,6 @@ def download_single_attachment(
 
     output_root = Path(root).expanduser().resolve(strict=False)
     dest = output_root / resolve_course_folder_name(course_name, org_id)
-    manifest_path = dest / MANIFEST_FILENAME
     try:
         dest = _course_boundary(dest)
         manifest_path = dest / MANIFEST_FILENAME
@@ -621,23 +552,12 @@ def download_single_attachment(
         att_key = assignment_key(folder_id, attachment_id)
         claimed_paths: set[Path] = set()
         existing = _claim_assignment_entry(
-            dest,
-            manifest,
-            att_key,
-            folder_detail,
-            _assignment_path_owners(dest, manifest),
-            claimed_paths,
-            allow_contested_claim=False,
+            dest, manifest, att_key, folder_detail, _assignment_path_owners(dest, manifest),
+            claimed_paths, allow_contested_claim=False,
         )
         entry = _download_and_record(
-            client,
-            org_id,
-            folder_detail,
-            attachment_id,
-            dest,
-            manifest,
-            existing_entry=existing,
-            claimed_paths=claimed_paths,
+            client, org_id, folder_detail, attachment_id, dest, manifest,
+            existing_entry=existing, claimed_paths=claimed_paths,
         )
         manifest.save(manifest_path)
     except _AssignmentDataError as e:
@@ -658,6 +578,66 @@ def download_single_attachment(
     else:
         print(f"Downloaded: {filepath} ({entry['size_kb']} KB)")
     return 0
+
+
+def _data_error(message: BaseException | str, **ids: int) -> dict[str, Any]:
+    """Build an ``assignment_data`` error record for untrusted folder data."""
+    return {**ids, "error": format_user_error(message), "type": "assignment_data"}
+
+
+def _failure(exc: Exception, **ids: int) -> dict[str, Any]:
+    """Build the error record for a failed folder or attachment request."""
+    if isinstance(exc, _AssignmentDataError):
+        return _data_error(exc, **ids)
+    return {**ids, "error": format_user_error(exc)}
+
+
+def _file_attachments(
+    client: LighthouseClient,
+    org_id: int,
+    folders: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    errors: list[dict[str, Any]],
+    selected_ids: set[int] | None = None,
+    visited_ids: set[int] | None = None,
+) -> Iterator[tuple[int, dict[str, Any], int, dict[str, Any]]]:
+    """Yield ``(folder_id, folder, att_id, att)`` for each valid file attachment.
+
+    Malformed folders and attachments are recorded in ``errors`` and skipped.
+    With ``selected_ids`` only those folders are visited; each visited folder
+    ID is added to ``visited_ids``.
+    """
+    seen_folder_ids: set[int] = set()
+    for folder in folders:
+        if not isinstance(folder, dict):
+            errors.append({"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"})
+            continue
+        folder_id = _positive_int(folder.get("Id"))
+        if folder_id is None:
+            errors.append(_data_error(_INVALID_IDENTIFIER))
+            continue
+        if folder_id in seen_folder_ids or (selected_ids is not None and folder_id not in selected_ids):
+            continue
+        if visited_ids is not None:
+            visited_ids.add(folder_id)
+        try:
+            folder, attachments = folder_with_attachments(client, org_id, folder)
+        except Exception as e:
+            errors.append(_failure(e, folder_id=folder_id))
+            continue
+        if not isinstance(attachments, (list, tuple)):
+            errors.append(_data_error(_INVALID_ATTACHMENTS, folder_id=folder_id))
+            continue
+        seen_folder_ids.add(folder_id)
+        for att in attachments:
+            if not isinstance(att, dict):
+                errors.append(_data_error(_INVALID_ATTACHMENTS, folder_id=folder_id))
+                continue
+            att_id = _positive_int(att.get("Id"))
+            if att_id is None:
+                errors.append(_data_error(_INVALID_IDENTIFIER, folder_id=folder_id))
+                continue
+            if att.get("Type", "File") == "File":
+                yield folder_id, folder, att_id, att
 
 
 def download_for_course(
@@ -691,143 +671,46 @@ def download_for_course(
 
     if not isinstance(all_folders, (list, tuple)):
         return [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]
-    folders = all_folders
     selected_ids: set[int] | None = None
     if folder_ids is not None:
-        selected_ids = set()
-        for requested_id in folder_ids:
-            normalized_id = _positive_int(requested_id)
-            if normalized_id is None:
-                return [], [{
-                    "error": _ASSIGNMENT_NOT_FOUND,
-                    "type": "assignment_not_found",
-                }]
-            selected_ids.add(normalized_id)
-        if not selected_ids:
-            return [], [{
-                "error": _ASSIGNMENT_NOT_FOUND,
-                "type": "assignment_not_found",
-            }]
+        requested_ids = [_positive_int(requested_id) for requested_id in folder_ids]
+        if not requested_ids or None in requested_ids:
+            return [], [{"error": _ASSIGNMENT_NOT_FOUND, "type": "assignment_not_found"}]
+        selected_ids = {folder_id for folder_id in requested_ids if folder_id is not None}
     matched_ids: set[int] = set()
-    seen_folder_ids: set[int] = set()
     ownership_manifest = path_manifest if path_manifest is not None else manifest
     prior_path_owners = _assignment_path_owners(dest, ownership_manifest)
     claimed_prior_paths: set[Path] = set()
 
-    for folder in folders:
-        if not isinstance(folder, dict):
-            errors.append({"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"})
+    attachments = _file_attachments(client, org_id, all_folders, errors, selected_ids, matched_ids)
+    for folder_id, folder, att_id, att in attachments:
+        existing = _claim_assignment_entry(
+            dest, ownership_manifest, assignment_key(folder_id, att_id), folder,
+            prior_path_owners, claimed_prior_paths, allow_contested_claim=True,
+        )
+        skip_entry = existing if path_manifest is None else None
+        matched_path = _matching_local_attachment(
+            dest, skip_entry, att.get("Size", 0), expected_folder=folder
+        )
+        if matched_path is not None:
+            if isinstance(skip_entry, dict):
+                skip_entry["path"] = str(matched_path.relative_to(_course_boundary(dest)))
             continue
-        folder_id = _positive_int(folder.get("Id"))
-        if folder_id is None:
-            errors.append({"error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
-            continue
-        if folder_id in seen_folder_ids:
-            continue
-        if selected_ids is not None and folder_id not in selected_ids:
-            continue
-        if selected_ids is not None:
-            matched_ids.add(folder_id)
+        write_entry = _write_entry_for_claim(dest, existing, folder)
         try:
-            folder, attachments = folder_with_attachments(client, org_id, folder)
+            downloaded_entries.append(_download_and_record(
+                client, org_id, folder, att_id, dest, manifest,
+                existing_entry=write_entry, claimed_paths=claimed_prior_paths,
+            ))
         except _AssignmentDataError as e:
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(e),
-                "type": "assignment_data",
-            })
-            continue
+            errors.append(_failure(e, folder_id=folder_id, file_id=att_id))
         except Exception as e:
-            errors.append({"folder_id": folder_id, "error": format_user_error(e)})
-            continue
-
-        if _positive_int(folder.get("Id")) is None:
-            errors.append({"folder_id": folder_id, "error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
-            continue
-
-        if not isinstance(attachments, (list, tuple)):
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(_INVALID_ATTACHMENTS),
-                "type": "assignment_data",
-            })
-            continue
-        seen_folder_ids.add(folder_id)
-        for att in attachments:
-            if not isinstance(att, dict):
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_ATTACHMENTS),
-                    "type": "assignment_data",
-                })
-                continue
-            att_id = _positive_int(att.get("Id"))
-            if att_id is None:
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_IDENTIFIER),
-                    "type": "assignment_data",
-                })
-                continue
-            if att.get("Type", "File") != "File" or not att_id:
-                continue
-
-            att_key = assignment_key(folder_id, att_id)
-            existing = _claim_assignment_entry(
-                dest,
-                ownership_manifest,
-                att_key,
-                folder,
-                prior_path_owners,
-                claimed_prior_paths,
-                allow_contested_claim=True,
-            )
-            skip_entry = existing if path_manifest is None else None
-            matched_path = _matching_local_attachment(
-                dest,
-                skip_entry,
-                att.get("Size", 0),
-                expected_folder=folder,
-            )
-            if matched_path is not None:
-                if isinstance(skip_entry, dict):
-                    skip_entry["path"] = str(
-                        matched_path.relative_to(_course_boundary(dest))
-                    )
-                continue
-            write_entry = _write_entry_for_claim(dest, existing, folder)
-
-            try:
-                downloaded_entries.append(
-                    _download_and_record(
-                        client,
-                        org_id,
-                        folder,
-                        att_id,
-                        dest,
-                        manifest,
-                        existing_entry=write_entry,
-                        claimed_paths=claimed_prior_paths,
-                    )
-                )
-            except _AssignmentDataError as e:
-                safe_error = format_user_error(e)
-                errors.append({
-                    "folder_id": folder_id,
-                    "file_id": att_id,
-                    "error": safe_error,
-                    "type": "assignment_data",
-                })
-            except Exception as e:
-                safe_error = format_user_error(e)
-                errors.append({"folder_id": folder_id, "file_id": att_id, "error": safe_error})
-                print(f"  FAILED attachment {att_id}: {safe_error}", file=sys.stderr)
+            failure = _failure(e, folder_id=folder_id, file_id=att_id)
+            errors.append(failure)
+            print(f"  FAILED attachment {att_id}: {failure['error']}", file=sys.stderr)
 
     if selected_ids is not None and selected_ids - matched_ids:
-        errors.append({
-            "error": _ASSIGNMENT_NOT_FOUND,
-            "type": "assignment_not_found",
-        })
+        errors.append({"error": _ASSIGNMENT_NOT_FOUND, "type": "assignment_not_found"})
     return downloaded_entries, errors
 
 
@@ -853,125 +736,34 @@ def sync_for_course(
 
     if not isinstance(all_folders, (list, tuple)):
         return [], [], [], [{"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"}]
-    folders = all_folders
-    seen_folder_ids: set[int] = set()
     prior_path_owners = _assignment_path_owners(dest, manifest)
     claimed_prior_paths: set[Path] = set()
-    for folder in folders:
-        if not isinstance(folder, dict):
-            errors.append({"error": format_user_error(_INVALID_FOLDERS), "type": "assignment_list"})
+    for folder_id, folder, att_id, att in _file_attachments(client, org_id, all_folders, errors):
+        att_key = assignment_key(folder_id, att_id)
+        manifest_entry = manifest.get(att_key)
+        existing = _claim_assignment_entry(
+            dest, manifest, att_key, folder, prior_path_owners, claimed_prior_paths,
+            allow_contested_claim=True,
+        )
+        matched_path = _matching_local_attachment(
+            dest, existing, att.get("Size", 0), expected_folder=folder
+        )
+        if matched_path is not None and isinstance(existing, dict):
+            relative_path = str(matched_path.relative_to(_course_boundary(dest)))
+            existing["path"] = relative_path
+            skipped_entries.append({
+                "file_id": att_id, "folder_id": folder_id,
+                "filename": matched_path.name, "path": relative_path,
+            })
             continue
-        folder_id = _positive_int(folder.get("Id"))
-        if folder_id is None:
-            errors.append({"error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
-            continue
-        if folder_id in seen_folder_ids:
-            continue
-
+        write_entry = _write_entry_for_claim(dest, existing, folder)
+        target_list = updated_entries if isinstance(manifest_entry, dict) else downloaded_entries
         try:
-            folder, attachments = folder_with_attachments(client, org_id, folder)
-        except _AssignmentDataError as e:
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(e),
-                "type": "assignment_data",
-            })
-            continue
+            target_list.append(_download_and_record(
+                client, org_id, folder, att_id, dest, manifest,
+                existing_entry=write_entry, claimed_paths=claimed_prior_paths,
+            ))
         except Exception as e:
-            errors.append({"folder_id": folder_id, "error": format_user_error(e)})
-            continue
-
-        if _positive_int(folder.get("Id")) is None:
-            errors.append({"folder_id": folder_id, "error": format_user_error(_INVALID_IDENTIFIER), "type": "assignment_data"})
-            continue
-
-        if not isinstance(attachments, (list, tuple)):
-            errors.append({
-                "folder_id": folder_id,
-                "error": format_user_error(_INVALID_ATTACHMENTS),
-                "type": "assignment_data",
-            })
-            continue
-        seen_folder_ids.add(folder_id)
-        for att in attachments:
-            if not isinstance(att, dict):
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_ATTACHMENTS),
-                    "type": "assignment_data",
-                })
-                continue
-            att_id = _positive_int(att.get("Id"))
-            if att_id is None:
-                errors.append({
-                    "folder_id": folder_id,
-                    "error": format_user_error(_INVALID_IDENTIFIER),
-                    "type": "assignment_data",
-                })
-                continue
-            if att.get("Type", "File") != "File" or not att_id:
-                continue
-
-            att_key = assignment_key(folder_id, att_id)
-            manifest_entry = manifest.get(att_key)
-            existing = _claim_assignment_entry(
-                dest,
-                manifest,
-                att_key,
-                folder,
-                prior_path_owners,
-                claimed_prior_paths,
-                allow_contested_claim=True,
-            )
-
-            matched_path = _matching_local_attachment(
-                dest,
-                existing,
-                att.get("Size", 0),
-                expected_folder=folder,
-            )
-            if matched_path is not None:
-                if isinstance(existing, dict):
-                    existing["path"] = str(
-                        matched_path.relative_to(_course_boundary(dest))
-                    )
-                    skipped_entry = {
-                        "file_id": att_id, "folder_id": folder_id,
-                        "filename": matched_path.name,
-                    }
-                    skipped_entry["path"] = str(
-                        matched_path.relative_to(_course_boundary(dest))
-                    )
-                    skipped_entries.append(skipped_entry)
-                    continue
-            write_entry = _write_entry_for_claim(dest, existing, folder)
-            target_list = (
-                updated_entries
-                if isinstance(manifest_entry, dict)
-                else downloaded_entries
-            )
-
-            try:
-                target_list.append(
-                    _download_and_record(
-                        client,
-                        org_id,
-                        folder,
-                        att_id,
-                        dest,
-                        manifest,
-                        existing_entry=write_entry,
-                        claimed_paths=claimed_prior_paths,
-                    )
-                )
-            except _AssignmentDataError as e:
-                errors.append({
-                    "folder_id": folder_id,
-                    "file_id": att_id,
-                    "error": format_user_error(e),
-                    "type": "assignment_data",
-                })
-            except Exception as e:
-                errors.append({"folder_id": folder_id, "file_id": att_id, "error": format_user_error(e)})
+            errors.append(_failure(e, folder_id=folder_id, file_id=att_id))
 
     return downloaded_entries, skipped_entries, updated_entries, errors

@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, unquote, urldefrag, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
-from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
+from .api import LighthouseClient, NetworkError, _close_response
 from .quiz_attempt_page import (
     MAX_PAGE_BYTES,
     REFUSE_NO_ANSWERS,
@@ -30,6 +30,9 @@ from .quiz_attempt_page import (
     active_buttons,
     hidden_form,
     parse_learner_page,
+    process_frame_src,
+    start_frame_src,
+    started_attempt,
 )
 from .request_protection import FormProtection, form_protection_from_homepage
 
@@ -280,39 +283,16 @@ def _start_target(client: LighthouseClient, value: str, filename: str, course_id
     return url
 
 
-def _attempt_identity(body: bytes) -> tuple[int, int]:
-    matches: set[tuple[int, int]] = set()
-    for script in BeautifulSoup(body, "html.parser").find_all("script"):
-        for match in re.finditer(
-            r"^\s*parent\.GoToAttemptQuizAuto\(\s*([0-9]{1,18})\s*,\s*([0-9]{1,6})\s*,\s*0\s*\)\s*;?\s*$",
-            script.get_text(), re.MULTILINE,
-        ):
-            matches.add((int(match[1]), int(match[2])))
-    if len(matches) != 1:
-        raise LearnerStartUnknownError()
-    return matches.pop()
-
-
 def _follow_start(client: LighthouseClient, location: str, course_id: int, quiz_id: int, resume: bool) -> tuple[int, int]:
     """The start frames, then the hidden process page that names the attempt."""
     root_url = _start_target(client, location, "quiz_start_frame_auto.d2l", course_id, quiz_id, resume)
     root, _ = client.get_raw(root_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
-    candidates = [
-        src for frame in BeautifulSoup(root, "html.parser").find_all("iframe")
-        if isinstance(src := frame.get("src"), str) and urlparse(src).path.endswith("/quiz_start_iframe_2_auto.d2l")
-    ]
-    if len(candidates) != 1:
-        raise LearnerStartUnknownError()
-    frame_url = _start_target(client, candidates[0], "quiz_start_iframe_2_auto.d2l", course_id, quiz_id, resume)
+    frame_url = _start_target(client, start_frame_src(root), "quiz_start_iframe_2_auto.d2l", course_id, quiz_id, resume)
     frame, _ = client.get_raw(frame_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Referer": root_url})
-    hidden_frames = BeautifulSoup(frame, "html.parser").select('iframe[name="hiddenFrame"], frame[name="hiddenFrame"]')
-    process_src = hidden_frames[0].get("src") if len(hidden_frames) == 1 else None
-    if not isinstance(process_src, str):
-        raise LearnerStartUnknownError()
-    process_url = _start_target(client, process_src, "quiz_start_process_auto.d2l", course_id, quiz_id, resume)
+    process_url = _start_target(client, process_frame_src(frame), "quiz_start_process_auto.d2l", course_id, quiz_id, resume)
     # This GET creates or reopens the attempt: it is never replayed.
     result, _ = client.get_raw(process_url, max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Referer": frame_url})
-    return _attempt_identity(result)
+    return started_attempt(result)
 
 
 def start_learner(
@@ -338,11 +318,8 @@ def start_learner(
     fields, resume = _start_fields(summary, continue_only=continue_only)
     post_url = client.canonical_url(summary_path + "&" + urlencode({"inProgress": "true" if resume else "false"}))
     response = None
-    dispatched = False
-    attempt_id: int | None = None
-    page: int | None = None
     try:
-        dispatched = True
+        # Any failure once the POST is sent, a session expiry included, is unknown.
         response = client._request("POST", post_url, _skip_raise=True,
                                    files=[(key, (None, value)) for key, value in fields.items()],
                                    headers={"Referer": client.canonical_url(summary_path)})
@@ -352,29 +329,19 @@ def start_learner(
         _close_response(response)
         response = None
         attempt_id, page = _follow_start(client, location, course_id, quiz_id, resume)
-        try:
-            learner_page_path(course_id, quiz_id, attempt_id, page)
-        except ValueError:
-            raise LearnerStartUnknownError() from None
+        learner_page_path(course_id, quiz_id, attempt_id, page)
         if not resume and page != 1:  # a new attempt opens on its first page
             raise LearnerStartUnknownError(attempt_id=attempt_id)
-        if on_identity is not None:
-            try:
-                on_identity(attempt_id, page)
-            except Exception:
-                raise LearnerStartUnknownError(attempt_id=attempt_id, page=page) from None
         try:
+            if on_identity is not None:
+                on_identity(attempt_id, page)
             return read_learner_page(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
         except Exception:  # the attempt exists; its page is unverified
             raise LearnerStartUnknownError(attempt_id=attempt_id, page=page) from None
     except LearnerStartUnknownError:
         raise
-    except SessionExpiredError:
-        if dispatched:
-            raise LearnerStartUnknownError(attempt_id=attempt_id, page=page) from None
-        raise
     except Exception:
-        raise LearnerStartUnknownError(attempt_id=attempt_id, page=page) from None
+        raise LearnerStartUnknownError() from None
     finally:
         if response is not None:
             _close_response(response)
@@ -474,9 +441,7 @@ def save_learner_answers(
     values = current.intended(answers)
     fields = current.save_fields(values, protection)
     response = None
-    dispatched = False
     try:
-        dispatched = True
         response = _post_form(client, ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l?" + urlencode(
             {"d2l_body_type": 3, "ou": course_id, "fromQB": 0}), fields, learner_page_path(course_id, quiz_id, attempt_id, page))
         if response.status_code != 200:
@@ -487,10 +452,6 @@ def save_learner_answers(
         if not verified.confirms(values, answers.keys()):
             raise LearnerSaveUnknownError()
         return verified
-    except SessionExpiredError:
-        if dispatched:
-            raise LearnerSaveUnknownError() from None
-        raise
     except Exception:
         raise LearnerSaveUnknownError() from None
     finally:
@@ -515,9 +476,7 @@ def advance_learner(
                                                attempt_id=attempt_id, page=page)
     fields = current.advance_fields(protection, allow_unanswered=allow_unanswered)
     response = None
-    dispatched = False
     try:
-        dispatched = True
         response = _post_form(client, ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l?" + urlencode(
             {"cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id}), fields,
             learner_page_path(course_id, quiz_id, attempt_id, page))
@@ -526,10 +485,6 @@ def advance_learner(
         _close_response(response)
         response = None
         return read_learner_page(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
-    except SessionExpiredError:
-        if dispatched:
-            raise LearnerAdvanceUnknownError() from None
-        raise
     except Exception:
         raise LearnerAdvanceUnknownError() from None
     finally:

@@ -58,31 +58,26 @@ def _safe_absolute_url(
     ``ValueError`` deliberately contains no candidate URL because callers may
     be handling an upstream value that includes a token or password.
     """
-    if not isinstance(base_url, str) or not isinstance(candidate, str):
+    if (
+        not isinstance(candidate, str)
+        or not candidate
+        or candidate.startswith("//")
+        or _url_origin(base_url) is None
+    ):
         raise ValueError("unsafe URL")
-    if not base_url or not candidate:
-        raise ValueError("unsafe URL")
-    if candidate.startswith("//"):
-        raise ValueError("unsafe URL")
-
-    base_origin = _url_origin(base_url)
-    if base_origin is None:
-        raise ValueError("unsafe URL")
-
-    raw_candidate = candidate
     try:
-        parsed_candidate = urlparse(raw_candidate)
+        parsed_candidate = urlparse(candidate)
     except (TypeError, ValueError):
         raise ValueError("unsafe URL") from None
 
     # A candidate with a scheme or netloc is absolute; all other forms are
     # path/query/fragment references resolved on the already trusted base.
     if parsed_candidate.scheme or parsed_candidate.netloc:
-        resolved = raw_candidate
+        resolved = candidate
+    elif "\\" in candidate or any(ord(ch) < 0x20 for ch in candidate):
+        raise ValueError("unsafe URL")
     else:
-        if "\\" in raw_candidate or any(ord(ch) < 0x20 for ch in raw_candidate):
-            raise ValueError("unsafe URL")
-        resolved = urljoin(base_url, raw_candidate)
+        resolved = urljoin(base_url, candidate)
 
     origin = _url_origin(resolved)
     if origin is None or origin[0] not in {str(host).lower() for host in allowed_hosts}:

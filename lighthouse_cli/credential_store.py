@@ -38,6 +38,7 @@ import base64
 import binascii
 import json
 import os
+from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -114,10 +115,7 @@ def _validate_credential_path(path: Path) -> None:
 
 
 def _passphrase_from_env() -> str | None:
-    value = os.getenv(PASSPHRASE_ENV)
-    if value is None or value == "":
-        return None
-    return value
+    return os.getenv(PASSPHRASE_ENV) or None
 
 
 def _load_keyring_module() -> Any | None:
@@ -176,9 +174,7 @@ def _decode_kdf_salt(salt_b64: str) -> bytes:
     try:
         salt = base64.b64decode(salt_b64, validate=True)
     except Exception:
-        raise CredentialStoreError(
-            "Sealed data has an invalid KDF salt and cannot be opened."
-        ) from None
+        salt = b""
     if not salt:
         raise CredentialStoreError(
             "Sealed data has an invalid KDF salt and cannot be opened."
@@ -261,9 +257,6 @@ class CredentialStore:
     construction time.
     """
 
-    SERVICE_NAME = SERVICE_NAME
-    KEY_NAME = KEY_NAME
-
     def __init__(self, *, config_dir: Path | None = None) -> None:
         self.config_dir = Path(
             config_dir if config_dir is not None else os.getenv(CONFIG_DIR_ENV, DEFAULT_CONFIG_DIR)
@@ -286,20 +279,16 @@ class CredentialStore:
                 source is available.
         """
         _validate_credential_path(self.config_dir)
-        if _passphrase_from_env() is not None:
-            return "passphrase"
-        keyring_mod = _load_keyring_module()
-        if keyring_mod is not None and _keyring_backend_available(keyring_mod):
+        source = self._select_source()
+        if source == "keyring":
             _keyring_key(create=True)
-            return "keyring"
-        raise CredentialStoreError(_NO_KEY_SOURCE_MSG)
+        return source
 
     # -- envelope primitives ---------------------------------------------------
 
     def open_bytes(self, blob: bytes) -> bytes:
         """Open a sealed envelope, decrypting with the RECORDED key source."""
-        envelope = _parse_envelope(blob)
-        return self._open_envelope(envelope)
+        return self._open_envelope(_parse_envelope(blob))
 
     # -- artifact documents ----------------------------------------------------
 
@@ -330,10 +319,8 @@ class CredentialStore:
                 f"Credential storage directory could not be created "
                 f"({exc.__class__.__name__})."
             ) from None
-        try:
+        with suppress(OSError):
             self.config_dir.chmod(0o700)
-        except OSError:
-            pass
         try:
             plaintext = json.dumps(secret, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError):
@@ -430,18 +417,7 @@ class CredentialStore:
             raise CredentialStoreError(
                 f"Credentials file is corrupted ({exc.__class__.__name__})."
             ) from None
-        if not isinstance(data, dict):
-            raise CredentialStoreError("Credentials file is corrupted.")
-        username = data.get("username")
-        password = data.get("password")
-        if (
-            not isinstance(username, str)
-            or not isinstance(password, str)
-            or not username.strip()
-            or not password.strip()
-        ):
-            raise CredentialStoreError("Credentials file is corrupted.")
-        return username, password
+        return _credential_pair(data)
 
     def _load_and_migrate_legacy(self, blob: bytes) -> tuple[str, str]:
         """Decrypt legacy raw-Fernet credentials with the keyring key, then
@@ -468,22 +444,10 @@ class CredentialStore:
             raise CredentialStoreError(
                 f"Credentials file is corrupted ({exc.__class__.__name__})."
             ) from None
-
-        if not isinstance(data, dict):
-            raise CredentialStoreError("Credentials file is corrupted.")
-        username, password = data.get("username"), data.get("password")
-        if (
-            not isinstance(username, str)
-            or not isinstance(password, str)
-            or not username.strip()
-            or not password.strip()
-        ):
-            raise CredentialStoreError("Credentials file is corrupted.")
+        username, password = _credential_pair(data)
         # Migration re-seals under the provider that just decrypted the data —
         # never the current env-first selection.
-        doc = self._build_document(
-            {}, plaintext, force_source="keyring",
-        )
+        doc = self._build_document({}, plaintext, force_source="keyring")
         try:
             atomic_write(self.credentials_file, doc, mode=0o600)
         except OSError as exc:
@@ -512,9 +476,7 @@ class CredentialStore:
         source = force_source or self._select_source()
         if source not in {"passphrase", "keyring"}:
             raise CredentialStoreError("Unknown credential key source.")
-        doc: dict[str, Any] = dict(metadata)
-        doc["v"] = FORMAT_VERSION
-        doc["key_source"] = source
+        doc: dict[str, Any] = {**metadata, "v": FORMAT_VERSION, "key_source": source}
         if source == "passphrase":
             passphrase = _passphrase_from_env()
             if passphrase is None:
@@ -559,23 +521,17 @@ class CredentialStore:
                         f"This data was sealed with {PASSPHRASE_ENV}; set the same "
                         "passphrase to decrypt it."
                     )
-                if "kdf_iterations" not in envelope:
-                    iterations = _LEGACY_KDF_ITERATIONS
-                else:
-                    raw_iterations = envelope.get("kdf_iterations")
-                    if not isinstance(raw_iterations, int) or isinstance(
-                        raw_iterations, bool
-                    ):
-                        raise CredentialStoreError(
-                            "Sealed data records an invalid KDF iteration count "
-                            "and cannot be opened."
-                        )
-                    if raw_iterations not in _SUPPORTED_KDF_ITERATIONS:
-                        raise CredentialStoreError(
-                            "Sealed data records unsupported KDF iteration count "
-                            f"{raw_iterations} and cannot be opened."
-                        )
-                    iterations = raw_iterations
+                iterations = envelope.get("kdf_iterations", _LEGACY_KDF_ITERATIONS)
+                if not isinstance(iterations, int) or isinstance(iterations, bool):
+                    raise CredentialStoreError(
+                        "Sealed data records an invalid KDF iteration count "
+                        "and cannot be opened."
+                    )
+                if iterations not in _SUPPORTED_KDF_ITERATIONS:
+                    raise CredentialStoreError(
+                        "Sealed data records unsupported KDF iteration count "
+                        f"{iterations} and cannot be opened."
+                    )
                 key = _derive_passphrase_key(
                     passphrase, _decode_kdf_salt(salt_b64), iterations
                 )
@@ -621,6 +577,21 @@ def _parse_envelope(blob: bytes) -> dict[str, Any]:
             f"Unsupported sealed-data format; expected v{FORMAT_VERSION} envelope."
         )
     return envelope
+
+
+def _credential_pair(data: object) -> tuple[str, str]:
+    """Return a decrypted ``(username, password)``; any other shape is corrupt."""
+    if not isinstance(data, dict):
+        raise CredentialStoreError("Credentials file is corrupted.")
+    username, password = data.get("username"), data.get("password")
+    if (
+        not isinstance(username, str)
+        or not isinstance(password, str)
+        or not username.strip()
+        or not password.strip()
+    ):
+        raise CredentialStoreError("Credentials file is corrupted.")
+    return username, password
 
 
 def is_sealed_document(data: object) -> bool:

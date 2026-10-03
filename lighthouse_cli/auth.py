@@ -268,9 +268,7 @@ def _auth_error(msg: str, json_output: bool, code: int = 1) -> int:
     safe_msg = _safe_auth_error_message(msg)
     if json_output:
         print(json.dumps({"success": False, "error": safe_msg}))
-        print(f"Error: {safe_msg}", file=sys.stderr)
-    else:
-        print(f"Error: {safe_msg}", file=sys.stderr)
+    print(f"Error: {safe_msg}", file=sys.stderr)
     return code
 
 
@@ -298,13 +296,8 @@ def _clean_auth_command(fn: Callable[..., int]) -> Callable[..., int]:
             # secret-free (key resolution, unsealing, sealing failures).
             return _auth_error(str(exc), json_output)
         except NetworkError as exc:
-            message = str(exc)
-            safe_message = (
-                message
-                if message in _SAFE_BROWSER_NETWORK_ERRORS
-                else _safe_auth_error_message(message)
-            )
-            return _auth_error(safe_message, json_output)
+            # Fixed browser-helper messages pass through the filter unchanged.
+            return _auth_error(_safe_auth_error_message(str(exc)), json_output)
         except Exception as exc:  # deliberate last-resort guard
             # Never forward raw third-party exception text — str(exc) may
             # embed URLs, tokens, or page content. Only the type is shown.
@@ -463,12 +456,8 @@ def _cli_method_for_auth_id(auth_method_id: str) -> str | None:
 
 def _pending_selected_method(pending: dict[str, Any] | None) -> str | None:
     """Return the explicit method represented by a sealed MFA checkpoint."""
-    if not isinstance(pending, dict):
-        return None
-    selected = pending.get("selected_proof")
-    if not isinstance(selected, dict):
-        return None
-    auth_method_id = selected.get("auth_method_id")
+    selected = pending.get("selected_proof") if isinstance(pending, dict) else None
+    auth_method_id = selected.get("auth_method_id") if isinstance(selected, dict) else None
     if not isinstance(auth_method_id, str):
         return None
     return _cli_method_for_auth_id(auth_method_id)
@@ -503,6 +492,30 @@ def plan_login(
     )
     mode = "defer" if defer_mfa_to_pending else "fresh"
     return LoginPlan(mode, totp_code, read_totp_after_challenge, defer_mfa_to_pending)
+
+
+def _resolve_command_credentials(
+    username: str | None, password: str | None, *, interactive: bool, json_output: bool
+) -> tuple[str | None, str | None]:
+    """Resolve credentials from flags, env, the store, then a prompt.
+
+    Raises _PromptUnavailableError when a field is missing and stdin is not a TTY.
+    """
+    stored: tuple[str, str] | None = None
+    if not username or not password:
+        with suppress(CredentialStoreError, OSError):
+            stored = CredentialStore().load()
+    prompt = functools.partial(
+        _prompt_credential, interactive=interactive, json_output=json_output
+    )
+    return resolve_credentials(
+        username,
+        password,
+        os.getenv("LIGHTHOUSE_USERNAME", "").strip(),
+        os.getenv("LIGHTHOUSE_PASSWORD", "").strip(),
+        stored,
+        prompt,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -572,9 +585,8 @@ def _persist_check_report(
         )
 
     if save_credentials_pair is not None:
-        stored_username, stored_password = save_credentials_pair
         try:
-            CredentialStore().save(stored_username, stored_password)
+            CredentialStore().save(*save_credentials_pair)
         except CredentialStoreError as exc:
             print(
                 "Warning: Could not save credentials: "
@@ -659,16 +671,10 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
 
     # Preflight the encryption key source BEFORE any auth side effects: verify
     # submits the code and then must seal cookies.  Fail here, not mid-flow.
-    try:
-        store.preflight()
-    except CredentialStoreError as exc:
-        return _auth_error(str(exc), json_output)
+    # (``_clean_auth_command`` reports any CredentialStoreError raised here.)
+    store.preflight()
 
-    try:
-        pending_present = load_mfa_pending() is not None
-    except CredentialStoreError as exc:
-        return _auth_error(str(exc), json_output)
-    if not pending_present:
+    if load_mfa_pending() is None:
         return _auth_error(
             "No pending MFA session. Run: lighthouse auth login --mfa-method sms",
             json_output,
@@ -678,8 +684,6 @@ def cmd_auth_verify(totp_code: str | None, *, json_output: bool = False) -> int:
     try:
         cookies = sso_client.complete_mfa_pending(totp_code.strip())
     except MicrosoftSSOError as exc:
-        return _auth_error(str(exc), json_output)
-    except CredentialStoreError as exc:
         return _auth_error(str(exc), json_output)
     except (KeyError, TypeError, ValueError) as exc:
         return _auth_error(
@@ -719,25 +723,9 @@ def cmd_auth_mfa_methods(
     ensure_config_dir()
 
     interactive = _is_interactive()
-    stored: tuple[str, str] | None = None
-    if not username or not password:
-        with suppress(CredentialStoreError, OSError):
-            stored = CredentialStore().load()
-
-    prompt = functools.partial(
-        _prompt_credential,
-        interactive=interactive,
-        json_output=json_output,
-    )
-
     try:
-        username, password = resolve_credentials(
-            username,
-            password,
-            os.getenv("LIGHTHOUSE_USERNAME", "").strip(),
-            os.getenv("LIGHTHOUSE_PASSWORD", "").strip(),
-            stored,
-            prompt,
+        username, password = _resolve_command_credentials(
+            username, password, interactive=interactive, json_output=json_output
         )
     except _PromptUnavailableError:
         return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
@@ -828,25 +816,9 @@ def cmd_auth_login(
     ensure_config_dir()
 
     interactive = _is_interactive()
-    stored: tuple[str, str] | None = None
-    if not username or not password:
-        with suppress(CredentialStoreError, OSError):
-            stored = CredentialStore().load()
-
-    prompt = functools.partial(
-        _prompt_credential,
-        interactive=interactive,
-        json_output=json_output,
-    )
-
     try:
-        username, password = resolve_credentials(
-            username,
-            password,
-            os.getenv("LIGHTHOUSE_USERNAME", "").strip(),
-            os.getenv("LIGHTHOUSE_PASSWORD", "").strip(),
-            stored,
-            prompt,
+        username, password = _resolve_command_credentials(
+            username, password, interactive=interactive, json_output=json_output
         )
     except _PromptUnavailableError:
         return _auth_error(_SAFE_CREDENTIALS_ERROR, json_output)
@@ -889,10 +861,7 @@ def cmd_auth_login(
     # effect); both require a usable key source — fail here with an
     # actionable message before either happens. (Stored credentials may have
     # been read earlier, but only under error suppression.)
-    try:
-        CredentialStore().preflight()
-    except CredentialStoreError as exc:
-        return _auth_error(str(exc), json_output)
+    CredentialStore().preflight()
 
     # Resume the pending MFA session only when the provided code belongs to it.
     # An explicit --mfa-method that differs from the pending session (e.g. an
@@ -920,9 +889,8 @@ def cmd_auth_login(
         return cmd_auth_verify(plan.totp_code, json_output=json_output)
 
     def _on_password_accepted() -> None:
-        if json_output or not interactive:
-            return
-        print("Password accepted. Completing second factor...", flush=True)
+        if interactive and not json_output:
+            print("Password accepted. Completing second factor...", flush=True)
 
     if interactive and not json_output and plan.totp_code is None:
         print(
@@ -964,8 +932,6 @@ def cmd_auth_login(
                 print(f"Fix: {safe_recovery}", flush=True)
         return 0
     except MicrosoftSSOError as exc:
-        return _auth_error(str(exc), json_output)
-    except CredentialStoreError as exc:
         return _auth_error(str(exc), json_output)
     finally:
         sso_client.close()

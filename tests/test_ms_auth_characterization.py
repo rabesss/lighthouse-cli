@@ -1372,7 +1372,7 @@ class TestFlowRecorder:
         assert on.exists()
 
     def test_username_prepare_records_ssoprobe_gets(self, tmp_path):
-        """The direct ssoprobe GETs (not routed through _get) reach the flow log."""
+        """The ssoprobe GETs reach the flow log."""
         from lighthouse_cli.ms_auth import MicrosoftSSOClient
 
         log = tmp_path / "flow.jsonl"

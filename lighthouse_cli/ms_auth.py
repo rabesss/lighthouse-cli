@@ -34,13 +34,13 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from lighthouse_cli.config import (
     BASE_URL,
@@ -181,16 +181,14 @@ def _safe_flow_field_names(field_names: object) -> list[str]:
     safe: list[str] = []
     redacted = False
     for field_name in field_names:
-        if isinstance(field_name, str) and field_name in {"(redacted)", "(unparseable)"}:
+        # The ASCII-only name pattern also rules out non-printable characters.
+        if isinstance(field_name, str) and (
+            field_name in {"(redacted)", "(unparseable)"}
+            or _SAFE_FIELD_NAME_RE.fullmatch(field_name)
+        ):
             safe.append(field_name)
-            continue
-        if not isinstance(field_name, str) or not _SAFE_FIELD_NAME_RE.fullmatch(field_name):
+        else:
             redacted = True
-            continue
-        if any(not char.isprintable() for char in field_name):
-            redacted = True
-            continue
-        safe.append(field_name)
     if redacted:
         safe.append("(redacted)")
     return safe
@@ -218,14 +216,9 @@ _MAX_SSO_RELOADS = 2
 
 def _safe_mfa_entropy(value: object) -> str | None:
     """Return a short number-match value, never arbitrary upstream text."""
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         return None
-    if isinstance(value, int):
-        candidate = str(value)
-    elif isinstance(value, str):
-        candidate = value
-    else:
-        return None
+    candidate = str(value)
     return candidate if _SAFE_MFA_ENTROPY_RE.fullmatch(candidate) else None
 
 
@@ -295,16 +288,11 @@ def extract_saml_response(html: str) -> str | None:
         if val and isinstance(val, str):
             return val
 
-    m = re.search(r'name="SAMLResponse"\s+value="([^"]*)"', html)
-    if m:
-        return m.group(1)
-
-    if "SAMLResponse" in html or "SAML" in html:
-        m = re.search(r'SAMLResponse[=:]?\s*["\']?\s*([A-Za-z0-9+/=]{100,})["\']?', html)
-        if m:
-            return m.group(1)
-
-    return None
+    m = (
+        re.search(r'name="SAMLResponse"\s+value="([^"]*)"', html)
+        or re.search(r'SAMLResponse[=:]?\s*["\']?\s*([A-Za-z0-9+/=]{100,})["\']?', html)
+    )
+    return m.group(1) if m else None
 
 
 def is_mfa_page(html: str) -> bool:
@@ -321,10 +309,8 @@ def is_mfa_page(html: str) -> bool:
     # that page was misrouted to MFA handling instead of error handling).
     text_lower = html.lower()
     otc_in_text = bool(re.search(r"\botc\b", text_lower))
-    verification_in_text = "verification" in text_lower
-    authenticator_in_text = "authenticator" in text_lower
     return (
-        (otc_in_text and (verification_in_text or authenticator_in_text))
+        (otc_in_text and ("verification" in text_lower or "authenticator" in text_lower))
         or 'name="otc"' in html
         or 'id="idDiv_SAOTCC_Description"' in html
         or "Enter code" in html
@@ -360,8 +346,7 @@ def describe_page_shape(snapshot: ResponseSnapshot) -> str:
     material), $Config pgid, and structural marker booleans.  Never includes
     HTML fragments or token values.
     """
-    url = snapshot.url or ""
-    location = _safe_flow_location(url)
+    location = _safe_flow_location(snapshot.url)
     cfg = _extract_config_json(snapshot.html) or {}
     pgid = safe_diagnostic_text(cfg.get("pgid"), fallback="-")
     html = snapshot.html
@@ -405,11 +390,9 @@ def _safe_page_shape_message(value: object) -> str | None:
     if not isinstance(value, str) or not value.startswith("Unexpected response — "):
         return None
     summary = value.removeprefix("Unexpected response — ")
-    if not _PAGE_SHAPE_RE.fullmatch(summary):
-        return None
-    if safe_diagnostic_text(summary, fallback="") != summary:
-        return None
-    return value
+    if _PAGE_SHAPE_RE.fullmatch(summary) and safe_diagnostic_text(summary, fallback="") == summary:
+        return value
+    return None
 
 
 def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSSOError:
@@ -417,15 +400,9 @@ def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSS
     # ``describe_page_shape`` is a deliberately sanitized structural
     # diagnostic used for an unrecognized response.  Preserve only the exact
     # shape emitted by this module; all other upstream text is filtered.
-    page_shape = _safe_page_shape_message(msg)
-    if code is None and page_shape is not None:
-        fallback_description = page_shape
-    else:
-        fallback_description = safe_upstream_text(msg, fallback="Unknown error")
-    description = MS_ERROR_CODES.get(
-        code or 0,
-        fallback_description,
-    )
+    page_shape = _safe_page_shape_message(msg) if code is None else None
+    fallback_description = page_shape or safe_upstream_text(msg, fallback="Unknown error")
+    description = MS_ERROR_CODES.get(code or 0, fallback_description)
     if code:
         description = f"[{code}] {description}"
 
@@ -539,6 +516,16 @@ def build_process_payload(
     return data
 
 
+def _form_fields(form: Tag, *, hidden_only: bool = False) -> dict[str, str]:
+    """Named ``<input>`` values of a form (a repeated name keeps its last value)."""
+    inputs = form.find_all("input", type="hidden") if hidden_only else form.find_all("input")
+    return {
+        str(inp.get("name")): str(inp.get("value") or "")
+        for inp in inputs
+        if inp.get("name")
+    }
+
+
 def is_hiddenform_page(html: str) -> bool:
     """Microsoft auto-submit interstitial (common after ProcessAuth)."""
     if 'name="hiddenform"' in html or "name='hiddenform'" in html:
@@ -558,36 +545,19 @@ def hiddenform_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
             step="MFA",
         )
     action = form.get("action")
-    post_url = (
-        _trusted_url(
-            base_url,
-            str(action),
-            _MICROSOFT_ALLOWED_HOSTS,
-            step="MFA interstitial",
-            label="hidden form",
-        )
-        if action
-        else _trusted_url(
-            base_url,
-            base_url,
-            _MICROSOFT_ALLOWED_HOSTS,
-            step="MFA interstitial",
-            label="hidden form",
-        )
+    post_url = _trusted_url(
+        base_url,
+        str(action) if action else base_url,
+        _MICROSOFT_ALLOWED_HOSTS,
+        step="MFA interstitial",
+        label="hidden form",
     )
-    form_data: dict[str, str] = {}
-    for inp in form.find_all("input"):
-        name = inp.get("name")
-        if name:
-            form_data[str(name)] = str(inp.get("value") or "")
-    return Transition(kind="hiddenform", url=post_url, data=form_data)
+    return Transition(kind="hiddenform", url=post_url, data=_form_fields(form))
 
 
 def find_saml_request_url(html: str) -> str | None:
     """Locate a JS ``window.location`` URL that carries SAMLRequest (pure)."""
     for fragment in html.split(";"):
-        if "SAMLRequest" not in fragment:
-            continue
         m = re.search(r"(https://[^\s'\"]+SAMLRequest[^\s'\"]*)", fragment)
         if m:
             return m.group(1)
@@ -629,50 +599,25 @@ def kmsi_transition(snapshot: ResponseSnapshot, base_url: str) -> Transition:
         kmsi_data["loginfmt"] = str(username)
 
     url_post = page_cfg.get("urlPost")
-    post_url = (
-        _trusted_url(
-            base_url,
-            str(url_post),
-            _MICROSOFT_ALLOWED_HOSTS,
-            step="MFA interstitial",
-            label="KMSI",
-        )
-        if url_post
-        else _trusted_url(
-            base_url,
-            base_url,
-            _MICROSOFT_ALLOWED_HOSTS,
-            step="MFA interstitial",
-            label="KMSI",
-        )
+    post_url = _trusted_url(
+        base_url,
+        str(url_post) if url_post else base_url,
+        _MICROSOFT_ALLOWED_HOSTS,
+        step="MFA interstitial",
+        label="KMSI",
     )
     if not kmsi_data.get(sft_name) or not kmsi_data.get("ctx"):
-        soup = BeautifulSoup(snapshot.html, "html.parser")
-        form = soup.find("form")
+        form = BeautifulSoup(snapshot.html, "html.parser").find("form")
         if form:
             action = form.get("action")
-            post_url = (
-                _trusted_url(
-                    base_url,
-                    str(action),
-                    _MICROSOFT_ALLOWED_HOSTS,
-                    step="MFA interstitial",
-                    label="KMSI",
-                )
-                if action
-                else _trusted_url(
-                    base_url,
-                    base_url,
-                    _MICROSOFT_ALLOWED_HOSTS,
-                    step="MFA interstitial",
-                    label="KMSI",
-                )
+            post_url = _trusted_url(
+                base_url,
+                str(action) if action else base_url,
+                _MICROSOFT_ALLOWED_HOSTS,
+                step="MFA interstitial",
+                label="KMSI",
             )
-            kmsi_data = {}
-            for hidden in form.find_all("input"):
-                name = hidden.get("name")
-                if name:
-                    kmsi_data[str(name)] = str(hidden.get("value") or "")
+            kmsi_data = _form_fields(form)
             kmsi_data.setdefault("LoginOptions", "1")
     return Transition(kind="kmsi", url=post_url, data=kmsi_data)
 
@@ -719,6 +664,11 @@ def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
     cfg = _extract_config_json(snapshot.html) or {}
     url_post = str(cfg.get("urlPost") or "")
     params = cfg.get("oPostParams")
+    unsafe_target = MicrosoftSSOError(
+        "Microsoft session-pull requested an unsafe re-POST target.",
+        step="POST credentials",
+        recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
+    )
     try:
         target = _trusted_url(
             base_url,
@@ -727,40 +677,21 @@ def sso_reload_transition(snapshot: ResponseSnapshot, base_url: str) -> Transiti
             step="POST credentials",
             label="session-pull",
         )
-    except MicrosoftSSOError:
-        # Preserve the stable characterization without echoing the rejected
-        # upstream URL (which may contain flow or credential material).
-        raise MicrosoftSSOError(
-            "Microsoft session-pull requested an unsafe re-POST target.",
-            step="POST credentials",
-            recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
-        ) from None
-    source_url = snapshot.url or base_url
-
-    try:
         trusted_source = _trusted_url(
             base_url,
-            source_url,
+            snapshot.url or base_url,
             _MICROSOFT_ALLOWED_HOSTS,
             step="POST credentials",
             label="session-pull source",
         )
     except MicrosoftSSOError:
-        raise MicrosoftSSOError(
-            "Microsoft session-pull requested an unsafe re-POST target.",
-            step="POST credentials",
-            recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
-        ) from None
-    source_parsed = urlparse(trusted_source)
-    target_parsed = urlparse(target)
-    source_origin = (source_parsed.hostname or "").lower(), source_parsed.port or 443
-    target_origin = (target_parsed.hostname or "").lower(), target_parsed.port or 443
-    if target_origin != source_origin:
-        raise MicrosoftSSOError(
-            "Microsoft session-pull requested an unsafe re-POST target.",
-            step="POST credentials",
-            recovery="Retry the login; if it persists, Microsoft changed the sign-in flow.",
-        )
+        # Preserve the stable characterization without echoing the rejected
+        # upstream URL (which may contain flow or credential material).
+        raise unsafe_target from None
+    # Both URLs passed the exact HTTPS/443 origin check, so equal hostnames
+    # mean equal origins.
+    if urlparse(target).hostname != urlparse(trusted_source).hostname:
+        raise unsafe_target
     if not isinstance(params, dict):
         raise MicrosoftSSOError(
             "Microsoft session-pull parameters were missing.",
@@ -864,18 +795,22 @@ class MicrosoftSSOClient:
         # Note: login() creates its own fresh session for each login attempt.
         # This constructor session is used by complete_mfa_pending(), which
         # resumes an existing flow without going through login().
-        self._session = requests.Session()
+        self._session = self._new_session()
         self._timeout = timeout
         # Diagnostics: when LIGHTHOUSE_DEBUG_FLOW names a file, append one
         # sanitized JSON record per HTTP step (method, origin+path, status,
         # form field NAMES, page shape). Never request/response bodies, never
         # headers, cookies, tokens, or query strings.
         self._flow_log = flow_log or os.environ.get("LIGHTHOUSE_DEBUG_FLOW") or ""
-        self._session.headers.update({
+
+    def _new_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update({
             "User-Agent": self._user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         })
+        return session
 
     # -- transport -------------------------------------------------------------
 
@@ -952,21 +887,7 @@ class MicrosoftSSOClient:
         post_kwargs = dict(kwargs)
         post_kwargs.pop("allow_redirects", None)
         post_kwargs.pop("timeout", None)
-
-        def post_current() -> requests.Response:
-            data = post_kwargs.get("data")
-            if isinstance(data, dict):
-                self._record_flow("POST", current, field_names=sorted(data.keys()))
-            response = self._session.post(
-                current,
-                allow_redirects=False,
-                timeout=self._timeout,
-                **post_kwargs,
-            )
-            self._record_flow("POST", current, response.status_code)
-            return response
-
-        response = post_current()
+        response = self._post(current, **post_kwargs)
         post_mode = True
         for _ in range(8):
             if response.status_code not in _REDIRECT_STATUSES:
@@ -984,35 +905,21 @@ class MicrosoftSSOClient:
                 step="POST SAML",
                 label="D2L redirect",
             )
-            d2l_cookies = {
-                cookie.name: str(cookie.value or "")
-                for cookie in self._session.cookies
-                if cookie.name.startswith("d2l")
-                and cookie_domain_accepted(cookie.domain or "")
-            }
-            if not missing_cookie_names(d2l_cookies):
+            if not missing_cookie_names(self._d2l_cookies()):
                 return response
             with suppress(Exception):
                 response.close()
             if response.status_code in (307, 308) and post_mode:
-                response = post_current()
+                response = self._post(current, **post_kwargs)
                 continue
             # 301/302/303 transitions are GETs; never carry the SAML body.
-            response = self._session.get(
-                current,
-                allow_redirects=False,
-                timeout=self._timeout,
-            )
-            self._record_flow("GET", current, response.status_code)
+            response = self._get(current)
             post_mode = False
         raise MicrosoftSSOError(
             "D2L ACS redirect limit exceeded.",
             step="POST SAML",
             recovery="Retry the login; the D2L sign-in redirect chain may be looping.",
         )
-
-    def _snapshot(self, resp: requests.Response) -> ResponseSnapshot:
-        return ResponseSnapshot.from_response(resp)
 
     @staticmethod
     def _resolve_mfa_url(base_url: str, path: str) -> str:
@@ -1044,23 +951,20 @@ class MicrosoftSSOClient:
                 step="MFA verify",
                 recovery="Run: lighthouse auth login --mfa-method sms",
             )
+        corrupted = MicrosoftSSOError(
+            "Pending MFA session is corrupted.",
+            step="MFA verify",
+            recovery="Run: lighthouse auth login --mfa-method sms",
+        )
         try:
             selected = UserProof(**pending["selected_proof"])
             mfa_config = pending["mfa_config"]
             begin_data = pending["begin"]
             mfa_page_url = str(pending["mfa_page_url"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise MicrosoftSSOError(
-                "Pending MFA session is corrupted.",
-                step="MFA verify",
-                recovery="Run: lighthouse auth login --mfa-method sms",
-            ) from exc
+            raise corrupted from exc
         if not isinstance(mfa_config, dict) or not isinstance(begin_data, dict):
-            raise MicrosoftSSOError(
-                "Pending MFA session is corrupted.",
-                step="MFA verify",
-                recovery="Run: lighthouse auth login --mfa-method sms",
-            )
+            raise corrupted
         return selected, mfa_config, begin_data, mfa_page_url
 
     def complete_mfa_pending(self, totp_code: str) -> dict[str, str]:
@@ -1187,12 +1091,7 @@ class MicrosoftSSOClient:
         clear_mfa_pending()
 
         # Create a fresh session for each login attempt (safe reuse).
-        self._session = requests.Session()
-        self._session.headers.update({
-            "User-Agent": self._user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
+        self._session = self._new_session()
 
         # Step 1: Initiate D2L SAML login
         ms_url = self._step_initiate_saml()
@@ -1229,17 +1128,15 @@ class MicrosoftSSOClient:
                 read_totp_after_challenge=read_totp_after_challenge,
                 defer_mfa_to_pending=defer_mfa_to_pending,
             )
-            saml_html = snap.html
-            saml_response = extract_saml_response(saml_html)
+            saml_response = extract_saml_response(snap.html)
         elif is_error_page(snap):
             code, msg = _extract_error_code_and_msg(snap.html)
             raise build_sso_error(code, msg, "POST credentials")
         else:
             # Response might already contain SAML
-            saml_html = snap.html
-            saml_response = extract_saml_response(saml_html)
+            saml_response = extract_saml_response(snap.html)
             if not saml_response:
-                code, msg = _extract_error_code_and_msg(saml_html)
+                code, msg = _extract_error_code_and_msg(snap.html)
                 raise build_sso_error(
                     code,
                     msg or f"Unexpected response — {describe_page_shape(snap)}",
@@ -1253,7 +1150,7 @@ class MicrosoftSSOClient:
                 step="extract SAML",
                 recovery="Try again or check your account status.",
             )
-        self._step_post_saml(saml_response, saml_html)
+        self._step_post_saml(saml_response, snap.html)
         # Step 6: Extract D2L cookies. Only after the complete inline flow has
         # produced a valid session do we remove a stale/recovery checkpoint.
         cookies = self._extract_d2l_cookies()
@@ -1304,10 +1201,8 @@ class MicrosoftSSOClient:
                     "and report the sanitized page-shape trace."
                 ),
             )
-        cfg = _extract_config_json(snap.html) or {}
-        proofs = _parse_user_proofs(cfg)
-        page = "converged" if proofs else "legacy_form"
-        return MfaProbeResult(page=page, proofs=proofs)
+        proofs = _parse_user_proofs(_extract_config_json(snap.html) or {})
+        return MfaProbeResult(page="converged" if proofs else "legacy_form", proofs=proofs)
 
     # -- step implementations ------------------------------------------------------
 
@@ -1399,36 +1294,28 @@ class MicrosoftSSOClient:
         if config is None:
             # The page might be a different form (e.g., organization login)
             # Try to find the login form directly
-            soup = BeautifulSoup(resp.text, "html.parser")
-            form = soup.find("form")
-            if form:
-                action = form.get("action", "")
-                action_str = str(action) if action else ""
-                config = {
-                    "urlPost": (
-                        _trusted_url(
-                            trusted_ms_url,
-                            action_str,
-                            _MICROSOFT_ALLOWED_HOSTS,
-                            step="get MS config",
-                            label="login form",
-                        )
-                        if action_str
-                        else trusted_ms_url
-                    ),
-                }
-                # Extract hidden inputs
-                for hidden in form.find_all("input", type="hidden"):
-                    hidden_name = hidden.get("name")
-                    hidden_value = hidden.get("value")
-                    if hidden_name:
-                        config[str(hidden_name)] = str(hidden_value) if hidden_value else ""
-            else:
+            form = BeautifulSoup(resp.text, "html.parser").find("form")
+            if not form:
                 raise MicrosoftSSOError(
                     "Could not find Microsoft login configuration on the page.",
                     step="get MS config",
                     recovery="Microsoft may have changed their login page. Try again later.",
                 )
+            action = form.get("action")
+            config = {
+                "urlPost": (
+                    _trusted_url(
+                        trusted_ms_url,
+                        str(action),
+                        _MICROSOFT_ALLOWED_HOSTS,
+                        step="get MS config",
+                        label="login form",
+                    )
+                    if action
+                    else trusted_ms_url
+                ),
+                **_form_fields(form, hidden_only=True),
+            }
 
         # Store the MS page URL for later (needed for form action resolution)
         response_url = str(getattr(resp, "url", "") or trusted_ms_url)
@@ -1470,22 +1357,16 @@ class MicrosoftSSOClient:
                 merged[key] = val
             elif key not in merged:
                 merged[key] = val
-        saml_referer = config.get("_ms_url")
-        if saml_referer:
-            merged["_ms_url"] = saml_referer
         _prune_stale_esctx_cookies(self._session)
         return merged
 
     def _post_dsso_status(self, config: dict[str, Any], canary: str) -> None:
         """Report desktop SSO probe result (browser fires this around username entry)."""
-        referer = str(config.get("_ms_url", ""))
-        self._record_flow(
-            "POST",
-            "https://login.microsoftonline.com/common/instrumentation/dssostatus",
-            field_names=["resultCode", "ssoDelay", "log"],
-        )
-        resp = self._session.post(
-            "https://login.microsoftonline.com/common/instrumentation/dssostatus",
+        url = "https://login.microsoftonline.com/common/instrumentation/dssostatus"
+        # JSON bodies are not recorded by _post; log the field names here.
+        self._record_flow("POST", url, field_names=["resultCode", "ssoDelay", "log"])
+        self._post(
+            url,
             json={
                 "resultCode": 2,
                 "ssoDelay": 0,
@@ -1499,15 +1380,8 @@ class MicrosoftSSOClient:
                 "hpgact": str(config.get("hpgact", "1900")),
                 "hpgid": str(config.get("hpgid", "1104")),
                 "hpgrequestid": str(config.get("sessionId") or ""),
-                "Referer": referer,
+                "Referer": str(config.get("_ms_url", "")),
             },
-            allow_redirects=False,
-            timeout=self._timeout,
-        )
-        self._record_flow(
-            "POST",
-            "https://login.microsoftonline.com/common/instrumentation/dssostatus",
-            resp.status_code,
         )
 
     def _import_playwright_cookies(self, pw_cookies: list[dict[str, Any]]) -> None:
@@ -1661,27 +1535,14 @@ class MicrosoftSSOClient:
             "https://autologon.microsoftazuread-sso.com/"
             f"{tenant_id}/winauth/ssoprobe?client-request-id={client_request_id}"
         )
-        probe_resp = self._session.get(
-            ssoprobe_url,
-            headers={"Referer": referer},
-            allow_redirects=False,
-            timeout=self._timeout,
-        )
-        self._record_flow("GET", ssoprobe_url, probe_resp.status_code)
+        self._get(ssoprobe_url, headers={"Referer": referer})
 
         canary_hdr = str(config.get("apiCanary") or config.get("canary") or "")
         self._post_dsso_status(config, canary_hdr)
 
         updated = self._step_get_credential_type(config, username)
 
-        ssoprobe_url_2 = f"{ssoprobe_url}&_={int(time.time() * 1000)}"
-        probe2_resp = self._session.get(
-            ssoprobe_url_2,
-            headers={"Referer": referer},
-            allow_redirects=False,
-            timeout=self._timeout,
-        )
-        self._record_flow("GET", ssoprobe_url_2, probe2_resp.status_code)
+        self._get(f"{ssoprobe_url}&_={int(time.time() * 1000)}", headers={"Referer": referer})
 
         post_gct_canary = str(updated.get("apiCanary") or canary_hdr)
         self._post_dsso_status(updated, post_gct_canary)
@@ -1812,7 +1673,7 @@ class MicrosoftSSOClient:
                 step="POST credentials",
                 label="Microsoft redirect",
             )
-            return self._snapshot(self._get(resolved))
+            return ResponseSnapshot.from_response(self._get(resolved))
 
         url_post = config.get("urlPost", "")
         if not url_post:
@@ -1849,11 +1710,9 @@ class MicrosoftSSOClient:
             label="Microsoft referer",
         )
 
-        data = build_password_form_data(config, username, password)
-
         resp = self._post(
             login_url,
-            data=data,
+            data=build_password_form_data(config, username, password),
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Referer": referer,
@@ -1872,9 +1731,9 @@ class MicrosoftSSOClient:
                     step="POST credentials",
                     label="Microsoft redirect",
                 )
-                return self._snapshot(self._get(resolved))
+                return ResponseSnapshot.from_response(self._get(resolved))
 
-        return self._snapshot(resp)
+        return ResponseSnapshot.from_response(resp)
 
     # -- MFA handling -----------------------------------------------------------
 
@@ -2037,20 +1896,17 @@ class MicrosoftSSOClient:
             json=build_begin_payload(selected, mfa_config),
             headers={"Content-Type": "application/json"},
         )
+        invalid_begin = MicrosoftSSOError(
+            "Microsoft MFA BeginAuth returned an invalid response.",
+            step="MFA",
+            recovery="Try again or use --mfa-method auto.",
+        )
         try:
             begin_data: dict[str, Any] = begin_resp.json()
         except ValueError as exc:
-            raise MicrosoftSSOError(
-                "Microsoft MFA BeginAuth returned an invalid response.",
-                step="MFA",
-                recovery="Try again or use --mfa-method auto.",
-            ) from exc
+            raise invalid_begin from exc
         if not isinstance(begin_data, dict):
-            raise MicrosoftSSOError(
-                "Microsoft MFA BeginAuth returned an invalid response.",
-                step="MFA",
-                recovery="Try again or use --mfa-method auto.",
-            )
+            raise invalid_begin
 
         if not begin_data.get("Success"):
             message = safe_upstream_text(
@@ -2082,12 +1938,7 @@ class MicrosoftSSOClient:
                     if k in mfa_config
                 },
                 "begin": begin_data,
-                "selected_proof": {
-                    "auth_method_id": selected.auth_method_id,
-                    "display": selected.display,
-                    "data": selected.data,
-                    "is_default": selected.is_default,
-                },
+                "selected_proof": asdict(selected),
                 "cookies": _export_session_cookies(self._session),
             })
             if selected.auth_method_id == MFA_AUTH_APP_NOTIFY:
@@ -2167,8 +2018,7 @@ class MicrosoftSSOClient:
 
         # ProcessAuth: EndAuth already consumed the OTP; only pass tokens (saml2aws pattern).
         process_data = build_process_payload(mfa_config, flow_token, ctx, login_name)
-        resp = self._post(process_endpoint, data=process_data)
-        snap = self._snapshot(resp)
+        snap = ResponseSnapshot.from_response(self._post(process_endpoint, data=process_data))
 
         page_cfg = _extract_config_json(snap.html) or {}
         if page_cfg.get("pgid") in ("CmsiInterrupt", "KmsiInterrupt"):
@@ -2208,20 +2058,26 @@ class MicrosoftSSOClient:
 
         end_flow = str(begin_data.get("FlowToken") or flow_token)
         end_ctx = str(begin_data.get("Ctx") or ctx)
-        polling = mfa_config.get("oPerAuthPollingInterval") or {}
+        polling = mfa_config.get("oPerAuthPollingInterval")
         try:
-            raw_poll_seconds = (
-                polling.get(selected.auth_method_id, 2)
-                if isinstance(polling, dict)
-                else 2
+            poll_seconds = float(
+                polling.get(selected.auth_method_id, 2) if isinstance(polling, dict) else 2
             )
-            poll_seconds = float(raw_poll_seconds)
         except (TypeError, ValueError):
             poll_seconds = 2.0
         if not math.isfinite(poll_seconds):
             poll_seconds = 2.0
         poll_seconds = min(_MAX_ENDAUTH_POLL_SECONDS, max(0.5, poll_seconds))
 
+        timed_out = MicrosoftSSOError(
+            "2FA verification timed out waiting for approval.",
+            step="MFA",
+            recovery="Try again and complete verification promptly.",
+        )
+        invalid_end = MicrosoftSSOError(
+            "Microsoft MFA EndAuth returned an invalid response.",
+            step="MFA",
+        )
         end_data: dict[str, Any] = {}
         shown_entropy: str | None = None
         deadline = time.monotonic() + _MAX_ENDAUTH_TOTAL_SECONDS
@@ -2233,11 +2089,7 @@ class MicrosoftSSOClient:
             if skip_end_auth:
                 break
             if time.monotonic() >= deadline:
-                raise MicrosoftSSOError(
-                    "2FA verification timed out waiting for approval.",
-                    step="MFA",
-                    recovery="Try again and complete verification promptly.",
-                )
+                raise timed_out
             end_resp = self._post(
                 self._resolve_mfa_url(base_url, str(end_url)),
                 json=build_end_payload(
@@ -2249,15 +2101,9 @@ class MicrosoftSSOClient:
             try:
                 end_data = end_resp.json()
             except ValueError as exc:
-                raise MicrosoftSSOError(
-                    "Microsoft MFA EndAuth returned an invalid response.",
-                    step="MFA",
-                ) from exc
+                raise invalid_end from exc
             if not isinstance(end_data, dict):
-                raise MicrosoftSSOError(
-                    "Microsoft MFA EndAuth returned an invalid response.",
-                    step="MFA",
-                )
+                raise invalid_end
 
             if end_data.get("Success"):
                 self._checkpoint_mfa_pending(
@@ -2323,18 +2169,10 @@ class MicrosoftSSOClient:
             if poll_index + 1 < _MAX_ENDAUTH_POLLS:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise MicrosoftSSOError(
-                        "2FA verification timed out waiting for approval.",
-                        step="MFA",
-                        recovery="Try again and complete verification promptly.",
-                    )
+                    raise timed_out
                 time.sleep(min(poll_seconds, remaining))
         else:
-            raise MicrosoftSSOError(
-                "2FA verification timed out waiting for approval.",
-                step="MFA",
-                recovery="Try again and complete verification promptly.",
-            )
+            raise timed_out
 
         return (
             str(end_data.get("FlowToken") or end_flow),
@@ -2379,8 +2217,7 @@ class MicrosoftSSOClient:
                 recovery="Provide a 2FA code via --totp flag or pipe.",
             )
 
-        soup = BeautifulSoup(mfa_snap.html, "html.parser")
-        form = soup.find("form")
+        form = BeautifulSoup(mfa_snap.html, "html.parser").find("form")
         if not form:
             raise MicrosoftSSOError(
                 "Could not find MFA form on the verification page.",
@@ -2389,19 +2226,8 @@ class MicrosoftSSOClient:
             )
 
         action = form.get("action")
-        mfa_url = (
-            self._resolve_mfa_url(mfa_snap.url, str(action))
-            if action
-            else self._resolve_mfa_url(mfa_snap.url, mfa_snap.url)
-        )
-
-        mfa_data: dict[str, str] = {"otc": totp_code.strip()}
-        for hidden in form.find_all("input", attrs={"type": "hidden"}):
-            name = hidden.get("name")
-            value = hidden.get("value")
-            if name:
-                mfa_data[str(name)] = str(value) if value else ""
-
+        mfa_url = self._resolve_mfa_url(mfa_snap.url, str(action) if action else mfa_snap.url)
+        mfa_data = {"otc": totp_code.strip(), **_form_fields(form, hidden_only=True)}
         for key in ("sFT", "sCtx", "canary", "apiCanary", "hpgrequestid"):
             if key in mfa_config and key not in mfa_data:
                 mfa_data[key] = str(mfa_config[key])
@@ -2409,8 +2235,7 @@ class MicrosoftSSOClient:
             if key in original_config and key not in mfa_data:
                 mfa_data[key] = str(original_config[key])
 
-        resp = self._post(mfa_url, data=mfa_data)
-        snap = self._snapshot(resp)
+        snap = ResponseSnapshot.from_response(self._post(mfa_url, data=mfa_data))
         if is_mfa_page(snap.html):
             raise MicrosoftSSOError(
                 "2FA verification failed: invalid or expired code.",
@@ -2424,7 +2249,7 @@ class MicrosoftSSOClient:
     def _submit_kmsi(self, snapshot: ResponseSnapshot) -> ResponseSnapshot:
         """Execute a classified KMSI/CMSI interrupt submission."""
         t = kmsi_transition(snapshot, snapshot.url)
-        return self._snapshot(self._post(t.url, data=t.data or {}))
+        return ResponseSnapshot.from_response(self._post(t.url, data=t.data or {}))
 
     def _advance_to_saml(
         self, snapshot: ResponseSnapshot, base_url: str, *, checkpoint_kmsi: bool = True
@@ -2444,13 +2269,6 @@ class MicrosoftSSOClient:
         sso_reloads = 0
         for _ in range(_MAX_POST_MFA_HOPS):
             transition = classify_post_mfa(snapshot, base_url)
-
-            if transition.kind == "saml":
-                return snapshot
-
-            if transition.kind == "mfa":
-                return snapshot
-
             if transition.kind == "sso_reload":
                 if sso_reloads >= _MAX_SSO_RELOADS:
                     raise MicrosoftSSOError(
@@ -2459,35 +2277,20 @@ class MicrosoftSSOClient:
                         recovery="Retry the login; the upstream sign-in flow may be looping.",
                     )
                 sso_reloads += 1
-                snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
-                base_url = snapshot.url
-                continue
+            elif transition.kind == "kmsi" and checkpoint_kmsi:
+                self._checkpoint_mfa_pending(
+                    kmsi_checkpoint={"url": snapshot.url, "html": snapshot.html},
+                )
 
-            if transition.kind == "redirect":
-                snapshot = self._snapshot(self._get(transition.url))
-                base_url = snapshot.url
-                continue
-
-            if transition.kind == "hiddenform":
-                snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
-                base_url = snapshot.url
-                continue
-
-            if transition.kind == "kmsi":
-                if checkpoint_kmsi:
-                    self._checkpoint_mfa_pending(
-                        kmsi_checkpoint={"url": snapshot.url, "html": snapshot.html},
-                    )
-                snapshot = self._snapshot(self._post(transition.url, data=transition.data or {}))
-                base_url = snapshot.url
-                continue
-
-            if transition.kind == "samlrequest":
-                snapshot = self._snapshot(self._get(transition.url))
-                base_url = snapshot.url
-                continue
-
-            return snapshot
+            if transition.kind in ("sso_reload", "hiddenform", "kmsi"):
+                resp = self._post(transition.url, data=transition.data or {})
+            elif transition.kind in ("redirect", "samlrequest"):
+                resp = self._get(transition.url)
+            else:
+                # saml, mfa, and stop are terminal for this walk.
+                return snapshot
+            snapshot = ResponseSnapshot.from_response(resp)
+            base_url = snapshot.url
 
         raise MicrosoftSSOError(
             "Microsoft sign-in interstitial hop limit exceeded.",
@@ -2508,8 +2311,7 @@ class MicrosoftSSOClient:
         data: dict[str, str] = {"SAMLResponse": saml_response}
 
         if html:
-            soup = BeautifulSoup(html, "html.parser")
-            form = soup.find("form")
+            form = BeautifulSoup(html, "html.parser").find("form")
             if form:
                 action = form.get("action")
                 if action:
@@ -2526,14 +2328,7 @@ class MicrosoftSSOClient:
                         data[str(name)] = str(inp.get("value") or "")
 
         self._post_with_redirects(acs_url, data=data)
-
-        d2l_cookies = {
-            cookie.name: str(cookie.value or "")
-            for cookie in self._session.cookies
-            if cookie.name.startswith("d2l")
-            and cookie_domain_accepted(cookie.domain or "")
-        }
-        if not missing_cookie_names(d2l_cookies):
+        if not missing_cookie_names(self._d2l_cookies()):
             return
 
         # Some ACS flows set cookies only after landing on /d2l/home
@@ -2559,13 +2354,7 @@ class MicrosoftSSOClient:
                 step="extract cookies",
                 recovery="Retry the login; the D2L redirect chain may be looping.",
             )
-        d2l_cookies = {
-            cookie.name: str(cookie.value or "")
-            for cookie in self._session.cookies
-            if cookie.name.startswith("d2l")
-            and cookie_domain_accepted(cookie.domain or "")
-        }
-        if home_resp.status_code < 400 and not missing_cookie_names(d2l_cookies):
+        if home_resp.status_code < 400 and not missing_cookie_names(self._d2l_cookies()):
             return
 
         raise MicrosoftSSOError(
@@ -2574,17 +2363,18 @@ class MicrosoftSSOClient:
             recovery="SAML assertion may be expired or invalid. Try logging in again.",
         )
 
+    def _d2l_cookies(self) -> dict[str, str]:
+        """D2L cookies in the session jar, limited to the configured domains."""
+        return {
+            cookie.name: str(cookie.value or "")
+            for cookie in self._session.cookies
+            if cookie.name.startswith("d2l")
+            and cookie_domain_accepted(cookie.domain or "")
+        }
+
     def _extract_d2l_cookies(self) -> dict[str, str]:
         """Step 6: Extract D2L session cookies from the session cookie jar."""
-        cookies: dict[str, str] = {}
-
-        for cookie in self._session.cookies:
-            if cookie.name.startswith("d2l") and cookie_domain_accepted(
-                cookie.domain or ""
-            ):
-                cookie_val = cookie.value if cookie.value is not None else ""
-                cookies[cookie.name] = cookie_val
-
+        cookies = self._d2l_cookies()
         missing = missing_cookie_names(cookies)
         if missing:
             raise MicrosoftSSOError(

@@ -169,9 +169,7 @@ def _collision_filename(filename: str, topic_id: int, attempt: int) -> str:
     if len(topic_token) > 20:
         topic_token = hashlib.sha256(topic_token.encode("ascii")).hexdigest()[:16]
     marker = f"--topic-{topic_token}" + (f"-{attempt}" if attempt > 1 else "")
-    max_stem_bytes = MAX_ATOMIC_TARGET_NAME_BYTES - len(
-        (marker + suffix).encode("utf-8")
-    )
+    max_stem_bytes = MAX_ATOMIC_TARGET_NAME_BYTES - len((marker + suffix).encode("utf-8"))
     while stem and len(stem.encode("utf-8")) > max_stem_bytes:
         stem = stem[:-1]
     return f"{stem or 'topic'}{marker}{suffix}"
@@ -221,20 +219,9 @@ def _safe_unknown_type(value: object) -> str | None:
 
 def _normalise_size(value: Any) -> int | None:
     """Return a safe manifest size, or ``None`` for malformed values."""
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value < 0
-        or value > MAX_MANIFEST_SIZE
-    ):
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return value
-
-
-def _safe_size(value: Any) -> int:
-    """Return a non-negative finite size suitable for result serialization."""
-    size = _normalise_size(value)
-    return size if size is not None else 0
+    return value if 0 <= value <= MAX_MANIFEST_SIZE else None
 
 
 def safe_output_path_text(value: object) -> str | None:
@@ -243,9 +230,7 @@ def safe_output_path_text(value: object) -> str | None:
         candidate = str(value)
     except Exception:
         return None
-    if not candidate or len(candidate) > 4096:
-        return None
-    if not candidate.isprintable():
+    if not candidate or len(candidate) > 4096 or not candidate.isprintable():
         return None
     decoded = candidate
     for _ in range(4):
@@ -384,30 +369,24 @@ def build_entry(
     tid: str, name: str, path: str, content_or_entry: bytes | dict[str, Any], sha: str = ""
 ) -> dict[str, Any]:
     """Build a sync/download entry dict. content_or_entry is bytes (content) or dict (manifest entry)."""
-    safe_tid = str(tid)
     safe_name = _safe_display_filename(name)
-    safe_path = path if isinstance(path, str) else ""
-    manifest_entry = content_or_entry if isinstance(content_or_entry, dict) else {}
-    size = len(content_or_entry) if isinstance(content_or_entry, bytes) else _safe_size(manifest_entry.get("size", 0))
     normalized_sha = normalize_sha256(sha)
-    if not normalized_sha and isinstance(content_or_entry, bytes):
-        normalized_sha = compute_sha256(content_or_entry)
-    if not normalized_sha and isinstance(content_or_entry, dict):
-        normalized_sha = normalize_sha256(manifest_entry.get("sha256", ""))
+    if isinstance(content_or_entry, bytes):
+        size = len(content_or_entry)
+        normalized_sha = normalized_sha or compute_sha256(content_or_entry)
+    else:
+        manifest_entry = content_or_entry if isinstance(content_or_entry, dict) else {}
+        size = _normalise_size(manifest_entry.get("size", 0)) or 0
+        normalized_sha = normalized_sha or normalize_sha256(manifest_entry.get("sha256", ""))
     return {
-        "topic_id": safe_tid,
+        "topic_id": str(tid),
         "filename": safe_name,
-        "path": safe_path,
+        "path": path if isinstance(path, str) else "",
         "size": size,
         "size_kb": round(size / 1024, 1),
         "sha256": normalized_sha,
         **({"extension": Path(safe_name).suffix.lower()} if safe_name and "." in safe_name else {}),
     }
-
-
-def fetch_toc_and_name(client: LighthouseClient, org_id: int) -> tuple[dict[str, Any], str]:
-    """Fetch content TOC and course name. Raises on failure."""
-    return client.get_content_toc(org_id), get_course_name(client, org_id)
 
 
 def download_and_persist_topic(
@@ -432,15 +411,12 @@ def download_and_persist_topic(
     if last_modified is None:
         raise ValueError(_INVALID_TOPIC_DATA)
     tid = str(topic_id)
-    course_root, file_dest = _topic_directory(
-        dest, topic.get("path", ""), warnings=warnings,
-    )
+    course_root, file_dest = _topic_directory(dest, topic.get("path", ""), warnings=warnings)
     topic_type = topic.get("type", "")
     if isinstance(topic_type, str) and topic_type.lower() == "html":
         content, raw_filename = client.get_topic_html(org_id, topic_id)
     else:
-        content, filename = client.download_topic_file(org_id, topic_id)
-        raw_filename = filename
+        content, raw_filename = client.download_topic_file(org_id, topic_id)
     if not isinstance(content, bytes):
         raise ValueError(_INVALID_TOPIC_DATA)
     sanitized_name = _safe_topic_filename(raw_filename, topic_id)
@@ -448,10 +424,7 @@ def download_and_persist_topic(
         raise ValueError("Topic path contains a symlinked course directory")
     file_dest.mkdir(parents=True, exist_ok=True)
     filepath = _reserve_topic_path(
-        file_dest,
-        sanitized_name,
-        topic_id,
-        path_owners,
+        file_dest, sanitized_name, topic_id, path_owners,
         allow_unowned_overwrite=allow_unowned_overwrite,
     )
     sanitized_name = filepath.name
@@ -520,7 +493,7 @@ def flatten_all_topics(
     while work:
         kind, value, current_prefix, depth, active = work.pop()
 
-        if kind == "modules":
+        if kind in ("modules", "topics"):
             if value is None:
                 continue
             if not isinstance(value, (list, tuple)):
@@ -535,27 +508,9 @@ def flatten_all_topics(
             if len(value) > remaining:
                 report_limit()
                 value = value[:remaining]
-            for module in reversed(value):
-                work.append(("module", module, current_prefix, depth, next_active))
-            continue
-
-        if kind == "topics":
-            if value is None:
-                continue
-            if not isinstance(value, (list, tuple)):
-                _record_topic_data_error(errors)
-                continue
-            value_id = id(value)
-            if value_id in active:
-                report_limit()
-                continue
-            next_active = active | {value_id}
-            remaining = max(_MAX_TOC_NODES - node_count, 0)
-            if len(value) > remaining:
-                report_limit()
-                value = value[:remaining]
-            for topic in reversed(value):
-                work.append(("topic", topic, current_prefix, depth, next_active))
+            child_kind = "module" if kind == "modules" else "topic"
+            for child in reversed(value):
+                work.append((child_kind, child, current_prefix, depth, next_active))
             continue
 
         if depth > _MAX_TOC_DEPTH:
@@ -681,7 +636,6 @@ def _preflight_assignment_selector(
 
 def _load_manifest(manifest_path: Path, result: dict[str, Any]) -> Manifest:
     """Load the manifest, recording a warning + error entry when corrupt."""
-    manifest = Manifest()
     try:
         return Manifest.load(manifest_path)
     except ManifestCorruptError as exc:
@@ -690,7 +644,25 @@ def _load_manifest(manifest_path: Path, result: dict[str, Any]) -> Manifest:
         # messages gain detail in the future.
         result["warnings"].append("Corrupt manifest; performing full sync.")
         result["errors"].append({"error": str(exc), "type": "manifest_corrupt"})
-        return manifest
+        return Manifest()
+
+
+def _orphan_entries(orphans: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project orphaned manifest objects in topic-ID order, skipping non-objects."""
+    return [
+        build_entry(tid, entry.get("filename", ""), "", entry)
+        for tid, entry in sorted(orphans.items())
+        if isinstance(entry, dict)
+    ]
+
+
+def _assignment_paths(manifest: Manifest) -> dict[str, Any]:
+    """Snapshot recorded assignment paths so a relocation forces a save."""
+    return {
+        str(key): entry.get("path")
+        for key, entry in manifest.entries.items()
+        if str(key).startswith("assignment_") and isinstance(entry, dict)
+    }
 
 
 def _track_duplicate(
@@ -782,7 +754,7 @@ def run_course(
         if assignment_error is not None:
             result["assignments"]["errors"].append(assignment_error)
             return result
-    toc, raw_course_name = fetch_toc_and_name(client, org_id)
+    toc, raw_course_name = client.get_content_toc(org_id), get_course_name(client, org_id)
     course_name = _safe_course_name(raw_course_name, org_id)
     result["course_name"] = course_name
 
@@ -864,14 +836,9 @@ def run_course(
     if not downloadable and not include_assignments:
         result["empty"] = True
         if mode is Mode.SYNC:
-            result["orphaned"] = [
-                build_entry(topic_id, entry.get("filename", ""), "", entry)
-                for topic_id, entry in sorted(
-                    ((topic_id, manifest.get(topic_id)) for topic_id in orphan_candidates),
-                    key=lambda item: str(item[0]),
-                )
-                if isinstance(entry, dict)
-            ]
+            result["orphaned"] = _orphan_entries(
+                {tid: manifest.get(tid) for tid in orphan_candidates}
+            )
             result["manifest_total"] = len(manifest)
         elif force_manifest_exists and not result["errors"]:
             manifest.save(manifest_path)
@@ -901,23 +868,15 @@ def run_course(
         if key in path_owners and path_owners[key] != tid:
             prior_owner = path_owners[key]
             if mode is Mode.FORCE:
-                candidates = [tid]
-                if prior_owner is not None:
-                    candidates.append(prior_owner)
-                path_owners[key] = min(candidates, key=int)
+                path_owners[key] = tid if prior_owner is None else min(tid, prior_owner, key=int)
             else:
                 path_owners[key] = None
         else:
             path_owners[key] = tid
 
     for topic in downloadable:
-        topic_id = _positive_int(topic.get("topic_id"))
-        if topic_id is None:
-            # ``downloadable`` is validated above. Keep this guard local to
-            # the body-fetch loop in case a caller mutates the TOC objects.
-            errors.append({"error": _INVALID_TOPIC_DATA, "type": "topic_data"})
-            continue
-        tid = str(topic_id)
+        # ``downloadable`` holds fresh copies with a validated positive int ID.
+        tid = str(topic["topic_id"])
         existing = manifest.get(tid)
         orphan_candidates.discard(tid)
 
@@ -934,8 +893,7 @@ def run_course(
                     safe_filename = _safe_display_filename(filename)
                     rel_path = str(Path(topic["path"]).parent / safe_filename).lstrip("/\\")
                     skipped.append(build_entry(tid, safe_filename, rel_path, existing))
-                    if file_hash := normalize_sha256(existing.get("sha256", "")):
-                        _track_duplicate(sha_hashes, file_hash, tid, filename)
+                    _track_duplicate(sha_hashes, existing.get("sha256", ""), tid, filename)
                     continue
             target_list = updated
         else:
@@ -943,11 +901,7 @@ def run_course(
 
         try:
             _, sanitized_name, filepath = download_and_persist_topic(
-                client,
-                org_id,
-                topic,
-                dest,
-                manifest,
+                client, org_id, topic, dest, manifest,
                 path_owners=path_owners,
                 allow_unowned_overwrite=mode is Mode.FORCE,
                 warnings=result["warnings"],
@@ -956,11 +910,10 @@ def run_course(
             if entry is None:
                 raise RuntimeError(f"Manifest entry missing for downloaded topic {tid}")
             file_hash = entry.get("sha256", "")
-            if file_hash:
-                _track_duplicate(sha_hashes, file_hash, tid, sanitized_name)
+            _track_duplicate(sha_hashes, file_hash, tid, sanitized_name)
             target_list.append(build_entry(tid, sanitized_name, str(filepath.relative_to(dest)), entry, file_hash))
-        except ValueError as exc:
-            if str(exc) == _INVALID_TOPIC_DATA:
+        except Exception as exc:
+            if isinstance(exc, ValueError) and str(exc) == _INVALID_TOPIC_DATA:
                 errors.append({
                     "topic_id": tid,
                     "error": _INVALID_TOPIC_DATA,
@@ -972,19 +925,9 @@ def run_course(
                     "filename": _safe_label(topic.get("title", "")),
                     "error": str(exc),
                 })
-        except Exception as e:
-            errors.append({
-                "topic_id": tid,
-                "filename": _safe_label(topic.get("title", "")),
-                "error": str(e),
-            })
 
     assignments = result["assignments"]
-    assignment_paths_before = {
-        str(key): entry.get("path")
-        for key, entry in manifest.entries.items()
-        if str(key).startswith("assignment_") and isinstance(entry, dict)
-    }
+    assignment_paths_before = _assignment_paths(manifest)
     if mode is Mode.SYNC:
         live_orphans = {
             tid: manifest.get(tid)
@@ -996,28 +939,17 @@ def run_course(
             assignments.update(downloaded=downloaded_a, skipped=skipped_a, updated=updated_a, errors=errors_a)
             for entry in skipped_a + updated_a + downloaded_a:
                 live_orphans.pop(assignment_key(entry.get("folder_id", 0), entry.get("file_id", 0)), None)
-        result["orphaned"] = [
-            build_entry(tid, (e or {}).get("filename", ""), "", e or {})
-            for tid, e in sorted(live_orphans.items(), key=lambda item: str(item[0]))
-        ]
+        result["orphaned"] = _orphan_entries(live_orphans)
     elif include_assignments:
         downloaded_a, errors_a = download_for_course(
-            client,
-            org_id,
-            dest,
-            manifest,
+            client, org_id, dest, manifest,
             folder_ids=[assignment_id] if assignment_id is not None else None,
             folder_snapshot=assignment_folders,
             path_manifest=ownership_manifest if mode is Mode.FORCE else None,
         )
         assignments["downloaded"], assignments["errors"] = downloaded_a, errors_a
 
-    assignment_paths_after = {
-        str(key): entry.get("path")
-        for key, entry in manifest.entries.items()
-        if str(key).startswith("assignment_") and isinstance(entry, dict)
-    }
-    assignment_paths_changed = assignment_paths_after != assignment_paths_before
+    assignment_paths_changed = _assignment_paths(manifest) != assignment_paths_before
     force_completed_without_errors = (
         mode is Mode.FORCE
         and force_manifest_exists
