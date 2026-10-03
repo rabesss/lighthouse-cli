@@ -42,11 +42,13 @@ posts:
    when the quiz was opened from a content link. A password-protected quiz
    also needs the summary form's `password` field. The summary script's
    state says what a start would do: `canTakeQuiz`, `startQuiz` (a new
-   attempt), `continueQuiz` (one in progress) and `hasPass`. `DoAction`
-   refuses to start while its `isImpersonatingRole` flag is set. In the
-   sandbox's "View as Student" role that flag was false and the page
-   rendered no Start button, yet the same start POST created learner
-   attempts, so a missing button does not mean the start is refused.
+   attempt), `continueQuiz` (one in progress) and `hasPass`. `DoAction`'s
+   code refuses to start while its `isImpersonatingRole` flag is set; a
+   direct start POST with that flag set was not tried. In the sandbox's
+   "View as Student" role the flag was false, `canTakeQuiz` was true and
+   the page had no Start button in its markup, yet the same start POST
+   created learner attempts: there, a missing button did not mean the
+   start was refused.
 2. Page `quiz_attempt_page_auto.d2l?ou&qi&ai&pg&isprv`. Each question sits in
    a `d2l-quiz-question-autosave-container` with hidden metadata (object id,
    page, `tAtom` group, saved flag). The prompt is either a legacy
@@ -69,15 +71,22 @@ posts:
    (text on change or blur) and posts the whole page form, every question's
    current value included, with `isFinalAutoSave=false`,
    `useNewFinalAutoSave=true` and `timeLimitFromQuiz` (the limit in
-   minutes, `0` when untimed). Checked multi-select options send `1`;
-   unchecked ones are left out of the form. All saves target the one save
-   frame: when two answers changed within a second, the second save
-   cancelled the first request, and only the second question was reported
-   saved until the `5,<page>` save. Send one save at a time.
+   minutes: `2` and `4` on 2- and 4-minute quizzes, `0` when untimed).
+   Checked multi-select options send `1`; unchecked ones are left out of
+   the form. The browser sends every save through one save frame: on a
+   two-question learner page, when both answers changed within a second,
+   the second save cancelled the first request (status 0), and the first
+   question was not reported saved until the `5,<page>` save posted the
+   whole page form again. An HTTP client has no such frame, but a
+   cancelled or overlapping save leaves the stored value unknown: send one
+   save at a time and check each response.
    In the captured saves the response named the question object ids the
    server marked saved, comma-separated, in
    `parent.infoFrame.UpdateSaved('<ids>','')`: the changed question for a
-   `3,...` save, every saved question on the page for the `5,<page>` save.
+   `3,...` save, every saved question on the page for the `5,<page>` save
+   before a manual submit. At time-up the `7,<page>` save named the page's
+   question and the `5,<page>` save after it named none, so an empty list
+   is not by itself a failure.
    Neither HTTP 200 nor that call proves which value was stored; read the
    page back and check the selected choices and the saved marker.
 4. Forward navigation: the same save endpoint with
@@ -89,10 +98,11 @@ posts:
    control. On the last page the "Next Page" buttons are still in the
    markup, with the `disabled` attribute. Requesting a page number past the
    quiz's last page permanently broke preview attempts (every later read
-   redirects to `/d2l/error/500`); treat it as fatal for learner attempts
-   too.
-5. Submission: preparatory save (`d2l_actionparam=5,<page>`), confirmation
-   page `quiz_confirm_submit_auto.d2l`, then RPC
+   redirects to `/d2l/error/500`). It was not tried on a learner attempt;
+   treat it as fatal there too.
+5. Manual submission (time-up differs; see "Timed quizzes"): preparatory
+   save (`d2l_actionparam=5,<page>`), confirmation page
+   `quiz_confirm_submit_auto.d2l`, then RPC
    `quiz_attempt_iframe_auto.d2lfile?...&pg=<current>&d2l_rh=rpc&d2l_rt=call`
    with `d2l_rf=ProcessQuizSubmission` and **compact** JSON `params`
    (Brightspace answers spaced JSON with an error redirect). Success is the
@@ -103,7 +113,11 @@ posts:
    canBeGraded, isRldbUse, shouldAutoSubmit, cameFromTab`. The confirmation
    page passes `shouldAutoSubmit` as `false`, the time-up path as `true`.
    For a learner `isPreview` is `false` and, with no can-be-graded checkbox
-   on the confirmation page, `canBeGraded` is `true`.
+   on the confirmation page, `canBeGraded` is `true`. A learner's browser
+   posted to the attempt frame's own URL, which kept `pg=1` after a move to
+   page 2. In the four `QuizDone` results seen, the third argument was `'1'`
+   for previews and `'0'` for learners, and the fourth was `'1'` after a
+   time-up submit and `'0'` after a manual one.
 6. Recovery: for a forward-only attempt on page 2, requesting page 1 returns
    page 2 (`pg=2`); the preview driver's read-only `reconcile` relies on this
    only after the full attempt identity matches.
@@ -145,25 +159,28 @@ that public site (four attempts on three untimed one-page quizzes):
   instead from the summary page, the submissions list `quiz_submissions.d2l`
   and the receipt.
 
-Learner attempts in the sandbox's "View as Student" role (a 4-minute
-auto-submit quiz with one question on each of two pages, forward-only)
-added:
+Learner attempts in the sandbox's "View as Student" role (an untimed quiz
+with two true/false questions on one page, and a 4-minute auto-submit quiz
+with one question on each of two pages, forward-only) added:
 
-- Resume keeps the clock: the reopened attempt had the same
-  `timeStartedTicks`, the next `DoUtcTimeRequest` counted on from the
-  original start, and the page 1 answer was still selected.
-- Time-up with the attempt open: `7,1` save, then `5,1` (its
-  `UpdateSaved` listed no ids), then `ProcessQuizSubmission` posted to
-  `quiz_attempt_iframe_auto.d2lfile?ou=...` without `qi`/`ai` in the URL,
-  with params `<qi>, <ai>, false, true, true, true, ""` (ids as numbers,
-  unlike the strings of a manual submit). The result was
+- Resume keeps the clock: an attempt reopened on page 1, before any Next,
+  had the same `timeStartedTicks`, the next `DoUtcTimeRequest` counted on
+  from the original start, and the page 1 answer was still selected.
+  Resuming after a Next was not tried.
+- Time-up with the attempt open: `7,1` and `5,1` saves, then
+  `ProcessQuizSubmission` with params `<qi>, <ai>, false, true, true,
+  true, ""`. The ids were JSON numbers there and strings in a manual
+  submit of the same quiz; the server accepted both. The result was
   `parent.QuizDone(<qi>,<ai>,'0','1','0','gotoSv','')`, and the receipt
-  URL carried `isTimeUp=1&isprv=0`. The REST `Completed` time was about 30
-  seconds after the limit, later than that RPC.
+  URL carried `isTimeUp=1&isprv=0`. The REST `Completed` time (read as the
+  instructor) was about 30 seconds after the limit, later than that RPC.
 - An abandoned attempt (no request after its last save) was completed by
-  the server about 38 seconds after its limit. Its receipt showed the
-  window as start to start plus limit, not the completion time.
-- Learner attempt numbers count separately from preview attempts.
+  the server (REST `Completed`) about 38 seconds after its limit. Its
+  receipt gave the attempt's time span as its start to start plus the
+  limit, not the completion time.
+- Attempt numbers (the REST `AttemptNumber`, "Attempt 1" on the summary)
+  restarted at 1 for learner attempts, apart from the preview attempts;
+  the attempt ids continued after the preview attempts' ids.
 
 Preview has no resume, as each Start creates a new attempt with a fresh
 timer.
@@ -181,14 +198,17 @@ timer.
   result is `[timeTaken, timeLeft, secondsTaken]`, e.g.
   `["0:00:05","0:01:54","5.92"]`.
 - At expiry with auto-submit, the browser saves with `d2l_actionparam=7,<pg>`
-  then `5,<pg>`, calls `ProcessQuizSubmission` with that boolean `true`,
-  and opens the receipt with `isTimeUp=1`.
+  then `5,<pg>` and, with no confirmation page, calls
+  `ProcessQuizSubmission` at `quiz_attempt_iframe_auto.d2lfile?ou=<ou>`
+  (no `qi`, `ai` or `pg` in the URL, in the preview and the learner
+  attempt alike; which query parameters the server requires is unknown)
+  with that boolean `true`, then opens the receipt with `isTimeUp=1`.
 - With no browser open, the server still submits the attempt: an abandoned
   2-minute auto-submit preview was marked completed about 100 seconds after
-  its limit, and an abandoned learner attempt (4 minutes) about 38 seconds
-  after, both with no client request and no grace period. The varying
-  delay suggests a periodic server job; whether grace or late settings
-  change it is unknown.
+  its limit, and an abandoned learner attempt (4 minutes, `graceLimit=0`)
+  about 38 seconds after, both with no client request. The varying delay
+  suggests a periodic server job, and whether grace or late settings change
+  it is unknown, so do not rely on that timing: submit before the limit.
 
 ## Not yet implemented
 
