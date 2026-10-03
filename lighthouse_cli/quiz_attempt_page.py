@@ -56,7 +56,7 @@ def _id(value: object) -> int:
 
 def _token(value: object) -> str:
     """A learner choice, option or blank id: ``o<digits>`` or a positive integer."""
-    if not isinstance(value, str) or not re.fullmatch(r"o[0-9]{1,9}|[1-9][0-9]{0,17}", value):
+    if not isinstance(value, str) or not re.fullmatch(r"o[0-9]{1,18}|[1-9][0-9]{0,17}", value):
         raise PreviewPageError()
     return value
 
@@ -81,8 +81,7 @@ def _inside_options(node: Tag, container: Tag) -> bool:
     return False
 
 
-def _expanded(node: Tag) -> BeautifulSoup:
-    copy = BeautifulSoup(str(node), "html.parser")
+def _expand_blocks(copy: BeautifulSoup) -> BeautifulSoup:
     # Brightspace puts question content in a custom element's html attribute;
     # textContent alone would silently produce an empty prompt.
     for block in copy.find_all("d2l-html-block"):
@@ -92,15 +91,27 @@ def _expanded(node: Tag) -> BeautifulSoup:
     return copy
 
 
+def _expanded(node: Tag) -> BeautifulSoup:
+    return _expand_blocks(BeautifulSoup(str(node), "html.parser"))
+
+
+def _input_type(control: Tag) -> str:
+    """HTML input types are case-insensitive, and a missing type means text."""
+    return str(control.get("type", "text")).lower()
+
+
 def _text(node: Tag, *, blanks: bool = False) -> str:
-    copy = _expanded(node)
+    copy = BeautifulSoup(str(node), "html.parser")
     removed = "script, style, button, input, fieldset, legend"
     if blanks:
         # A fill-in-the-blank sentence is the options fieldset itself: keep
-        # it and mark each blank, numbered in document order.
+        # it and mark each blank, numbered in document order. Inputs in the
+        # custom blocks are content, so number before expanding them.
         removed = "script, style, button, input, legend"
-        for number, blank in enumerate(copy.select('input[type="text"]'), 1):
+        text_inputs = [control for control in copy.find_all("input") if _input_type(control) == "text"]
+        for number, blank in enumerate(text_inputs, 1):
             blank.replace_with(f" (blank {number}) ")
+    _expand_blocks(copy)
     for element in copy.select(removed):
         element.decompose()
     text = copy.get_text(" ", strip=True)
@@ -251,6 +262,8 @@ def _question_containers(form: Tag, page: int) -> list[tuple[Tag, int, int, int,
     result: list[tuple[Tag, int, int, int, int, bool | None]] = []
     ids: set[int] = set()
     ordinals: set[int] = set()
+    # Controls sharing a tAtom name are one group in the browser.
+    groups: set[tuple[int, int]] = set()
     for container in containers:
         qid = _id(_metadata(container, "d2l-quiz-question-object-id"))
         ordinal = _id(_metadata(container, "d2l-quiz-question-autosave-question-num"))
@@ -260,6 +273,9 @@ def _question_containers(form: Tag, page: int) -> list[tuple[Tag, int, int, int,
         ordinals.add(ordinal)
         tid = _id(_metadata(container, "d2l-quiz-question-autosave-tid"))
         tvid = _id(_metadata(container, "d2l-quiz-question-autosave-tvid"))
+        if (tid, tvid) in groups:
+            raise PreviewPageError()
+        groups.add((tid, tvid))
         saved = _metadata(container, "d2l-quiz-question-autosave-is-saved")
         result.append((container, qid, ordinal, tid, tvid, {"true": True, "false": False}.get(saved.lower())))
     return result
@@ -291,6 +307,7 @@ def _choices(
     choices: list[dict[str, Any]] = []
     selected: list[_ChoiceId] = []
     seen: set[_ChoiceId] = set()
+    control_ids: set[str] = set()
     disabled = False
     for control in controls:
         disabled = disabled or _disabled(control)
@@ -299,6 +316,11 @@ def _choices(
             raise PreviewPageError()
         seen.add(cid)
         control_id = control.get("id")
+        if isinstance(control_id, str):
+            # A shared id would give two choices the first one's label.
+            if control_id in control_ids:
+                raise PreviewPageError()
+            control_ids.add(control_id)
         label = (
             container.find("label", attrs={"for": control_id})
             if isinstance(control_id, str)
@@ -325,10 +347,11 @@ def _hidden(node: Tag) -> bool:
 
 
 def _button_present(form: Tag, label: str, *, visible_only: bool = False) -> bool:
+    # A button inside a question is its content, not page navigation.
     return any(
         button.get_text(" ", strip=True) == label
-        and not button.has_attr("disabled")
-        and button.get("aria-disabled") != "true"
+        and not _disabled(button)
+        and button.find_parent(class_="d2l-quiz-question-autosave-container") is None
         and not (visible_only and _hidden(button))
         for button in form.find_all("button")
     )
@@ -421,26 +444,28 @@ def _learner_option_id(checkbox: Tag, group: str) -> str:
 def _blanks(controls: list[Tag], group: str) -> tuple[list[dict[str, Any]], bool]:
     """Each blank's id, its number in the question text and its current value."""
     blanks: list[dict[str, Any]] = []
+    seen: set[str] = set()
     disabled = False
     for number, blank in enumerate(controls, 1):
         disabled = disabled or _disabled(blank) or blank.has_attr("readonly")
         blank_id = _suffix_id(blank, group)
         value = blank.get("value", "")
-        if blank_id in {b["blank_id"] for b in blanks} or not isinstance(value, str) or len(value) > 10000:
+        if blank_id in seen or not isinstance(value, str) or len(value) > 10000:
             raise PreviewPageError()
+        seen.add(blank_id)
         blanks.append({"blank_id": blank_id, "number": number, "value": value})
     return blanks, disabled
 
 
 def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved: bool | None) -> dict[str, Any]:
     """One question of a single known kind; mixed or other controls are unsupported."""
-    controls = [control for control in container.find_all("input") if control.get("type") != "hidden"]
-    types = {str(control.get("type")) for control in controls}
+    controls = [control for control in container.find_all("input") if _input_type(control) != "hidden"]
+    types = {_input_type(control) for control in controls}
     kind = _LEARNER_KINDS.get(types.pop()) if len(types) == 1 else None
     expanded = _expanded(container)
     # Inputs inside custom HTML blocks are content, not form controls.
     unsupported = (bool(expanded.select("textarea, select, img, math, iframe, audio, video"))
-                   or len([c for c in expanded.find_all("input") if c.get("type") != "hidden"]) != len(controls))
+                   or len([c for c in expanded.find_all("input") if _input_type(c) != "hidden"]) != len(controls))
     choices: list[dict[str, Any]] = []
     selected: list[str] = []
     blanks: list[dict[str, Any]] = []

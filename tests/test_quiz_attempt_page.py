@@ -325,6 +325,52 @@ def test_learner_hidden_buttons_are_not_controls():
     assert shown.has_next_control
 
 
+def test_learner_next_control_follows_the_rendered_buttons():
+    # The last page keeps both "Next Page" buttons in the markup, disabled.
+    last = '<button type="button" class="d2l-button" id="z_e" disabled>Next Page</button>'
+    options = radios(1, ["o1", "o2"])
+    assert not learner(learner_question(1, options), extra=LEARNER_BUTTONS + last * 2).has_next_control
+    assert learner(learner_question(1, options), extra=LEARNER_BUTTONS + last.replace(" disabled", "")).has_next_control
+    fieldset = '<fieldset disabled><button type="button">Next Page</button></fieldset>'
+    assert not learner(learner_question(1, options), extra=LEARNER_BUTTONS + fieldset).has_next_control
+    assert not parse(html(question(1), extra=fieldset)).has_next_control
+    # A button inside a question is its content, not page navigation.
+    content = learner_question(1, options).replace("<fieldset>", '<div><button type="button">Next Page</button></div><fieldset>', 1)
+    assert not learner(content, extra=LEARNER_BUTTONS + last).has_next_control
+
+
+def test_learner_option_tokens_allow_long_ids():
+    q = learner(learner_question(1, radios(1, ["o" + "9" * 18, "9" * 18]))).questions[0]
+    assert [choice["choice_id"] for choice in q["choices"]] == ["o" + "9" * 18, "9" * 18]
+
+
+def test_learner_control_types_follow_html_rules():
+    # HTML types are case-insensitive, and an input without one is a text box.
+    q = learner(learner_question(1, radios(1, ["o1", "o2"]).replace('type="radio"', 'type="RADIO"'))).questions[0]
+    assert q["kind"] == "single-choice" and q["supported"]
+    q = learner(learner_question(1, segment("Two is") + blank(1, "601").replace('type="text" ', ""), prompt="")).questions[0]
+    assert q["kind"] == "fill-blank" and q["text"] == "Two is (blank 1)"
+
+
+def test_learner_blank_numbers_skip_inputs_in_question_content():
+    options = segment("Two is") + blank(1, "601") + segment('<input type="text"> or') + blank(1, "602")
+    q = learner(learner_question(1, options, prompt="")).questions[0]
+    assert q["kind"] == "unsupported"
+    assert q["text"] == "Two is (blank 1) or (blank 2)"
+    assert [b["number"] for b in q["blanks"]] == [1, 2]
+
+
+def test_questions_sharing_one_answer_group_are_rejected():
+    # Radios with one name are one group in the browser, which keeps one answer.
+    def shared(text: str) -> str:
+        return text.replace("tAtom202_300", "tAtom201_300").replace('value="202"', 'value="201"')
+    with pytest.raises(PreviewPageError):
+        parse(html(question(1) + shared(question(2))))
+    first = learner_question(1, radios(1, ["o1", "o2"], checked=("o1",)), saved="True")
+    with pytest.raises(PreviewPageError):
+        learner(first + shared(learner_question(2, radios(2, ["o3", "o4"], checked=("o3",)), saved="True")))
+
+
 @pytest.mark.parametrize("isprv", ["1", "0", None])
 def test_learner_page_requires_an_empty_isprv(isprv):
     body = html(learner_question(1, radios(1, ["o1", "o2"])), isprv=isprv or "")
@@ -338,7 +384,7 @@ def test_learner_page_requires_an_empty_isprv(isprv):
 
 @pytest.mark.parametrize("options", [
     radios(1, ["o1", "x2"]),
-    radios(1, ["o1", "o1234567890"]),
+    radios(1, ["o1", "o" + "1" * 19]),
     radios(1, ["o1", "o\u0663"]),
     radios(1, ["o1", "-2"]),
     radios(1, ["o1", "0"]),
@@ -352,6 +398,8 @@ def test_learner_page_requires_an_empty_isprv(isprv):
     checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom202_300_o1"'),
     segment("Two is") + blank(1, "60 1"),
     segment("Two is") + blank(1, "601") + blank(1, "601"),
+    # Two labels for one control id would show one option's text twice.
+    checkboxes(1, ["o1", "o2"]).replace("tAtom201_300_o2_id", "tAtom201_300_o1_id"),
 ])
 def test_learner_malformed_ids_or_names_are_rejected(options):
     with pytest.raises(PreviewPageError) as exc:
