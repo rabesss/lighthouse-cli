@@ -2,27 +2,24 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import click
 
-from .course_read_commands import register_course_reads
-from .display import JsonOutputCommand, JsonOutputGroup, format_user_error, output_json
+from .course_read_commands import (
+    JSON_OPTION,
+    WRITE_OPTIONS,
+    emit,
+    fail,
+    id_command,
+    register_course_reads,
+)
+from .display import JsonOutputGroup, format_user_error
 
 if TYPE_CHECKING:
     from .assessment_api import AssessmentAPI
-
-_ID = click.IntRange(min=1)
-
-
-def _emit(data: Any, json_output: bool) -> None:
-    if json_output:
-        output_json(data)
-    else:
-        click.echo(json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False))
 
 
 def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], Any]) -> None:
@@ -34,17 +31,14 @@ def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], An
     try:
         client = LighthouseClient()
         data = project(action(AssessmentAPI(client, course_id)))
-        _emit({"course_id": course_id, "data": data}, json_output)
+        emit({"course_id": course_id, "data": data}, json_output)
     except Exception as exc:
         message = (
             "Write outcome unknown. Inspect the assessment before retrying."
             if isinstance(exc, AssessmentWriteUnknownError)
             else format_user_error(exc)
         )
-        click.echo(message, err=True)
-        if json_output:
-            output_json({"course_id": course_id, "data": None, "error": message})
-        raise SystemExit(1) from None
+        fail(message, json_output, {"course_id": course_id, "data": None, "error": message})
     finally:
         if client is not None:
             client._session.close()
@@ -96,11 +90,7 @@ def _register_read(group: click.Group, name: str, resource: str, detail: bool) -
         _run(course_id, json_output, lambda api: api.read(resource, identifier))
 
     command.__doc__ = f"Read {'one ' if detail else ''}{resource} {'details' if detail else 'records'} for a course."
-    command = click.option("--json", "json_output", is_flag=True)(command)
-    if detail:
-        command = click.argument("identifier", type=_ID)(command)
-    command = click.argument("course_id", type=_ID)(command)
-    group.command(name, cls=JsonOutputCommand)(command)
+    id_command(group, name, "course_id", *(("identifier",) if detail else ()))(JSON_OPTION(command))
 
 
 for _group in (instructor, student):
@@ -109,45 +99,36 @@ for _group in (instructor, student):
         _register_read(_group, "quizzes" if _resource == "quiz" else "assignments", _resource, False)
 
 
-@instructor.command("quiz-questions", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
-@click.argument("quiz_id", type=_ID)
-@click.option("--json", "json_output", is_flag=True)
+@id_command(instructor, "quiz-questions", "course_id", "quiz_id")
+@JSON_OPTION
 def quiz_questions(course_id: int, quiz_id: int, json_output: bool) -> None:
     """Read instructor question definitions, not a learner attempt page."""
     _run(course_id, json_output, lambda api: api.questions(quiz_id))
 
 
-@instructor.command("quiz-attempts", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
-@click.argument("quiz_id", type=_ID)
-@click.option("--json", "json_output", is_flag=True)
+@id_command(instructor, "quiz-attempts", "course_id", "quiz_id")
+@JSON_OPTION
 def quiz_attempts(course_id: int, quiz_id: int, json_output: bool) -> None:
     """Read attempt summaries, scores, completion and feedback."""
     _run(course_id, json_output, lambda api: api.attempts(quiz_id))
 
 
-@instructor.command("submissions", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
-@click.argument("folder_id", type=_ID)
-@click.option("--json", "json_output", is_flag=True)
+@id_command(instructor, "submissions", "course_id", "folder_id")
+@JSON_OPTION
 def submissions(course_id: int, folder_id: int, json_output: bool) -> None:
     """Read course assignment submissions, their status and feedback."""
     _run(course_id, json_output, lambda api: api.submissions(folder_id, mine=False))
 
 
-@student.command("assignment-history", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
-@click.argument("folder_id", type=_ID)
-@click.option("--json", "json_output", is_flag=True)
+@id_command(student, "assignment-history", "course_id", "folder_id")
+@JSON_OPTION
 def assignment_history(course_id: int, folder_id: int, json_output: bool) -> None:
     """Read your submissions and published feedback for an assignment."""
     _run(course_id, json_output, lambda api: api.submissions(folder_id, mine=True))
 
 
-@instructor.command("classlist", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
-@click.option("--json", "json_output", is_flag=True)
+@id_command(instructor, "classlist", "course_id")
+@JSON_OPTION
 def classlist(course_id: int, json_output: bool) -> None:
     """Read class members and roles; excludes email and login identifiers."""
     _run(course_id, json_output, lambda api: api.client.get_json(f"/{api.course_id}/classlist/"))
@@ -161,17 +142,13 @@ register_course_reads(instructor, _run)
 def _create(course_id: int, resource: str, payload: dict[str, Any], yes: bool, dry_run: bool, json_output: bool) -> None:
     if dry_run:
         from .assessment_api import project
-        _emit({"course_id": course_id, "dry_run": True,
-               "operation": f"create-{resource}", "data": project(payload)}, json_output)
+        emit({"course_id": course_id, "dry_run": True,
+              "operation": f"create-{resource}", "data": project(payload)}, json_output)
         return
-    if not yes:
-        if not sys.stdin.isatty() or not click.confirm(
-            f"Create a hidden {resource} in course {course_id}?", err=True,
-        ):
-            click.echo("Creation cancelled. Use --yes for non-interactive creation.", err=True)
-            if json_output:
-                output_json({"cancelled": True})
-            raise SystemExit(1)
+    if not yes and (not sys.stdin.isatty() or not click.confirm(
+        f"Create a hidden {resource} in course {course_id}?", err=True,
+    )):
+        fail("Creation cancelled. Use --yes for non-interactive creation.", json_output, {"cancelled": True})
     _run(course_id, json_output, lambda api: api.write("POST", resource, payload))
 
 
@@ -180,20 +157,14 @@ def _settings(factory: Callable[[], dict[str, Any]], json_output: bool) -> dict[
         return factory()
     except ValueError:
         message = "Invalid assessment settings. Check the name, layout and input lengths."
-        click.echo(message, err=True)
-        if json_output:
-            output_json({"data": None, "error": message})
-        raise SystemExit(1) from None
+        fail(message, json_output, {"data": None, "error": message})
 
 
-@instructor.command("quiz-create", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
+@id_command(instructor, "quiz-create", "course_id")
 @click.option("--name", required=True)
 @click.option("--layout", type=click.Choice(["all", "one-way"]), default="all", show_default=True)
 @click.option("--attempts", type=click.IntRange(1, 10), default=1, show_default=True)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "json_output", is_flag=True)
+@WRITE_OPTIONS
 def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create a hidden quiz shell, with no questions or gradebook link.
 
@@ -206,14 +177,11 @@ def quiz_create(course_id: int, name: str, layout: str, attempts: int, yes: bool
     _create(course_id, "quiz", payload, yes, dry_run, json_output)
 
 
-@instructor.command("assignment-create", cls=JsonOutputCommand)
-@click.argument("course_id", type=_ID)
+@id_command(instructor, "assignment-create", "course_id")
 @click.option("--name", required=True)
 @click.option("--instructions", default="")
 @click.option("--submission-type", type=click.Choice(["file", "text"]), default="file", show_default=True)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "json_output", is_flag=True)
+@WRITE_OPTIONS
 def assignment_create(course_id: int, name: str, instructions: str, submission_type: str, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Create a hidden individual assignment, with no gradebook link."""
     from .assessment_api import assignment_payload

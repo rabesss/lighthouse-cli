@@ -111,59 +111,30 @@ def auth_status(json_output: bool) -> None:
 
 
 @auth.command("refresh", cls=JsonOutputCommand)
-@click.option(
-    "--cdp-port",
-    default=None,
-    help="Loopback Chrome DevTools Protocol port (default: LIGHTHOUSE_CDP_PORT or 34165).",
-)
+@click.option("--cdp-port", default=None,
+              help="Loopback Chrome DevTools Protocol port (default: LIGHTHOUSE_CDP_PORT or 34165).")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def auth_refresh(
-    cdp_port: str | None,
-    json_output: bool,
-) -> None:
+def auth_refresh(cdp_port: str | None, json_output: bool) -> None:
     """Refresh cookies from a signed-in browser through loopback CDP.
 
     The browser must already be running with a CDP port and signed in to
     lighthouse.manipal.edu. Use ``auth login`` for the pure-HTTP SSO flow.
     """
-    raise SystemExit(cmd_auth_refresh(
-        cdp_port=cdp_port,
-        json_output=json_output,
-    ))
+    raise SystemExit(cmd_auth_refresh(cdp_port=cdp_port, json_output=json_output))
 
 
 @auth.command("login", cls=JsonOutputCommand)
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
-@click.option(
-    "--totp",
-    "totp",
-    default=None,
-    help="Authenticator app code, or '-' to enter a fresh text code after it is sent.",
-)
-@click.option(
-    "--mfa-method",
-    type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]),
-    default=None,
-    help=(
-        "MFA: sms, call, app, push, choose, or auto. A plain interactive login "
-        "shows the methods Microsoft reports for your account."
-    ),
-)
-@click.option(
-    "--save-credentials",
-    "save_credentials",
-    is_flag=True,
-    default=False,
-    help="Save email/password encrypted for future logins (session cookies still expire ~5 days).",
-)
+@click.option("--totp", "totp", default=None,
+              help="Authenticator app code, or '-' to enter a fresh text code after it is sent.")
+@click.option("--mfa-method", type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]), default=None,
+              help=("MFA: sms, call, app, push, choose, or auto. A plain interactive login "
+                    "shows the methods Microsoft reports for your account."))
+@click.option("--save-credentials", "save_credentials", is_flag=True, default=False,
+              help="Save email/password encrypted for future logins (session cookies still expire ~5 days).")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def auth_login(
-    username: str | None,
-    totp: str | None,
-    mfa_method: str | None,
-    save_credentials: bool,
-    json_output: bool,
-) -> None:
+def auth_login(username: str | None, totp: str | None, mfa_method: str | None, save_credentials: bool,
+               json_output: bool) -> None:
     """Log in to D2L through Microsoft SSO.
 
     Credentials come from --user, LIGHTHOUSE_USERNAME/PASSWORD, encrypted
@@ -204,13 +175,8 @@ def auth_login(
     cookies expire.
     """
     raise SystemExit(cmd_auth_login(
-        username=username,
-        password=None,
-        totp_code=totp,
-        totp_stdin=(totp == "-"),
-        save_credentials=save_credentials,
-        json_output=json_output,
-        mfa_method=mfa_method,
+        username=username, password=None, totp_code=totp, totp_stdin=(totp == "-"),
+        save_credentials=save_credentials, json_output=json_output, mfa_method=mfa_method,
     ))
 
 
@@ -229,21 +195,14 @@ def auth_verify(code: str, json_output: bool) -> None:
 @auth.command("mfa-methods", cls=JsonOutputCommand)
 @click.option("--user", "username", default=None, help="Username (email) for Microsoft SSO.")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def auth_mfa_methods(
-    username: str | None,
-    json_output: bool,
-) -> None:
+def auth_mfa_methods(username: str | None, json_output: bool) -> None:
     """List the account's MFA methods without triggering a challenge.
 
     Performs a real sign-in through the post-password stage and may advance
     KMSI/session state, but stops before BeginAuth. Reports OneWaySMS (sms),
     TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
     """
-    raise SystemExit(cmd_auth_mfa_methods(
-        username=username,
-        password=None,
-        json_output=json_output,
-    ))
+    raise SystemExit(cmd_auth_mfa_methods(username=username, password=None, json_output=json_output))
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +238,7 @@ def config_courses(add: str | None, remove: str | None, semester: str | None, li
       lighthouse config courses --reset            # Clear all tracking
     """
     raise SystemExit(cmd_config_courses(
-        add=add,
-        remove=remove,
-        semester=semester,
-        list_courses=list_courses,
-        reset=reset,
-        json_output=json_output,
+        add=add, remove=remove, semester=semester, list_courses=list_courses, reset=reset, json_output=json_output,
     ))
 
 
@@ -326,32 +280,14 @@ def content(course_id: str, json_output: bool) -> None:
 @click.option("-s", "--semester", default=None, help="Filter to a specific semester (requires tracking config).")
 @click.option("--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID.")
 @click.option("--include-assignments", is_flag=True, default=False, help="Also download assignment attachments.")
-@click.option(
-    "--assignment",
-    "assignment_id",
-    default=None,
-    type=click.IntRange(min=1),
-    help="Download a specific assignment folder's attachment(s).",
-)
-@click.option(
-    "--attachment",
-    "attachment_id",
-    default=None,
-    type=click.IntRange(min=1),
-    help="Download a specific attachment from an assignment folder.",
-)
+@click.option("--assignment", "assignment_id", default=None, type=click.IntRange(min=1),
+              help="Download a specific assignment folder's attachment(s).")
+@click.option("--attachment", "attachment_id", default=None, type=click.IntRange(min=1),
+              help="Download a specific attachment from an assignment folder.")
 def download(
-    course_id: str | None,
-    output_dir: str | None,
-    dry_run: bool,
-    json_output: bool,
-    force: bool,
-    types: str,
-    semester: str | None,
-    also_courses: tuple[str, ...],
-    include_assignments: bool = False,
-    assignment_id: int | None = None,
-    attachment_id: int | None = None,
+    course_id: str | None, output_dir: str | None, dry_run: bool, json_output: bool, force: bool, types: str,
+    semester: str | None, also_courses: tuple[str, ...], include_assignments: bool = False,
+    assignment_id: int | None = None, attachment_id: int | None = None,
 ) -> None:
     """LOCAL WRITE: download files from a course or semester scope.
 
@@ -372,21 +308,11 @@ def download(
       --assignment           Download a specific dropbox folder
       --attachment           Download a specific attachment (requires --assignment)
     """
-    raise SystemExit(
-        cmd_download(
-            course_id,
-            output_dir=output_dir,
-            dry_run=dry_run,
-            json_output=json_output,
-            force=force,
-            types=types,
-            semester=semester,
-            also_courses=list(also_courses),
-            include_assignments=include_assignments,
-            assignment_id=assignment_id,
-            attachment_id=attachment_id,
-        )
-    )
+    raise SystemExit(cmd_download(
+        course_id, output_dir=output_dir, dry_run=dry_run, json_output=json_output, force=force, types=types,
+        semester=semester, also_courses=list(also_courses), include_assignments=include_assignments,
+        assignment_id=assignment_id, attachment_id=attachment_id,
+    ))
 
 
 @cli.command("sync", cls=JsonOutputCommand)
@@ -399,14 +325,8 @@ def download(
 @click.option("--also", "also_courses", multiple=True, help="Additional course(s) to include by name or ID.")
 @click.option("--include-assignments", is_flag=True, default=False, help="Also sync assignment attachments.")
 def sync(
-    course_id: str | None,
-    output_dir: str | None,
-    json_output: bool,
-    force: bool,
-    types: str,
-    semester: str | None,
-    also_courses: tuple[str, ...],
-    include_assignments: bool = False,
+    course_id: str | None, output_dir: str | None, json_output: bool, force: bool, types: str,
+    semester: str | None, also_courses: tuple[str, ...], include_assignments: bool = False,
 ) -> None:
     """LOCAL WRITE: incrementally sync new or changed files.
 
@@ -423,50 +343,26 @@ def sync(
       --semester  Filter the omitted-COURSE_ID scope to a semester (by name or ID)
       --also      Add additional course(s) to that omitted-COURSE_ID scope
     """
-    raise SystemExit(
-        cmd_sync(
-            course_id=course_id,
-            output_dir=output_dir,
-            json_output=json_output,
-            force=force,
-            types=types,
-            semester=semester,
-            also_courses=list(also_courses),
-            include_assignments=include_assignments,
-        )
-    )
+    raise SystemExit(cmd_sync(
+        course_id=course_id, output_dir=output_dir, json_output=json_output, force=force, types=types,
+        semester=semester, also_courses=list(also_courses), include_assignments=include_assignments,
+    ))
 
 
-@cli.command(cls=JsonOutputCommand)
-@click.argument("course_id", required=False)
-@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def grades(course_id: str | None, json_output: bool) -> None:
-    """Show grades. If COURSE_ID omitted, show all courses."""
-    raise SystemExit(cmd_grades(course_id=course_id, json_output=json_output))
+def _register_listing(name: str, subject: str) -> None:
+    def command(course_id: str | None, json_output: bool) -> None:
+        # Resolve the module-level wrapper at call time, as a named command would.
+        raise SystemExit(globals()[f"cmd_{name}"](course_id=course_id, json_output=json_output))
+
+    command.__doc__ = f"Show {subject}. If COURSE_ID omitted, show all courses."
+    command = click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")(command)
+    command = click.argument("course_id", required=False)(command)
+    cli.command(name, cls=JsonOutputCommand)(command)
 
 
-@cli.command(cls=JsonOutputCommand)
-@click.argument("course_id", required=False)
-@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def announcements(course_id: str | None, json_output: bool) -> None:
-    """Show announcements. If COURSE_ID omitted, show all courses."""
-    raise SystemExit(cmd_announcements(course_id=course_id, json_output=json_output))
-
-
-@cli.command(cls=JsonOutputCommand)
-@click.argument("course_id", required=False)
-@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def calendar(course_id: str | None, json_output: bool) -> None:
-    """Show calendar events. If COURSE_ID omitted, show all courses."""
-    raise SystemExit(cmd_calendar(course_id=course_id, json_output=json_output))
-
-
-@cli.command(cls=JsonOutputCommand)
-@click.argument("course_id", required=False)
-@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
-def quizzes(course_id: str | None, json_output: bool) -> None:
-    """Show quizzes. If COURSE_ID omitted, show all courses."""
-    raise SystemExit(cmd_quizzes(course_id=course_id, json_output=json_output))
+for _name, _subject in (("grades", "grades"), ("announcements", "announcements"),
+                        ("calendar", "calendar events"), ("quizzes", "quizzes")):
+    _register_listing(_name, _subject)
 
 
 @cli.command("quiz", cls=JsonOutputCommand)
@@ -535,10 +431,5 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, dry_run: b
     could not be read).
     """
     raise SystemExit(cmd_submit(
-        course_id=course_id,
-        folder_id=folder_id,
-        file_path=file_path,
-        yes=yes,
-        json_output=json_output,
-        dry_run=dry_run,
+        course_id=course_id, folder_id=folder_id, file_path=file_path, yes=yes, json_output=json_output, dry_run=dry_run,
     ))
