@@ -23,7 +23,7 @@ from typing import Any, TypeVar
 
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _require_positive_endpoint_id
 from .connection import active_connection
-from .credential_store import CredentialStore, _validate_credential_path
+from .credential_store import CredentialStore, CredentialStoreError, _validate_credential_path
 from .quiz_attempt_page import (
     REFUSE_LEARNER_LAST_PAGE,
     REFUSE_LEARNER_NOT_ON_PAGE,
@@ -57,7 +57,7 @@ class LearnerWorkflowError(ValueError):
 UNCERTAIN = (LearnerStartUnknownError, LearnerSaveUnknownError, LearnerAdvanceUnknownError, LearnerSubmitUnknownError)
 _T = TypeVar("_T")
 
-_INVALID = "The saved quiz attempt checkpoint is invalid."
+_INVALID = "The saved quiz attempt checkpoint is invalid. Run attempt start to replace it."
 _NOT_OPEN = "No attempt of this quiz is open in the CLI. Run attempt start."
 _REOPEN = "The last change could not be verified. Run attempt start to reopen the attempt where Brightspace has it."
 _SAVE_UNVERIFIED = "The last answer save could not be verified. Run attempt page to read what Brightspace stored."
@@ -67,8 +67,8 @@ _SUBMIT_UNVERIFIED = ("The last submission could not be verified. Run attempt ve
 _OTHER_ACCOUNT = "The saved attempt belongs to a different signed-in account."
 _OTHER_UNSETTLED = ("A change by a different signed-in account to this quiz could not be verified. "
                     "Sign in as that account and run attempt start to settle it.")
-_NOT_CONTINUABLE = ("The attempt whose last change could not be verified cannot be continued, "
-                    "so no new attempt was started. Run attempt verify to check whether it was submitted.")
+_NOT_CONTINUABLE = ("The attempt the CLI was taking is no longer in progress, so no new attempt was started. "
+                    "Run attempt verify to check whether it was submitted, or attempt forget to drop the CLI's record of it.")
 _SETTINGS = "The quiz settings could not be read, so nothing was started."
 _TIMED = "Timed quizzes are not supported yet, so nothing was started."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
@@ -193,7 +193,10 @@ class LearnerWorkflow:
                 client._session.close()
 
     def _load(self) -> dict[str, Any] | None:
-        artifact = self.store.read_artifact(self.path)
+        try:
+            artifact = self.store.read_artifact(self.path)
+        except CredentialStoreError:
+            raise LearnerWorkflowError(_INVALID) from None
         if artifact is None:
             return None
         _, state = artifact
@@ -288,14 +291,15 @@ class LearnerWorkflow:
             except LearnerWorkflowError:  # replaced, as starting reads everything from Brightspace
                 previous = None
             actor = self._actor(client)
-            unsettled = previous if previous is not None and previous["status"] == "uncertain" else None
-            if unsettled is not None and unsettled["actor_id"] != actor:
+            own = previous if previous is not None and previous["actor_id"] == actor else None
+            if previous is not None and own is None and previous["status"] == "uncertain":
                 raise LearnerWorkflowError(_OTHER_UNSETTLED)
             info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
             summary = read_learner_summary(client, course_id=self.course_id, quiz_id=self.quiz_id)
-            # A known attempt with an unverified change may only be continued:
-            # if it cannot be, a new start would use another graded attempt.
-            continue_only = unsettled is not None and unsettled["attempt_id"] is not None
+            # Until the CLI's attempt is verified submitted it may only be
+            # continued: if it ended elsewhere, a new start would use another
+            # graded attempt.
+            continue_only = own is not None and own["status"] != "submitted" and own["attempt_id"] is not None
             if continue_only and not summary.can_continue:
                 raise LearnerWorkflowError(_NOT_CONTINUABLE)
             state: dict[str, Any] = {
@@ -324,6 +328,18 @@ class LearnerWorkflow:
             state.update(status="active", operation=None, attempt_id=page.attempt_id, page=page.page)
             self._save(state)
             return {**page.public_data(), "resumed": summary.can_continue, "quiz": info}
+
+    def forget(self) -> dict[str, Any]:
+        """Drop the CLI's record of this quiz's attempt. Brightspace is neither contacted nor changed."""
+        with self._locked():
+            _validate_credential_path(self.path)
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                forgotten = False
+            else:
+                forgotten = True
+        return {"mode": "learner", "course_id": self.course_id, "quiz_id": self.quiz_id, "forgotten": forgotten}
 
     def page(self) -> dict[str, Any]:
         """Read the cursor's page; this also settles an unverified answer save."""

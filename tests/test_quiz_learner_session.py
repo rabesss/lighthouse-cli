@@ -145,7 +145,8 @@ def test_a_refused_start_keeps_the_previous_cursor(remote):
             workflow.start()
     assert workflow.status()["status"] == "absent"
     start(workflow, open_page(2), resumed=True)
-    with patch(f"{SESSION}.start_learner", side_effect=PreviewRefusedError(REFUSE_START_UNAVAILABLE)):
+    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+            patch(f"{SESSION}.start_learner", side_effect=PreviewRefusedError(REFUSE_START_UNAVAILABLE)):
         with pytest.raises(PreviewRefusedError):
             workflow.start()
     assert workflow.status() == {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
@@ -186,11 +187,13 @@ def test_an_unknown_start_without_an_identity_is_kept(remote):
     assert started.call_args.kwargs["continue_only"] is False
 
 
-@pytest.mark.parametrize("operation", ["start", "answer", "next", "submit"])
-def test_a_known_attempt_with_an_unverified_change_is_only_continued(remote, operation):
+@pytest.mark.parametrize("change", [
+    {}, *({"status": "uncertain", "operation": operation} for operation in ("start", "answer", "next", "submit")),
+])
+def test_the_clis_unsubmitted_attempt_is_only_continued(remote, change):
     workflow = LearnerWorkflow(10, 20)
     start(workflow)
-    workflow._save({**saved(workflow), "status": "uncertain", "operation": operation})
+    workflow._save({**saved(workflow), **change})
     before = saved(workflow)
     with patch(f"{SESSION}.start_learner") as started:
         with pytest.raises(LearnerWorkflowError, match="no new attempt was started"):
@@ -378,6 +381,27 @@ def test_start_replaces_an_invalid_cursor(remote):
     assert workflow.status()["page"] == 2
 
 
+def test_an_unreadable_cursor_is_invalid_and_replaced_by_start(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    workflow.path.write_text("not a sealed checkpoint")
+    with pytest.raises(LearnerWorkflowError, match=r"invalid\. Run attempt start"):
+        workflow.status()
+    start(workflow, open_page(2))
+    assert workflow.status()["page"] == 2
+
+
+def test_forget_drops_only_the_local_record(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    workflow.path.write_text("not a sealed checkpoint")
+    with patch(f"{SESSION}.LighthouseClient") as client:
+        assert workflow.forget() == {"mode": "learner", "course_id": 10, "quiz_id": 20, "forgotten": True}
+        assert workflow.forget()["forgotten"] is False
+    client.assert_not_called()
+    assert workflow.status()["status"] == "absent"
+
+
 def test_one_operation_at_a_time(remote):
     workflow = LearnerWorkflow(10, 20)
     with workflow._locked():
@@ -462,7 +486,7 @@ def test_an_unverified_submission_is_settled_only_by_its_receipt(remote):
 
 
 @pytest.mark.parametrize(("change", "actor"), [
-    ({"status": "submitted"}, 7), ({"status": "submitted"}, 8),
+    ({"status": "submitted"}, 7), ({"status": "submitted"}, 8), ({}, 8),
 ])
 def test_other_cursors_never_restrict_a_new_attempt(remote, change, actor):
     _, state, _ = remote
@@ -636,7 +660,7 @@ def invoke(*args: str):
 def test_cli_lists_the_attempt_commands():
     result = invoke("--help")
     assert result.exit_code == 0
-    for name in ("start", "page", "answer", "next", "submit", "verify", "images", "status"):
+    for name in ("start", "page", "answer", "next", "submit", "verify", "forget", "images", "status"):
         assert name in result.stdout
 
 
@@ -646,7 +670,7 @@ def test_cli_dry_run_and_declined_write_send_nothing():
         assert result.exit_code == 0
         assert json.loads(result.stdout)["options"] == {"answers": {"101": "o2"}, "advance": True,
                                                        "allow_unanswered": False}
-        for args in (("start", "10", "20"), ("next", "10", "20"), ("submit", "10", "20"),
+        for args in (("start", "10", "20"), ("next", "10", "20"), ("submit", "10", "20"), ("forget", "10", "20"),
                      ("answer", "10", "20", "--answers", '{"101": "o2"}')):
             declined = invoke(*args, "--json")
             assert declined.exit_code == 1
@@ -682,6 +706,9 @@ def test_cli_runs_each_operation_with_its_options():
         workflow.return_value.verify.return_value = RECEIPT
         assert invoke("verify", "10", "20", "--json").exit_code == 0
         workflow.return_value.verify.assert_called_once_with()
+        workflow.return_value.forget.return_value = {"forgotten": True}
+        assert invoke("forget", "10", "20", "--yes", "--json").exit_code == 0
+        workflow.return_value.forget.assert_called_once_with()
 
 
 def test_cli_errors_are_fixed_or_sanitized():

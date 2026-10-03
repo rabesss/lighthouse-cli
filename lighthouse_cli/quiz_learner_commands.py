@@ -15,7 +15,7 @@ from .quiz_learner_finish import LearnerUnansweredError
 from .quiz_learner_session import UNCERTAIN, LearnerWorkflow, LearnerWorkflowError, parse_answers
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
-_WRITES = {"start", "answer", "next", "submit"}
+_CONFIRMED = {"start", "answer", "next", "submit", "forget"}
 _NOT_CURRENT = ("Brightspace did not return a supported current page of this attempt. If the attempt "
                 "changed elsewhere, run attempt start to continue it where Brightspace has it.")
 
@@ -46,6 +46,9 @@ def _confirmed(operation: str, course_id: int, quiz_id: int) -> bool:
                   "A new attempt uses one of your allowed attempts and is graded.")
     elif operation == "submit":
         prompt = f"Submit your attempt at quiz {quiz_id} in course {course_id}? A submitted attempt is final and graded."
+    elif operation == "forget":
+        prompt = (f"Forget the CLI's record of your attempt at quiz {quiz_id} in course {course_id}? "
+                  "Brightspace keeps the attempt, and the next start may begin a new graded attempt.")
     else:
         prompt = f"Run attempt {operation} for course {course_id}, quiz {quiz_id}?"
     return click.confirm(prompt, err=True)
@@ -60,7 +63,7 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
             _emit({"mode": "learner", "operation": operation, "course_id": course_id,
                    "quiz_id": quiz_id, "dry_run": True, "options": options}, json_output)
             return
-        if operation in _WRITES and not yes and not _confirmed(operation, course_id, quiz_id):
+        if operation in _CONFIRMED and not yes and not _confirmed(operation, course_id, quiz_id):
             click.echo("Operation cancelled. Use --yes for non-interactive quiz attempt changes.", err=True)
             if json_output:
                 output_json({"cancelled": True})
@@ -92,8 +95,8 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
 def start(course_id: int, quiz_id: int, yes: bool, dry_run: bool, json_output: bool) -> None:
     """Continue the attempt in progress, or start a new one, and read its page.
 
-    Also reopens the attempt where Brightspace has it after a change that
-    could not be verified.
+    Until the CLI's attempt is submitted, only that attempt is continued,
+    where Brightspace has it; no new attempt is started.
     """
     _execute("start", course_id, quiz_id, json_output, yes, dry_run)
 
@@ -168,6 +171,20 @@ def verify(course_id: int, quiz_id: int, json_output: bool) -> None:
     Settles a submission that could not be verified; sends nothing.
     """
     _execute("verify", course_id, quiz_id, json_output)
+
+
+@attempt.command("forget", cls=JsonOutputCommand)
+@click.argument("course_id", type=_ID)
+@click.argument("quiz_id", type=_ID)
+@click.option("--yes", is_flag=True)
+@click.option("--json", "json_output", is_flag=True)
+def forget(course_id: int, quiz_id: int, yes: bool, json_output: bool) -> None:
+    """Drop the CLI's record of this quiz's attempt; Brightspace keeps the attempt.
+
+    For an attempt that ended outside the CLI and cannot be verified. The
+    next start may then begin a new graded attempt.
+    """
+    _execute("forget", course_id, quiz_id, json_output, yes)
 
 
 @attempt.command("images", cls=JsonOutputCommand)

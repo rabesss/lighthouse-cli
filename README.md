@@ -244,6 +244,8 @@ lighthouse student attempt images COURSE_ID QUIZ_ID --json
 lighthouse student attempt submit COURSE_ID QUIZ_ID --yes --json
 # Read-only: confirm the attempt was submitted:
 lighthouse student attempt verify COURSE_ID QUIZ_ID --json
+# Local only: drop the CLI's record of an attempt that ended elsewhere:
+lighthouse student attempt forget COURSE_ID QUIZ_ID --yes --json
 ```
 
 `start` also returns the quiz's name, whether it is forward-only and its
@@ -256,8 +258,10 @@ directory, or `--dir`). Next is refused on the last page and, unless
 `--allow-unanswered`, while a question is unanswered; `answer --next` checks
 that before saving anything. Every change is read back before it is
 reported. If one cannot be verified, `page` settles an answer save, and
-`start` continues that attempt on the page Brightspace has, never starting a
-new one. `submit` is refused
+`start` continues the attempt on the page Brightspace has. Until the CLI's
+attempt is submitted, `start` never begins a new one: if that attempt ended
+elsewhere, `verify` checks whether it was submitted, and `forget` drops the
+CLI's record of it. `submit` is refused
 before anything is sent unless the cursor is on the last page; unless
 `--allow-unanswered`, it then stops while any question of the quiz is
 unanswered, listing them under `unanswered` (only the page's own answers were
