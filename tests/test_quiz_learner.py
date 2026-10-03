@@ -661,6 +661,7 @@ def test_unanswered_questions_stop_the_submission_before_the_final_request():
     with pytest.raises(LearnerUnansweredError) as exc_info:
         submit_learner(client, **IDENTITY, page=1, current=LAST)
     assert exc_info.value.questions == [{"page": 1, "question_id": 102, "number": 2}]
+    assert not isinstance(exc_info.value, PreviewRefusedError)  # the page save was sent
     client._request.assert_called_once()  # the page save only
 
 

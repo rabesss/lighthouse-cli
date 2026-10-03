@@ -18,7 +18,6 @@ from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_res
 from .quiz_attempt_page import (
     MAX_PAGE_BYTES,
     LearnerPage,
-    PreviewRefusedError,
     active_buttons,
     hidden_form,
     rpc_script,
@@ -41,10 +40,12 @@ class LearnerSubmitUnknownError(NetworkError):
         super().__init__("Quiz submission could not be verified. Check the quiz's submissions before retrying.")
 
 
-class LearnerUnansweredError(PreviewRefusedError):
+class LearnerUnansweredError(ValueError):
     """The page's answers were saved, but the quiz was not submitted.
 
-    ``questions`` lists each unanswered question's page, id and number.
+    Not a ``PreviewRefusedError``: that is raised before any write, and the
+    page save has been sent. ``questions`` lists each unanswered question's
+    page, id and number.
     """
 
     def __init__(self, questions: list[dict[str, int]]) -> None:
