@@ -15,7 +15,6 @@ from typing import Any, TypeVar
 
 from bs4 import BeautifulSoup, Tag
 
-from .display import safe_display_text
 from .request_protection import FormProtection
 
 MAX_PAGE_BYTES = 2 * 1024 * 1024
@@ -114,10 +113,14 @@ def _text(node: Tag, *, blanks: bool = False) -> str:
     _expand_blocks(copy)
     for element in copy.select(removed):
         element.decompose()
-    text = copy.get_text(" ", strip=True)
-    if len(text) > 16384:
+    # Quiz content is authored text the answer depends on, so it is not
+    # screened like a label: words such as "password", a JSON snippet, a
+    # non-breaking space or a line break must survive. Only whitespace is
+    # compacted; control or format characters still void the text.
+    text = " ".join(copy.get_text(" ", strip=True).split())
+    if len(text) > 16384 or not text.isprintable():
         return ""
-    return safe_display_text(text, "", max_len=16384)
+    return text
 
 
 def hidden_form(body: bytes) -> tuple[Tag, dict[str, str]]:

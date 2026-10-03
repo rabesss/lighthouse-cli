@@ -346,6 +346,24 @@ def test_learner_next_control_follows_the_rendered_buttons():
         assert not learner(learner_question(1, options), extra=LEARNER_BUTTONS + unusable).has_next_control
 
 
+@pytest.mark.parametrize(("authored", "shown"), [
+    ("Practice good password management", "Practice good password management"),
+    ("Use a secret token generator", "Use a secret token generator"),
+    ('What does {"a": 1}["a"] return?', 'What does {"a": 1}["a"] return?'),
+    ("Two&nbsp;plus two", "Two plus two"),
+    ("What is\nthe answer?", "What is the answer?"),
+])
+def test_quiz_text_is_kept_as_authored(authored, shown):
+    options = checkboxes(1, ["o1"]).replace("Option o1", authored)
+    q = learner(learner_question(1, options, prompt=f"<p>{authored}</p>")).questions[0]
+    assert q["supported"] and q["text"] == shown and q["choices"][0]["text"] == shown
+
+
+def test_quiz_text_with_control_characters_is_unsupported():
+    q = learner(learner_question(1, radios(1, ["o1", "o2"]), prompt="<p>bad\x1bthing</p>")).questions[0]
+    assert not q["supported"] and q["text"] == ""
+
+
 def test_learner_option_tokens_allow_long_ids():
     q = learner(learner_question(1, radios(1, ["o" + "9" * 18, "9" * 18]))).questions[0]
     assert [choice["choice_id"] for choice in q["choices"]] == ["o" + "9" * 18, "9" * 18]
