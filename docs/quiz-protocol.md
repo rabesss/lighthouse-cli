@@ -270,9 +270,13 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
   An untimed attempt's frame declares the same variables, with
   `enforceTimeLimit=false` (and `timeLimit=7200` in the sandbox), so the
   frame decides, not the quiz's settings: special access can time one
-  learner's attempt. The deadline is moved onto the local clock by the
-  response's `Date` header and kept in the cursor, so later commands count
-  down without a request. Grace and late limits are not counted.
+  learner's attempt. The cursor keeps the server's deadline and the server
+  clock's offset from the local one, taken from the response's `Date` header
+  (whole seconds, stamped after the request was sent, so the largest offset
+  it allows is used and the countdown never ends late). Later commands count
+  down without a request. Once the deadline passes, `verify` reads the frame
+  again while the attempt is still in progress, as extra time or a local
+  clock that was reset gives time back. Grace and late limits are not counted.
 
 ## Not yet implemented
 

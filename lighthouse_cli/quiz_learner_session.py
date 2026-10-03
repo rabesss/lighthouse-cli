@@ -45,6 +45,7 @@ from .quiz_learner_transport import (
     LearnerAdvanceUnknownError,
     LearnerSaveUnknownError,
     LearnerStartUnknownError,
+    LearnerTimer,
     advance_learner,
     learner_page_path,
     read_learner_page,
@@ -81,7 +82,7 @@ _OTHER_ATTEMPT = ("Brightspace has a different attempt in progress than the one 
 _SETTINGS = "The quiz settings could not be read, so nothing was started."
 _TIMER = ("The attempt is open, but its time limit could not be read. "
           "Run attempt start to continue it and read the limit again.")
-_TIME_UP = ("Time is up for this attempt, so nothing was sent: Brightspace submits it by itself. "
+_TIME_UP = ("Time is up for this attempt, and the CLI sends nothing more to it: Brightspace submits it by itself. "
             "Run attempt verify to check the submission.")
 _AWAITING_SUBMIT = "Time is up, and Brightspace has not submitted this attempt yet. Run attempt verify again in a minute."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
@@ -89,6 +90,8 @@ _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice 
 _IMAGE_FAILED = "The image could not be downloaded."
 _IMAGE_NOT_SAVED = "The image could not be saved."
 _IMAGE_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+# A Unix time in the year 3058: later than any deadline, and one a datetime can show.
+_LAST_TIME = 2**35
 
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -143,25 +146,35 @@ def quiz_info(quiz: object) -> dict[str, Any]:
 
 def _valid_timer(timer: object) -> bool:
     return timer is None or (
-        isinstance(timer, dict) and set(timer) == {"limit_seconds", "ends_at", "auto_submit"}
+        isinstance(timer, dict) and set(timer) == {"limit_seconds", "ends_at", "clock_offset", "auto_submit"}
         and type(timer["limit_seconds"]) is int and timer["limit_seconds"] > 0
-        and type(timer["ends_at"]) in (int, float) and math.isfinite(timer["ends_at"])
+        and type(timer["ends_at"]) in (int, float) and 0 < timer["ends_at"] < _LAST_TIME
+        and type(timer["clock_offset"]) in (int, float) and -_LAST_TIME < timer["clock_offset"] < _LAST_TIME
         and type(timer["auto_submit"]) is bool)
 
 
+def _cursor_timer(timer: LearnerTimer | None) -> dict[str, Any] | None:
+    return None if timer is None else {"limit_seconds": timer.limit_seconds, "ends_at": round(timer.ends_at, 3),
+                                       "clock_offset": round(timer.clock_offset, 3), "auto_submit": timer.auto_submit}
+
+
+def _server_now(timer: Mapping[str, Any]) -> float:
+    return time.time() + float(timer["clock_offset"])
+
+
 def _clock(timer: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """The time left on the local clock, or ``None`` for an attempt whose time is not enforced."""
+    """The time left on the server's clock, or ``None`` for an attempt whose time is not enforced."""
     if timer is None:
         return None
     ends_at = datetime.fromtimestamp(timer["ends_at"], timezone.utc)
-    return {"limit_seconds": timer["limit_seconds"], "seconds_left": max(0, math.floor(timer["ends_at"] - time.time())),
+    return {"limit_seconds": timer["limit_seconds"], "seconds_left": max(0, math.floor(timer["ends_at"] - _server_now(timer))),
             "ends_at": ends_at.isoformat(timespec="seconds").replace("+00:00", "Z"), "auto_submit": timer["auto_submit"]}
 
 
 def _time_up(state: Mapping[str, Any]) -> bool:
     """Whether Brightspace now submits the attempt itself: its time ran out with auto-submit on."""
     timer = state.get("timer")
-    return timer is not None and timer["auto_submit"] and time.time() >= timer["ends_at"]
+    return timer is not None and timer["auto_submit"] and _server_now(timer) >= timer["ends_at"]
 
 
 def _write_image(path: Path, data: bytes) -> None:
@@ -271,6 +284,8 @@ class LearnerWorkflow:
         state = self._load()
         if state is None:
             raise LearnerWorkflowError(_NOT_OPEN)
+        if state["status"] != "submitted" and _time_up(state):  # before any request, also after an unsettled write
+            raise LearnerWorkflowError(_TIME_UP)
         if self._actor(client) != state["actor_id"]:
             raise LearnerWorkflowError(_OTHER_ACCOUNT)
         if state["status"] == "submitted":
@@ -282,8 +297,6 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_REOPEN)
             if not unverified_save:
                 raise LearnerWorkflowError(_SAVE_UNVERIFIED)
-        if _time_up(state):
-            raise LearnerWorkflowError(_TIME_UP)
         return state
 
     def _identity(self, state: dict[str, Any]) -> dict[str, int]:
@@ -297,6 +310,8 @@ class LearnerWorkflow:
         happened before the request was sent (or, for an unanswered quiz,
         only re-saved the page's own answers), so the cursor is restored.
         """
+        if _time_up(state):  # it ran out since the command opened the attempt
+            raise LearnerWorkflowError(_TIME_UP)
         previous = dict(state)
         state.update(status="uncertain", operation=operation)
         self._save(state)
@@ -385,10 +400,10 @@ class LearnerWorkflow:
             except Exception:  # the cursor stays uncertain, naming the attempt
                 raise LearnerWorkflowError(_TIMER) from None
             state.update(status="active", operation=None, attempt_id=page.attempt_id, page=page.page,
-                         timer=None if timer is None else {"limit_seconds": timer.limit_seconds,
-                                                           "ends_at": round(timer.ends_at, 3),
-                                                           "auto_submit": timer.auto_submit})
+                         timer=_cursor_timer(timer))
             self._save(state)
+            if _time_up(state):  # continued with its limit unknown, as a previous read of it failed
+                raise LearnerWorkflowError(_TIME_UP)
             return {**page.public_data(), "resumed": summary.can_continue, "quiz": info, "timer": _clock(state["timer"])}
 
     def forget(self) -> dict[str, Any]:
@@ -466,7 +481,8 @@ class LearnerWorkflow:
         """Read-only: confirm the cursor's attempt is submitted, from its receipt and submissions row.
 
         An attempt still in progress after its time ran out is one
-        Brightspace has yet to submit itself.
+        Brightspace has yet to submit itself, unless its timer, read again,
+        gives it time back.
         """
         with self._locked(), self._client() as client:
             state = self._load()
@@ -480,13 +496,32 @@ class LearnerWorkflow:
                 receipt = verify_learner_submission(client, course_id=self.course_id, quiz_id=self.quiz_id,
                                                     attempt_id=state["attempt_id"])
             except LearnerNotSubmittedError:
-                if _time_up(state):  # Brightspace submits it shortly; starting would only reopen it
+                if self._awaiting_submit(client, state):  # starting would only reopen it
                     raise LearnerWorkflowError(_AWAITING_SUBMIT) from None
                 raise
             if state["status"] != "submitted":
                 state.update(status="submitted", operation=None)
                 self._save(state)
             return receipt
+
+    def _awaiting_submit(self, client: LighthouseClient, state: dict[str, Any]) -> bool:
+        """Whether an attempt Brightspace shows in progress is one it has yet to submit itself.
+
+        Once the deadline has passed, the attempt's timer is read again: extra
+        time, or a local clock that has since been reset, gives time back.
+        """
+        if not _time_up(state):
+            return False
+        try:
+            timer = read_learner_timer(client, course_id=self.course_id, quiz_id=self.quiz_id,
+                                       attempt_id=state["attempt_id"])
+        except SessionExpiredError:
+            raise
+        except Exception:  # the deadline the CLI has stands
+            return True
+        state["timer"] = _cursor_timer(timer)
+        self._save(state)
+        return _time_up(state)
 
     def images(self, *, question_id: int | None = None, directory: Path | None = None) -> dict[str, Any]:
         """Download the cursor page's images (or one question's) into ``directory`` or a new temporary one."""

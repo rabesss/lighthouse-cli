@@ -372,13 +372,17 @@ def test_nothing_runs_without_a_started_attempt(remote):
     assert workflow.status() == {"mode": "learner", "status": "absent", "course_id": 10, "quiz_id": 20}
 
 
+TIMER_STATE = {"limit_seconds": 240, "ends_at": 1.0, "clock_offset": 0.0, "auto_submit": True}
+
+
 @pytest.mark.parametrize("change", [
     {"mode": "preview"}, {"actor_id": 0}, {"page": 0}, {"attempt_id": None}, {"status": "uncertain"},
     {"operation": "answer"}, {"quiz_id": 21}, {"origin": "https://other.example"},
     {"status": "submitted", "operation": "submit"}, {"status": "closed"}, {"operation": "finish"},
-    {"timer": 240}, {"timer": {"limit_seconds": 0, "ends_at": 1.0, "auto_submit": True}},
-    {"timer": {"limit_seconds": 240, "ends_at": "soon", "auto_submit": True}},
-    {"timer": {"limit_seconds": 240, "ends_at": 1.0, "auto_submit": 1}}, {"timer": {"limit_seconds": 240, "ends_at": 1.0}},
+    {"timer": 240}, {"timer": {key: value for key, value in TIMER_STATE.items() if key != "auto_submit"}},
+    *({"timer": {**TIMER_STATE, **timer}} for timer in (
+        {"limit_seconds": 0}, {"ends_at": "soon"}, {"auto_submit": 1}, {"ends_at": 1e18}, {"ends_at": 10**400},
+        {"ends_at": -1.0}, {"ends_at": 0}, {"clock_offset": 1e18}, {"clock_offset": None}, {"grace_seconds": 60})),
 ])
 def test_a_tampered_cursor_is_rejected(remote, change):
     workflow = LearnerWorkflow(10, 20)
@@ -610,6 +614,7 @@ def test_a_timed_start_keeps_its_limit_and_every_page_reports_the_time_left(remo
     workflow = LearnerWorkflow(10, 20)
     result = start_timed(workflow, timed(200))
     assert result["quiz"]["time_limit_minutes"] == 4
+    assert set(saved(workflow)["timer"]) == set(TIMER_STATE)
     ends_at = saved(workflow)["timer"]["ends_at"]
     assert result["timer"] == {"limit_seconds": 240, "seconds_left": result["timer"]["seconds_left"],
                                "ends_at": datetime.fromtimestamp(ends_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -630,24 +635,32 @@ def test_a_timed_start_keeps_its_limit_and_every_page_reports_the_time_left(remo
     read.assert_not_called()
 
 
+TIME_UP = "Time is up for this attempt, and the CLI sends nothing more to it"
+
+
 def test_once_time_is_up_nothing_is_sent_and_verify_waits_for_brightspace(remote):
-    _, _, summary = remote
+    client, _, summary = remote
     workflow = LearnerWorkflow(10, 20)
     start_timed(workflow, timed(200))
     time_up(workflow)
     assert workflow.status()["timer"]["seconds_left"] == 0
     summary.reset_mock()
+    client.get_json.reset_mock()
     with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit, \
             patch(f"{SESSION}.start_learner") as started:
-        for action in (workflow.page, workflow.next, workflow.submit, workflow.images, workflow.start,
+        for action in (workflow.page, workflow.next, workflow.submit, workflow.images,
                        lambda: workflow.answer({101: "o1"})):
-            with pytest.raises(LearnerWorkflowError, match="Time is up for this attempt, so nothing was sent"):
+            with pytest.raises(LearnerWorkflowError, match=TIME_UP):
                 action()
+        client.get_json.assert_not_called()  # not even the account check
+        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
+            workflow.start()
     read.assert_not_called()
     submit.assert_not_called()
     started.assert_not_called()
     summary.assert_not_called()
-    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()):
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
+            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
         with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
             workflow.verify()
     assert workflow.status()["status"] == "active"
@@ -656,6 +669,64 @@ def test_once_time_is_up_nothing_is_sent_and_verify_waits_for_brightspace(remote
     assert workflow.status()["status"] == "submitted"
     # A new attempt has a limit of its own.
     assert 190 <= start_timed(workflow, timed(200))["timer"]["seconds_left"] <= 200
+
+
+@pytest.mark.parametrize("operation", ["answer", "next", "submit"])
+def test_once_time_is_up_an_unsettled_write_also_points_to_verify(remote, operation):
+    workflow = LearnerWorkflow(10, 20)
+    start_timed(workflow, timed(200))
+    time_up(workflow)
+    workflow._save({**saved(workflow), "status": "uncertain", "operation": operation})
+    for action in (workflow.page, lambda: workflow.answer({101: "o1"})):
+        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
+            action()
+
+
+def test_time_that_runs_out_during_a_command_stops_its_next_write(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start_timed(workflow, timed(100))
+    clock = [time.time()]
+
+    def save(*args, **kwargs):
+        clock[0] += 200  # the save outlasts the time left
+        return open_page()
+    with patch(f"{SESSION}.time", Mock(time=lambda: clock[0])), \
+            patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
+            patch(f"{SESSION}.save_learner_answers", side_effect=save), \
+            patch(f"{SESSION}.advance_learner") as advance:
+        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
+            workflow.answer({101: "o2"}, advance=True, allow_unanswered=True)
+    advance.assert_not_called()
+    assert (saved(workflow)["status"], saved(workflow)["operation"]) == ("active", None)
+
+
+def test_the_countdown_runs_on_the_servers_clock(remote):
+    workflow = LearnerWorkflow(10, 20)
+    deadline = time.time() + 600 + 200  # the local clock runs 10 minutes behind the server's
+    timer = start_timed(workflow, LearnerTimer(240, deadline, True, clock_offset=600))["timer"]
+    assert 190 <= timer["seconds_left"] <= 200
+    assert saved(workflow)["timer"]["ends_at"] == round(deadline, 3)  # reported on the server's clock
+    assert timer["ends_at"] == datetime.fromtimestamp(round(deadline, 3), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize(("refreshed", "message"), [
+    (-5, "has not submitted this attempt yet"), ("error", "has not submitted this attempt yet"),
+    (100, "still in progress"), (None, "still in progress"),
+])
+def test_once_time_is_up_verify_reads_the_timer_again(remote, refreshed, message):
+    workflow = LearnerWorkflow(10, 20)
+    start_timed(workflow, timed(200))
+    time_up(workflow)
+    read = {"side_effect": NetworkError("no")} if refreshed == "error" else {
+        "return_value": None if refreshed is None else timed(refreshed)}
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
+            patch(f"{SESSION}.read_learner_timer", **read) as timer:
+        with pytest.raises((LearnerWorkflowError, LearnerNotSubmittedError), match=message):
+            workflow.verify()
+    assert timer.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
+    if message == "still in progress":  # extra time, or a clock set right: the attempt goes on
+        with patch(f"{SESSION}.read_learner_page", return_value=open_page()):
+            workflow.page()
 
 
 def test_without_auto_submit_the_attempt_stays_open_past_its_limit(remote):
@@ -697,6 +768,28 @@ def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote, fail
     assert again.call_args.kwargs["continue_only"] is True
 
 
+def test_a_recovery_start_that_finds_the_time_up_refuses_the_attempt(remote):
+    workflow = LearnerWorkflow(10, 20)
+
+    def started(client, *, on_identity, **kwargs):
+        on_identity(30, 1)
+        return open_page()
+    with patch(f"{SESSION}.start_learner", side_effect=started), \
+            patch(f"{SESSION}.read_learner_timer", side_effect=NetworkError("no")):
+        with pytest.raises(LearnerWorkflowError, match="time limit could not be read"):
+            workflow.start()
+    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+            patch(f"{SESSION}.start_learner", return_value=open_page()), \
+            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
+        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
+            workflow.start()
+    assert (saved(workflow)["status"], saved(workflow)["timer"]["limit_seconds"]) == ("active", 240)
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
+            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
+        with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
+            workflow.verify()
+
+
 def test_a_recovery_start_keeps_the_attempts_limit(remote):
     workflow = LearnerWorkflow(10, 20)
     start_timed(workflow, timed(200))
@@ -708,7 +801,8 @@ def test_a_recovery_start_keeps_the_attempts_limit(remote):
             workflow.start()
     assert (saved(workflow)["operation"], saved(workflow)["timer"]) == ("start", timer)
     time_up(workflow)
-    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()):
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
+            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
         with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
             workflow.verify()
 

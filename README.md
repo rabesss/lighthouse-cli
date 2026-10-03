@@ -273,13 +273,17 @@ still in progress. `status` reads the local cursor.
 On a timed attempt `start` reads the limit once. Every reply with a page,
 and `status`, then carries `timer`: `limit_seconds`, `seconds_left`,
 `ends_at` (UTC) and `auto_submit`, or `null` when the attempt's time is not
-enforced. No request is made for it. Submit before `seconds_left` reaches 0.
+enforced (or, after a `start` that did not settle, not yet read). No request
+is made for it, and the countdown may end a second or two early, never late.
+Submit before `seconds_left` reaches 0.
 On a quiz that submits itself, nothing more is sent once time is up:
 `page`, `answer`, `next`, `submit`, `images` and `start` are refused, and
 `verify` reports that Brightspace has yet to submit the attempt until it has
-(shortly after the limit). Without auto-submit, answers can still be saved
-and submitted after the limit; the quiz's late-submission setting decides
-how they count.
+(shortly after the limit). If Brightspace still has the attempt open with
+time left (extra time, or a computer clock that was off), `verify` reads the
+new limit and the attempt can be continued with `start`. Without
+auto-submit, answers can still be saved and submitted after the limit; the
+quiz's late-submission setting decides how they count.
 
 Question authoring, teacher grading and full
 course-administration parity are **not implemented** yet. Instructor question

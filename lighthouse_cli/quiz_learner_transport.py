@@ -70,7 +70,8 @@ _ACTION_ROUTES = ("/d2l/lms/quizzing/", "/d2l/logout")
 _SUMMARY_FLAGS = ("isImpersonatingRole", "canTakeQuiz", "startQuiz", "continueQuiz", "hasPass")
 # The timer frame's script variables, each declared once on its own line.
 _TIMER_VARS = {
-    "quizId": "[0-9]{1,18}", "attemptTimeLoggingAttemptId": "[0-9]{1,18}", "isPreview": "true|false",
+    "quizId": "[0-9]{1,18}", "attemptTimeLoggingQuizId": "[0-9]{1,18}",
+    "attemptTimeLoggingAttemptId": "[0-9]{1,18}", "isPreview": "true|false",
     "timeStartedTicks": "[0-9]{1,19}", "timeLimit": "[0-9]{1,9}", "enforceTimeLimit": "true|false",
     "hasAutoSubmit": "true|false", "timeExceeded": "true|false",
 }
@@ -165,11 +166,16 @@ def read_learner_summary(client: LighthouseClient, *, course_id: int, quiz_id: i
 
 @dataclass(frozen=True)
 class LearnerTimer:
-    """An attempt's enforced time limit; ``ends_at`` is a Unix time."""
+    """An attempt's enforced time limit.
+
+    ``ends_at`` is a Unix time on the server's clock, which runs
+    ``clock_offset`` seconds ahead of the local one.
+    """
 
     limit_seconds: int
     ends_at: float
     auto_submit: bool
+    clock_offset: float = 0.0
 
 
 def _timer_path(course_id: int, quiz_id: int, attempt_id: int) -> str:
@@ -193,7 +199,8 @@ def parse_learner_timer(body: bytes, *, quiz_id: int, attempt_id: int, now: floa
         if len(found) != 1:
             raise PreviewPageError()
         values[name] = found[0]
-    if (values["quizId"], values["attemptTimeLoggingAttemptId"], values["isPreview"]) != (str(quiz_id), str(attempt_id), "false"):
+    identity = (values["quizId"], values["attemptTimeLoggingQuizId"], values["attemptTimeLoggingAttemptId"])
+    if identity != (str(quiz_id), str(quiz_id), str(attempt_id)) or values["isPreview"] != "false":
         raise PreviewPageError()
     if values["enforceTimeLimit"] == "false":
         return None
@@ -207,28 +214,32 @@ def parse_learner_timer(body: bytes, *, quiz_id: int, attempt_id: int, now: floa
     return LearnerTimer(limit, ends_at, values["hasAutoSubmit"] == "true")
 
 
-def _server_time(headers: Mapping[str, str], default: float) -> float:
-    """The response's ``Date``, or ``default`` without a valid one."""
+def _server_time(headers: Mapping[str, str]) -> float | None:
+    """The response's ``Date``, or ``None`` without a valid one (a time without a zone is not one)."""
     value = next((str(value) for key, value in headers.items() if key.lower() == "date"), "")
     try:
-        return parsedate_to_datetime(value).timestamp()
+        date = parsedate_to_datetime(value)
     except (TypeError, ValueError, OverflowError):
-        return default
+        return None
+    return None if date.tzinfo is None else date.timestamp()
 
 
 def read_learner_timer(client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int) -> LearnerTimer | None:
     """The attempt's time limit from its timer frame, or ``None`` when its time is not enforced.
 
-    The frame's start time is the server's. ``ends_at`` is moved onto the
-    local clock by the response's ``Date``, so a local clock that is off
-    still counts down to the server's limit.
+    The frame's start time is the server's. The response's ``Date`` gives
+    the server clock's offset from the local one, so a local clock that is
+    off still counts down to the server's limit.
     """
+    sent = time.time()
     body, headers = client.get_raw(_timer_path(course_id, quiz_id, attempt_id), max_bytes=MAX_PAGE_BYTES,
                                    _replay_safe=False, headers={"Cache-Control": "no-cache"})
-    local = time.time()
-    server = _server_time(headers, local)
-    timer = parse_learner_timer(body, quiz_id=quiz_id, attempt_id=attempt_id, now=server)
-    return None if timer is None else dataclasses.replace(timer, ends_at=timer.ends_at - (server - local))
+    date = _server_time(headers)
+    # The Date is stamped in whole seconds after the request was sent, so the
+    # server is at most this far ahead: the countdown never ends after its own.
+    offset = 0.0 if date is None else date + 1 - sent
+    timer = parse_learner_timer(body, quiz_id=quiz_id, attempt_id=attempt_id, now=time.time() + offset)
+    return None if timer is None else dataclasses.replace(timer, clock_offset=offset)
 
 
 def _start_fields(summary: LearnerSummary, *, continue_only: bool) -> tuple[dict[str, str], bool]:

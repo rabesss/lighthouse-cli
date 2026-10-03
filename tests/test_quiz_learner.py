@@ -338,13 +338,13 @@ TIMER = "lighthouse_cli.quiz_learner_transport"
 
 def timer_frame(*, quiz: int = 20, attempt: int = 30, preview: str = "false", started: float = STARTED,
                 limit: int = 240, enforced: str = "true", auto_submit: str = "true", exceeded: str = "false",
-                extra: str = "") -> bytes:
+                extra: str = "", logging_quiz: int | None = None) -> bytes:
     ticks = 621_355_968_000_000_000 + int(started * 10**7)
     # The frame's functions assign and test the same names; only declarations count.
     functions = ("<script>function OnTimeUp() {\n      timeExceeded = true;\n}\n"
                  "function Limit() { return typeof timeLimit == \"undefined\" ? 30000 : timeLimit; }</script>")
     declarations = (f"<script>\n\t\tvar quizId = {quiz};\n\t\tvar isPreview = {preview};\n"
-                    f"\t\tvar timeStartedTicks = {ticks};\n\t\tvar attemptTimeLoggingQuizId = {quiz};\n"
+                    f"\t\tvar timeStartedTicks = {ticks};\n\t\tvar attemptTimeLoggingQuizId = {logging_quiz or quiz};\n"
                     f"\t\tvar attemptTimeLoggingAttemptId = {attempt};\n\t\tvar timeLimit = {limit};\n"
                     f"\t\tvar enforceTimeLimit = {enforced};\n\t\tvar timeExceeded = {exceeded};\n"
                     f"\t\tvar hasAutoSubmit = {auto_submit};\n\t\tvar isPreviewFromQB = '0';\n{extra}</script>")
@@ -367,7 +367,7 @@ def test_timer_reads_an_enforced_limit_and_none_otherwise():
 
 @pytest.mark.parametrize("page", [
     timer_frame(quiz=21), timer_frame(attempt=31), timer_frame(preview="true"),
-    timer_frame(limit=0), timer_frame(started=STARTED + 60 + 301), timer_frame(enforced="1"),
+    timer_frame(logging_quiz=21), timer_frame(limit=0), timer_frame(started=STARTED + 60 + 301), timer_frame(enforced="1"),
     timer_frame(extra="var timeLimit = 60;\n"),  # declared twice
     timer_frame().replace(b"var hasAutoSubmit", b"var autoSubmit"),
     b"<p>var quizId = 20;</p>",
@@ -377,18 +377,20 @@ def test_an_unexpected_timer_frame_is_rejected(page):
         parse_timer(page)
 
 
-@pytest.mark.parametrize(("headers", "ends_at"), [
-    # The local clock runs 10 s ahead of the server's.
-    ({"Date": formatdate(STARTED + 60, usegmt=True)}, STARTED + 250),
-    ({"date": formatdate(STARTED + 60, usegmt=True)}, STARTED + 250),
-    ({}, STARTED + 240), ({"Date": "soon"}, STARTED + 240),
+@pytest.mark.parametrize(("headers", "offset"), [
+    # The local clock runs about 10 s ahead of the server's. The offset is the
+    # largest the Date allows, so the countdown never ends late.
+    ({"Date": formatdate(STARTED + 60, usegmt=True)}, -9),
+    ({"date": formatdate(STARTED + 60, usegmt=True)}, -9),
+    ({}, 0), ({"Date": "soon"}, 0), ({"Date": formatdate(STARTED + 60)}, 0),  # "-0000": no zone
 ])
-def test_timer_is_read_once_onto_the_local_clock(headers, ends_at):
+def test_timer_is_read_once_with_the_server_clocks_offset(headers, offset):
     client = LighthouseClient(read_only_auth=True)
     client.get_raw = Mock(return_value=(timer_frame(), headers))
-    with patch(f"{TIMER}.time", Mock(time=Mock(return_value=STARTED + 70))):
+    # The clock reads before the request is sent and after its reply, 2 s later.
+    with patch(f"{TIMER}.time", Mock(time=Mock(side_effect=[STARTED + 70, STARTED + 72]))):
         timer = read_learner_timer(client, course_id=10, quiz_id=20, attempt_id=30)
-    assert timer == LearnerTimer(240, ends_at, True)
+    assert timer == LearnerTimer(240, STARTED + 240, True, clock_offset=offset)
     client.get_raw.assert_called_once()
     assert client.get_raw.call_args.args[0] == (
         "/d2l/lms/quizzing/user/attempt/quiz_attempt_top_auto.d2l?ou=10&isprv=&impcf=&qi=20&ai=30"
