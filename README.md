@@ -229,7 +229,7 @@ lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --confirm-no-remote-at
 ```
 
 **Learner quiz attempts** (`student attempt`) take your own graded attempt
-of an untimed quiz, a page at a time:
+of a quiz, timed or not, a page at a time:
 
 ```bash
 # Continue the attempt in progress, or start a new one (uses one of your attempts):
@@ -248,8 +248,8 @@ lighthouse student attempt verify COURSE_ID QUIZ_ID --json
 lighthouse student attempt forget COURSE_ID QUIZ_ID --yes --json
 ```
 
-`start` also returns the quiz's name, whether it is forward-only and its
-attempt limit. Answers use the ids `page` returns: a choice id for a
+`start` also returns the quiz's name, whether it is forward-only, its
+attempt limit and its time limit in minutes (`time_limit_minutes`). Answers use the ids `page` returns: a choice id for a
 single-choice question, a list of option ids for a multi-select one, and a
 list of texts, one per blank, for a fill-in-the-blank one; questions left out
 keep their saved answers. Equations read as LaTeX and images as
@@ -269,7 +269,17 @@ saved again). It reports the attempt number and, when the quiz shows it, the
 score. A submission that cannot be verified is settled with `verify`, which
 reads the submissions list and the receipt, and reports an attempt that is
 still in progress. `status` reads the local cursor.
-Timed quizzes are not supported yet.
+
+On a timed attempt `start` reads the limit once. Every reply with a page,
+and `status`, then carries `timer`: `limit_seconds`, `seconds_left`,
+`ends_at` (UTC) and `auto_submit`, or `null` when the attempt's time is not
+enforced. No request is made for it. Submit before `seconds_left` reaches 0.
+On a quiz that submits itself, nothing more is sent once time is up:
+`page`, `answer`, `next`, `submit`, `images` and `start` are refused, and
+`verify` reports that Brightspace has yet to submit the attempt until it has
+(shortly after the limit). Without auto-submit, answers can still be saved
+and submitted after the limit; the quiz's late-submission setting decides
+how they count.
 
 Question authoring, teacher grading and full
 course-administration parity are **not implemented** yet. Instructor question

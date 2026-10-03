@@ -8,10 +8,13 @@ reported as unknown and never retried here: the caller re-reads the server.
 
 from __future__ import annotations
 
+import dataclasses
 import posixpath
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qs, unquote, urldefrag, urlencode, urlparse
 
@@ -65,6 +68,16 @@ REFUSE_IMAGE_ROUTE = "This image address is a Brightspace page, not a file, so t
 _ACTION_ROUTES = ("/d2l/lms/quizzing/", "/d2l/logout")
 
 _SUMMARY_FLAGS = ("isImpersonatingRole", "canTakeQuiz", "startQuiz", "continueQuiz", "hasPass")
+# The timer frame's script variables, each declared once on its own line.
+_TIMER_VARS = {
+    "quizId": "[0-9]{1,18}", "attemptTimeLoggingAttemptId": "[0-9]{1,18}", "isPreview": "true|false",
+    "timeStartedTicks": "[0-9]{1,19}", "timeLimit": "[0-9]{1,9}", "enforceTimeLimit": "true|false",
+    "hasAutoSubmit": "true|false", "timeExceeded": "true|false",
+}
+# .NET ticks (100 ns since 0001-01-01 UTC) at the Unix epoch.
+_UNIX_EPOCH_TICKS = 621_355_968_000_000_000
+# How far ahead of the server's clock an attempt's start may be.
+_START_SKEW_SECONDS = 300
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 # Raster formats an agent can view, by their leading bytes.
 _IMAGE_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
@@ -148,6 +161,74 @@ def read_learner_summary(client: LighthouseClient, *, course_id: int, quiz_id: i
     body, _ = client.get_raw(_summary_path(course_id, quiz_id), max_bytes=MAX_PAGE_BYTES,
                              _replay_safe=False, headers={"Cache-Control": "no-cache"})
     return parse_learner_summary(body, course_id=course_id, quiz_id=quiz_id)
+
+
+@dataclass(frozen=True)
+class LearnerTimer:
+    """An attempt's enforced time limit; ``ends_at`` is a Unix time."""
+
+    limit_seconds: int
+    ends_at: float
+    auto_submit: bool
+
+
+def _timer_path(course_id: int, quiz_id: int, attempt_id: int) -> str:
+    _identity(course_id, quiz_id, attempt_id)
+    return ATTEMPT_ROUTE + "quiz_attempt_top_auto.d2l?" + urlencode({
+        "ou": course_id, "isprv": "", "impcf": "", "qi": quiz_id, "ai": attempt_id,
+        "dnb": 0, "cfql": 0, "fromQB": 0, "cft": "", "d2l_body_type": 3,
+    })
+
+
+def parse_learner_timer(body: bytes, *, quiz_id: int, attempt_id: int, now: float) -> LearnerTimer | None:
+    """The timer frame's limit as data, or ``None`` when the attempt's time is not enforced.
+
+    ``now`` is the server's time of the response, so ``ends_at`` is on the
+    server's clock. An attempt the server marks over time ends by ``now``.
+    """
+    scripts = "\n".join(script.get_text() for script in BeautifulSoup(body, "html.parser").find_all("script"))
+    values: dict[str, str] = {}
+    for name, pattern in _TIMER_VARS.items():
+        found = re.findall(rf"^[ \t]*var\s+{name}\s*=\s*({pattern})\s*;[ \t\r]*$", scripts, re.MULTILINE)
+        if len(found) != 1:
+            raise PreviewPageError()
+        values[name] = found[0]
+    if (values["quizId"], values["attemptTimeLoggingAttemptId"], values["isPreview"]) != (str(quiz_id), str(attempt_id), "false"):
+        raise PreviewPageError()
+    if values["enforceTimeLimit"] == "false":
+        return None
+    limit = int(values["timeLimit"])
+    started = (int(values["timeStartedTicks"]) - _UNIX_EPOCH_TICKS) / 10**7
+    if limit < 1 or started > now + _START_SKEW_SECONDS:
+        raise PreviewPageError()
+    ends_at = started + limit
+    if values["timeExceeded"] == "true":
+        ends_at = min(ends_at, now)
+    return LearnerTimer(limit, ends_at, values["hasAutoSubmit"] == "true")
+
+
+def _server_time(headers: Mapping[str, str], default: float) -> float:
+    """The response's ``Date``, or ``default`` without a valid one."""
+    value = next((str(value) for key, value in headers.items() if key.lower() == "date"), "")
+    try:
+        return parsedate_to_datetime(value).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def read_learner_timer(client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int) -> LearnerTimer | None:
+    """The attempt's time limit from its timer frame, or ``None`` when its time is not enforced.
+
+    The frame's start time is the server's. ``ends_at`` is moved onto the
+    local clock by the response's ``Date``, so a local clock that is off
+    still counts down to the server's limit.
+    """
+    body, headers = client.get_raw(_timer_path(course_id, quiz_id, attempt_id), max_bytes=MAX_PAGE_BYTES,
+                                   _replay_safe=False, headers={"Cache-Control": "no-cache"})
+    local = time.time()
+    server = _server_time(headers, local)
+    timer = parse_learner_timer(body, quiz_id=quiz_id, attempt_id=attempt_id, now=server)
+    return None if timer is None else dataclasses.replace(timer, ends_at=timer.ends_at - (server - local))
 
 
 def _start_fields(summary: LearnerSummary, *, continue_only: bool) -> tuple[dict[str, str], bool]:

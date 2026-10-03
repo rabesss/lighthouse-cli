@@ -6,18 +6,22 @@ records the attempt and the last page that read back, which keeps every page
 request to one the server showed, and a write whose outcome is unknown is
 resolved by starting again, which continues that attempt. A submission whose
 outcome is unknown is settled by reading its receipt instead, as starting
-again could begin a new, graded attempt.
+again could begin a new, graded attempt. On a timed attempt the cursor also
+keeps the limit read at the start, so the time left is known without asking.
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import stat
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -32,6 +36,7 @@ from .quiz_attempt_page import (
     PreviewRefusedError,
 )
 from .quiz_learner_finish import (
+    LearnerNotSubmittedError,
     LearnerSubmitUnknownError,
     submit_learner,
     verify_learner_submission,
@@ -44,6 +49,7 @@ from .quiz_learner_transport import (
     learner_page_path,
     read_learner_page,
     read_learner_summary,
+    read_learner_timer,
     read_quiz_image,
     save_learner_answers,
     start_learner,
@@ -73,7 +79,11 @@ _OTHER_ATTEMPT = ("Brightspace has a different attempt in progress than the one 
                   "not take it over. Run attempt verify to check whether the CLI's attempt was submitted, "
                   "or attempt forget to drop the CLI's record of it.")
 _SETTINGS = "The quiz settings could not be read, so nothing was started."
-_TIMED = "Timed quizzes are not supported yet, so nothing was started."
+_TIMER = ("The attempt is open, but its time limit could not be read. "
+          "Run attempt start to continue it and read the limit again.")
+_TIME_UP = ("Time is up for this attempt, so nothing was sent: Brightspace submits it by itself. "
+            "Run attempt verify to check the submission.")
+_AWAITING_SUBMIT = "Time is up, and Brightspace has not submitted this attempt yet. Run attempt verify again in a minute."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
             'a list of option ids, or a list of blank texts, e.g. {"101": "o2"}.')
 _IMAGE_FAILED = "The image could not be downloaded."
@@ -107,16 +117,19 @@ def parse_answers(text: str) -> dict[int, object]:
 
 
 def quiz_info(quiz: object) -> dict[str, Any]:
-    """The REST quiz settings an agent needs; refuses quizzes the CLI cannot take yet.
+    """The REST quiz settings an agent needs; refuses settings it cannot read.
 
-    ``attempts_allowed`` is ``None`` when attempts are unlimited.
+    ``attempts_allowed`` is ``None`` when attempts are unlimited, and
+    ``time_limit_minutes`` when the quiz's time is not enforced.
     """
     if (not isinstance(quiz, dict) or not isinstance(quiz.get("SubmissionTimeLimit"), dict)
             or type(quiz["SubmissionTimeLimit"].get("IsEnforced")) is not bool
             or type(quiz.get("PreventMovingBackwards")) is not bool):
         raise LearnerWorkflowError(_SETTINGS)
-    if quiz["SubmissionTimeLimit"]["IsEnforced"]:
-        raise LearnerWorkflowError(_TIMED)
+    timed = quiz["SubmissionTimeLimit"]["IsEnforced"]
+    minutes = quiz["SubmissionTimeLimit"].get("TimeLimitValue") if timed else None
+    if timed and (type(minutes) is not int or minutes < 1):
+        raise LearnerWorkflowError(_SETTINGS)
     attempts = quiz.get("AttemptsAllowed")
     if not isinstance(attempts, dict) or type(attempts.get("IsUnlimited")) is not bool:
         raise LearnerWorkflowError(_SETTINGS)
@@ -125,7 +138,30 @@ def quiz_info(quiz: object) -> dict[str, Any]:
         raise LearnerWorkflowError(_SETTINGS)
     name = quiz.get("Name")
     return {"name": name if isinstance(name, str) else None, "forward_only": quiz["PreventMovingBackwards"],
-            "attempts_allowed": allowed}
+            "attempts_allowed": allowed, "time_limit_minutes": minutes}
+
+
+def _valid_timer(timer: object) -> bool:
+    return timer is None or (
+        isinstance(timer, dict) and set(timer) == {"limit_seconds", "ends_at", "auto_submit"}
+        and type(timer["limit_seconds"]) is int and timer["limit_seconds"] > 0
+        and type(timer["ends_at"]) in (int, float) and math.isfinite(timer["ends_at"])
+        and type(timer["auto_submit"]) is bool)
+
+
+def _clock(timer: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The time left on the local clock, or ``None`` for an attempt whose time is not enforced."""
+    if timer is None:
+        return None
+    ends_at = datetime.fromtimestamp(timer["ends_at"], timezone.utc)
+    return {"limit_seconds": timer["limit_seconds"], "seconds_left": max(0, math.floor(timer["ends_at"] - time.time())),
+            "ends_at": ends_at.isoformat(timespec="seconds").replace("+00:00", "Z"), "auto_submit": timer["auto_submit"]}
+
+
+def _time_up(state: Mapping[str, Any]) -> bool:
+    """Whether Brightspace now submits the attempt itself: its time ran out with auto-submit on."""
+    timer = state.get("timer")
+    return timer is not None and timer["auto_submit"] and time.time() >= timer["ends_at"]
 
 
 def _write_image(path: Path, data: bytes) -> None:
@@ -210,7 +246,8 @@ class LearnerWorkflow:
                 or type(state.get("actor_id")) is not int or state["actor_id"] <= 0
                 or state.get("status") not in ("active", "uncertain", "submitted")
                 or state.get("operation") not in (None, "start", "answer", "next", "submit")
-                or (state["status"] != "uncertain") != (state["operation"] is None)):
+                or (state["status"] != "uncertain") != (state["operation"] is None)
+                or not _valid_timer(state.get("timer"))):  # cursors from before timed quizzes have none
             raise LearnerWorkflowError(_INVALID)
         # Only an unresolved start may lack its attempt and page.
         if state["operation"] != "start" or state.get("attempt_id") is not None or state.get("page") is not None:
@@ -245,6 +282,8 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_REOPEN)
             if not unverified_save:
                 raise LearnerWorkflowError(_SAVE_UNVERIFIED)
+        if _time_up(state):
+            raise LearnerWorkflowError(_TIME_UP)
         return state
 
     def _identity(self, state: dict[str, Any]) -> dict[str, int]:
@@ -284,7 +323,8 @@ class LearnerWorkflow:
             state = self._load()
         if state is None:
             return {"mode": "learner", "status": "absent", "course_id": self.course_id, "quiz_id": self.quiz_id}
-        return {key: state.get(key) for key in ("mode", "status", "course_id", "quiz_id", "attempt_id", "page", "operation")}
+        return {**{key: state.get(key) for key in ("mode", "status", "course_id", "quiz_id", "attempt_id", "page", "operation")},
+                "timer": _clock(state.get("timer"))}
 
     def start(self) -> dict[str, Any]:
         """Continue the attempt in progress, else start a new one, on the page Brightspace holds."""
@@ -297,20 +337,23 @@ class LearnerWorkflow:
             own = previous if previous is not None and previous["actor_id"] == actor else None
             if previous is not None and own is None and previous["status"] == "uncertain":
                 raise LearnerWorkflowError(_OTHER_UNSETTLED)
-            info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
-            summary = read_learner_summary(client, course_id=self.course_id, quiz_id=self.quiz_id)
             # Until the CLI's attempt is verified submitted only that attempt
             # may be continued: if it ended elsewhere, a new start would use
             # another graded attempt.
             kept = own if own is not None and own["status"] != "submitted" and own["attempt_id"] is not None else None
+            if kept is not None and _time_up(kept):
+                raise LearnerWorkflowError(_TIME_UP)
+            info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
+            summary = read_learner_summary(client, course_id=self.course_id, quiz_id=self.quiz_id)
             if kept is not None and not summary.can_continue:
                 raise LearnerWorkflowError(_NOT_CONTINUABLE)
-            # The intent keeps the CLI's attempt, so a start that fails midway
-            # still names it for the next start and for verify.
+            # The intent keeps the CLI's attempt and its limit, so a start that
+            # fails midway still names them for the next start and for verify.
             state: dict[str, Any] = {
                 "version": 1, "origin": self.connection.origin, "mode": "learner", "actor_id": actor,
                 "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "uncertain", "operation": "start",
                 "attempt_id": None if kept is None else kept["attempt_id"], "page": None if kept is None else kept["page"],
+                "timer": None if kept is None else kept.get("timer"),
             }
             self._save(state)  # durable intent before the start request
 
@@ -333,9 +376,20 @@ class LearnerWorkflow:
                 raise
             if kept is not None and page.attempt_id != kept["attempt_id"]:
                 raise LearnerWorkflowError(_OTHER_ATTEMPT)
-            state.update(status="active", operation=None, attempt_id=page.attempt_id, page=page.page)
+            # Read for every attempt, as special access can time one of an untimed quiz.
+            try:
+                timer = read_learner_timer(client, course_id=self.course_id, quiz_id=self.quiz_id,
+                                           attempt_id=page.attempt_id)
+            except SessionExpiredError:
+                raise
+            except Exception:  # the cursor stays uncertain, naming the attempt
+                raise LearnerWorkflowError(_TIMER) from None
+            state.update(status="active", operation=None, attempt_id=page.attempt_id, page=page.page,
+                         timer=None if timer is None else {"limit_seconds": timer.limit_seconds,
+                                                           "ends_at": round(timer.ends_at, 3),
+                                                           "auto_submit": timer.auto_submit})
             self._save(state)
-            return {**page.public_data(), "resumed": summary.can_continue, "quiz": info}
+            return {**page.public_data(), "resumed": summary.can_continue, "quiz": info, "timer": _clock(state["timer"])}
 
     def forget(self) -> dict[str, Any]:
         """Drop the CLI's record of this quiz's attempt. Brightspace is neither contacted nor changed."""
@@ -357,7 +411,7 @@ class LearnerWorkflow:
             if state["status"] == "uncertain":
                 state.update(status="active", operation=None)
                 self._save(state)
-            return current.public_data()
+            return {**current.public_data(), "timer": _clock(state.get("timer"))}
 
     def answer(self, answers: Mapping[int, object], *, advance: bool = False,
                allow_unanswered: bool = False) -> dict[str, Any]:
@@ -377,10 +431,10 @@ class LearnerWorkflow:
                     raise PreviewRefusedError(REFUSE_LEARNER_UNANSWERED)
             saved = self._write(state, "answer", lambda: save_learner_answers(
                 client, **identity, answers=answers, current=current))
-            if not advance:
-                return saved.public_data()
-            return self._write(state, "next", lambda: advance_learner(
-                client, **identity, allow_unanswered=allow_unanswered, current=saved)).public_data()
+            if advance:
+                saved = self._write(state, "next", lambda: advance_learner(
+                    client, **identity, allow_unanswered=allow_unanswered, current=saved))
+            return {**saved.public_data(), "timer": _clock(state.get("timer"))}
 
     def next(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
         """Move to the next page, keeping this page's saved answers."""
@@ -388,8 +442,9 @@ class LearnerWorkflow:
             state = self._open(client)
             identity = self._identity(state)
             current = read_learner_page(client, **identity)
-            return self._write(state, "next", lambda: advance_learner(
-                client, **identity, allow_unanswered=allow_unanswered, current=current)).public_data()
+            moved = self._write(state, "next", lambda: advance_learner(
+                client, **identity, allow_unanswered=allow_unanswered, current=current))
+            return {**moved.public_data(), "timer": _clock(state.get("timer"))}
 
     def submit(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
         """Submit the attempt from its last page, once, and report the verified receipt.
@@ -408,7 +463,11 @@ class LearnerWorkflow:
             return receipt
 
     def verify(self) -> dict[str, Any]:
-        """Read-only: confirm the cursor's attempt is submitted, from its receipt and submissions row."""
+        """Read-only: confirm the cursor's attempt is submitted, from its receipt and submissions row.
+
+        An attempt still in progress after its time ran out is one
+        Brightspace has yet to submit itself.
+        """
         with self._locked(), self._client() as client:
             state = self._load()
             if state is None:
@@ -417,8 +476,13 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_REOPEN)
             if self._actor(client) != state["actor_id"]:
                 raise LearnerWorkflowError(_OTHER_ACCOUNT)
-            receipt = verify_learner_submission(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                                attempt_id=state["attempt_id"])
+            try:
+                receipt = verify_learner_submission(client, course_id=self.course_id, quiz_id=self.quiz_id,
+                                                    attempt_id=state["attempt_id"])
+            except LearnerNotSubmittedError:
+                if _time_up(state):  # Brightspace submits it shortly; starting would only reopen it
+                    raise LearnerWorkflowError(_AWAITING_SUBMIT) from None
+                raise
             if state["status"] != "submitted":
                 state.update(status="submitted", operation=None)
                 self._save(state)
@@ -440,4 +504,4 @@ class LearnerWorkflow:
                       for question in questions for image in question["images"]]
             return {"mode": "learner", "course_id": self.course_id, "quiz_id": self.quiz_id,
                     "attempt_id": current.attempt_id, "page": current.page, "directory": str(directory),
-                    "images": images}
+                    "images": images, "timer": _clock(state.get("timer"))}

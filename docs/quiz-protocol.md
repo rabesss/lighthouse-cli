@@ -265,12 +265,19 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
   about 38 seconds after, both with no client request. The varying delay
   suggests a periodic server job, and whether grace or late settings change
   it is unknown, so do not rely on that timing: submit before the limit.
+- The CLI reads a learner attempt's timer frame once, when `start` opens or
+  continues it: `quiz_attempt_top_auto.d2l?ou=<ou>&isprv=&impcf=&qi=<qi>&ai=<ai>&dnb=0&cfql=0&fromQB=0&cft=&d2l_body_type=3`.
+  An untimed attempt's frame declares the same variables, with
+  `enforceTimeLimit=false` (and `timeLimit=7200` in the sandbox), so the
+  frame decides, not the quiz's settings: special access can time one
+  learner's attempt. The deadline is moved onto the local clock by the
+  response's `Date` header and kept in the cursor, so later commands count
+  down without a request. Grace and late limits are not counted.
 
 ## Not yet implemented
 
 | Area | Missing workflows / validation |
 | --- | --- |
-| Learner quizzes | Timed quizzes |
 | Quiz authoring | Question creation/import/edit, sections/pools, settings updates, special access, grading |
 | Assignments | Learner text submission, group submission, instructor feedback/rubric grading |
 | Discussions | Create/reply/edit, attachments, moderation |
