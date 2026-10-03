@@ -11,6 +11,7 @@ import pytest
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError
 from lighthouse_cli.quiz_attempt_page import (
     MAX_PAGE_BYTES,
+    LearnerPage,
     PreviewPageError,
     PreviewRefusedError,
     _button_present,
@@ -261,7 +262,7 @@ def blank(number: int, blank_id: str, value: str = "") -> str:
     return f'<input type="text" name="tAtom{200 + number}_300_{blank_id}" title="Answer" value="{escape(value, quote=True)}">'
 
 
-def learner(questions: str, *, extra: str = LEARNER_BUTTONS, isprv: str = ""):
+def learner(questions: str, *, extra: str = LEARNER_BUTTONS, isprv: str = "") -> LearnerPage:
     return parse_learner_page(html(questions, extra=extra, isprv=isprv), course_id=10, quiz_id=20, attempt_id=30, page=1)
 
 
@@ -274,7 +275,7 @@ def test_learner_multiple_choice_ids_are_opaque_strings():
         "kind": "single-choice", "supported": True,
         "choices": [{"choice_id": "o4330", "text": "Answer o4330"}, {"choice_id": "o89", "text": "Answer o89"},
                     {"choice_id": "o7", "text": "Answer o7"}],
-        "selected_choice_ids": ["o89"], "blanks": [], "saved": True,
+        "selected_choice_ids": ["o89"], "blanks": [], "images": [], "saved": True,
     }]
     assert not page.has_next_control and not page.has_previous_control
     assert "SESSION_SENTINEL" not in repr(page)
@@ -408,6 +409,13 @@ def test_questions_sharing_one_answer_group_are_rejected():
     first = learner_question(1, radios(1, ["o1", "o2"], checked=("o1",)), saved="True")
     with pytest.raises(PreviewPageError):
         learner(first + shared(learner_question(2, radios(2, ["o3", "o4"], checked=("o3",)), saved="True")))
+    # With its own question ids, only the radio name joins the second
+    # question to the first one's group, so it is not answerable.
+    second = learner_question(2, radios(2, ["o3", "o4"])).replace('name="tAtom202_300"', 'name="tAtom201_300"')
+    page = learner(first + second)
+    assert [q["kind"] for q in page.questions] == ["single-choice", "unsupported"]
+    with pytest.raises(PreviewRefusedError):
+        page.intended({101: "o2"})
 
 
 @pytest.mark.parametrize("isprv", ["1", "0", None])
@@ -430,11 +438,9 @@ def test_learner_page_requires_an_empty_isprv(isprv):
     radios(1, ["o1", "1.5"]),
     radios(1, ["o1", "o1"]),
     radios(1, ["o1", "o2"], checked=("o1", "o2")),
-    radios(1, ["o1", "o2"]).replace('name="tAtom201_300"', 'name="tAtom999_300"', 1),
     checkboxes(1, ["o1", "o2"]).replace('value="1"', 'value="on"', 1),
-    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300"'),
     checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300_o1_x"'),
-    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom202_300_o1"'),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300_"'),
     segment("Two is") + blank(1, "60 1"),
     segment("Two is") + blank(1, "601") + blank(1, "601"),
     # Two labels for one control id would show one option's text twice.
@@ -465,6 +471,18 @@ def test_learner_unsupported_question_without_a_prompt_keeps_the_page():
     mixed = learner_question(1, radios(1, ["o1", "o2"]) + checkboxes(1, ["o3"]), prompt="")
     page = learner(mixed + learner_question(2, radios(2, ["o4", "o5"])))
     assert [(q["kind"], q["text"]) for q in page.questions] == [("unsupported", ""), ("single-choice", "Pick the right answer.")]
+
+
+@pytest.mark.parametrize("options", [
+    radios(1, ["o1", "o2"]).replace('name="tAtom201_300"', 'name="tAtom999_300"', 1),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom201_300"'),
+    checkboxes(1, ["o1", "o2"]).replace('name="tAtom201_300_o1"', 'name="tAtom202_300_o1"'),
+])
+def test_learner_control_named_for_another_group_keeps_the_page(options):
+    # One odd control makes its question unanswerable, not the whole page unreadable.
+    page = learner(learner_question(1, options) + learner_question(2, radios(2, ["o4", "o5"])))
+    assert [(q["kind"], q["supported"]) for q in page.questions] == [("unsupported", False), ("single-choice", True)]
+    assert page.questions[0]["choices"] == [] and page.questions[0]["selected_choice_ids"] == []
 
 
 def test_learner_text_box_not_named_as_a_blank_keeps_the_page():

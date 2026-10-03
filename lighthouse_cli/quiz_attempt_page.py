@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 
 from bs4 import BeautifulSoup, Tag
 
+from .quiz_math import mathml_to_latex
 from .request_protection import FormProtection, form_protection_from_homepage
 
 MAX_PAGE_BYTES = 2 * 1024 * 1024
@@ -89,6 +90,12 @@ def _inside_options(node: Tag, container: Tag) -> bool:
     return False
 
 
+def _drop_templates(root: Tag) -> None:
+    """Remove ``<template>`` content, which browsers never render or submit."""
+    while (template := root.find("template")) is not None:
+        template.decompose()
+
+
 def _expand_blocks(copy: BeautifulSoup) -> BeautifulSoup:
     # Brightspace puts question content in a custom element's html attribute;
     # textContent alone would silently produce an empty prompt.
@@ -96,6 +103,7 @@ def _expand_blocks(copy: BeautifulSoup) -> BeautifulSoup:
         content = block.get("html")
         if isinstance(content, str):
             block.replace_with(BeautifulSoup(content, "html.parser"))
+    _drop_templates(copy)
     return copy
 
 
@@ -103,33 +111,101 @@ def _expanded(node: Tag) -> BeautifulSoup:
     return _expand_blocks(BeautifulSoup(str(node), "html.parser"))
 
 
+_INPUT_TYPES = {"hidden", "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time",
+                "datetime-local", "number", "range", "color", "checkbox", "radio", "file", "submit", "image",
+                "reset", "button"}
+
+
 def _input_type(control: Tag) -> str:
-    """HTML input types are case-insensitive, and a missing type means text."""
-    return str(control.get("type", "text")).lower()
+    """HTML input types are case-insensitive; a missing, empty or unknown type means text."""
+    value = str(control.get("type", "")).lower()
+    return value if value in _INPUT_TYPES else "text"
 
 
-def _text(node: Tag, *, blanks: bool = False) -> str:
+@dataclass
+class _Media:
+    """The images and equations one question's text shows, in reading order."""
+
+    images: list[dict[str, Any]] = field(default_factory=list)
+    equations: int = 0
+    unsupported: bool = False
+
+
+# A root-relative or web address; others (data:, page-relative) are not fetched,
+# nor are paths with dot segments, which a browser would resolve first.
+_IMAGE_SOURCE = re.compile(r"/(?!/)[!-~]{0,2047}|https?://[!-~]{1,2040}", re.IGNORECASE)
+_DOT_SEGMENT = re.compile(r"/(?:\.|%2e){1,2}(?:/|$)", re.IGNORECASE)
+# Soft hyphens, zero-width spaces and joiners, word joiners and byte order
+# marks are invisible and meaningless here; other format characters, such as
+# bidirectional controls, still void the text.
+_INVISIBLE_MARKS = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"))
+# Elements that start a new line, so their text is not run into a neighbour's.
+_BLOCK_TAGS = ["address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "details", "dir", "div",
+               "dl", "dt", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
+               "label", "li", "main", "menu", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody", "td",
+               "tfoot", "th", "thead", "tr", "ul"]
+
+
+def _clean(text: str, limit: int = 16384) -> str | None:
+    text = " ".join(text.translate(_INVISIBLE_MARKS).split())
+    return text if len(text) <= limit and text.isprintable() else None
+
+
+def _render_media(copy: BeautifulSoup, media: _Media) -> None:
+    """Write equations as LaTeX, images as numbered markers and HTML scripts as ^{} and _{}."""
+    while (math := copy.find("math")) is not None:
+        try:
+            latex = mathml_to_latex(math)
+            media.equations += 1
+        except ValueError:
+            latex = ""
+            media.unsupported = True
+        math.replace_with(latex)
+    for image in copy.find_all("img"):
+        source = image.get("src")
+        if not (isinstance(source, str) and _IMAGE_SOURCE.fullmatch(source) and "\\" not in source
+                and not _DOT_SEGMENT.search(re.split(r"[?#]", source, maxsplit=1)[0])):
+            source = None
+        alt = _clean(str(image.get("alt", "")), 1000)
+        number = len(media.images) + 1
+        media.images.append({"number": number, "src": source, "alt": alt or ""})
+        media.unsupported = media.unsupported or source is None or alt is None
+        image.replace_with(f"[image {number}: {alt}]" if alt else f"[image {number}]")
+    # Innermost first, so x<sup>y<sup>2</sup></sup> keeps its nesting.
+    for script in reversed(copy.find_all(["sup", "sub"])):
+        script.replace_with(f"{'^' if script.name == 'sup' else '_'}{{{script.get_text()}}}")
+
+
+def _text(node: Tag, *, blanks: bool = False, media: _Media | None = None) -> str:
+    media = media if media is not None else _Media()
     copy = BeautifulSoup(str(node), "html.parser")
-    removed = "script, style, button, input, fieldset, legend"
+    removed = "script, style, noscript, button, input, fieldset, legend"
     if blanks:
         # A fill-in-the-blank sentence is the options fieldset itself: keep
         # it and mark each blank, numbered in document order. Inputs in the
         # custom blocks are content, so number before expanding them.
-        removed = "script, style, button, input, legend"
+        removed = "script, style, noscript, button, input, legend"
         text_inputs = [control for control in copy.find_all("input") if _input_type(control) == "text"]
         for number, blank in enumerate(text_inputs, 1):
+            # A blank in text that is not read, such as a legend, would lose its marker.
+            media.unsupported = media.unsupported or blank.find_parent(removed.split(", ")) is not None
             blank.replace_with(f" (blank {number}) ")
     _expand_blocks(copy)
     for element in copy.select(removed):
         element.decompose()
+    # Spaced first, so a line break inside a superscript does not join its lines.
+    for element in copy.find_all(_BLOCK_TAGS):
+        element.insert_before(" ")
+        element.insert_after(" ")
+    _render_media(copy, media)
     # Quiz content is authored text the answer depends on, so it is not
     # screened like a label: words such as "password", a JSON snippet, a
     # non-breaking space or a line break must survive. Only whitespace is
-    # compacted; control or format characters still void the text.
-    text = " ".join(copy.get_text(" ", strip=True).split())
-    if len(text) > 16384 or not text.isprintable():
-        return ""
-    return text
+    # compacted; control characters still void the text, and any image or
+    # equation it showed.
+    text = _clean(copy.get_text())
+    media.unsupported = media.unsupported or text is None
+    return text or ""
 
 
 def rpc_script(chunks: Iterable[object]) -> str:
@@ -161,6 +237,7 @@ def hidden_form(body: bytes) -> tuple[Tag, dict[str, str]]:
     if len(forms) != 1:
         raise PreviewPageError()
     form = forms[0]
+    _drop_templates(form)
     hidden: dict[str, str] = {}
     for element in form.select('input[type="hidden"][name]'):
         name = element.get("name")
@@ -328,14 +405,24 @@ def _prompt(container: Tag) -> Tag | None:
     return prompt
 
 
+def _in_disabled_fieldset(control: Tag) -> bool:
+    """Inside a disabled fieldset, but not in its first legend, which HTML keeps enabled."""
+    for fieldset in control.find_parents("fieldset"):
+        if fieldset.has_attr("disabled"):
+            legend = fieldset.find("legend", recursive=False)
+            if legend is None or not any(parent is legend for parent in control.parents):
+                return True
+    return False
+
+
 def _disabled(control: Tag) -> bool:
     return bool(control.has_attr("disabled") or control.get("aria-disabled") == "true" or control.has_attr("inert")
-                or control.find_parent("fieldset", attrs={"disabled": True})
-                or control.find_parent(attrs={"inert": True}))
+                or _in_disabled_fieldset(control) or control.find_parent(attrs={"inert": True}))
 
 
 def _choices(
     container: Tag, controls: list[Tag], group: str, choice_id: Callable[[Tag, str], _ChoiceId],
+    media: _Media | None = None,
 ) -> tuple[list[dict[str, Any]], list[_ChoiceId], bool]:
     """Labelled choices, the checked ids and whether any control is disabled."""
     choices: list[dict[str, Any]] = []
@@ -363,7 +450,7 @@ def _choices(
         label = label if label is not None else control.find_parent("tr")
         if label is None:
             raise PreviewPageError()
-        choices.append({"choice_id": cid, "text": _text(label)})
+        choices.append({"choice_id": cid, "text": _text(label, media=media)})
         if control.has_attr("checked"):
             selected.append(cid)
     return choices, selected, disabled
@@ -375,13 +462,61 @@ def _radio_id(radio: Tag, group: str) -> int:
     return _id(radio.get("value"))
 
 
-_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+_IMPORTANT = re.compile(r"!\s*important$")
+_CSS_WIDE = {"inherit", "initial", "unset", "revert", "revert-layer"}
+_DISPLAY_SINGLE = {"none", "contents", "inline-block", "inline-table", "inline-flex", "inline-grid", "table-row-group",
+                   "table-header-group", "table-footer-group", "table-row", "table-cell", "table-column-group",
+                   "table-column", "table-caption", "ruby-base", "ruby-text", "ruby-base-container",
+                   "ruby-text-container", "-webkit-box", "-webkit-inline-box", *_CSS_WIDE}
+# Words of the multi-keyword syntax, such as "inline flow-root".
+_DISPLAY_WORDS = {"block", "inline", "run-in", "flow", "flow-root", "table", "flex", "grid", "ruby", "list-item", "math"}
+_VISIBILITY = {"visible", "hidden", "collapse", *_CSS_WIDE}
+
+
+def _valid(prop: str, value: str) -> bool:
+    if prop == "display":
+        words = value.split()
+        return value in _DISPLAY_SINGLE or (0 < len(set(words)) == len(words) <= 3 and set(words) <= _DISPLAY_WORDS)
+    return prop != "visibility" or value in _VISIBILITY
+
+
+def _style(tag: Tag) -> dict[str, str]:
+    """A tag's valid inline declarations, by lower-case property, resolved as CSS does.
+
+    A later declaration wins unless an earlier one is ``!important``, and a
+    value the property does not accept is ignored.
+    """
+    declarations: dict[str, tuple[str, bool]] = {}
+    for declaration in _CSS_COMMENT.sub("", str(tag.get("style", ""))).split(";"):
+        prop, _, value = declaration.partition(":")
+        prop, value = prop.strip().lower(), " ".join(value.lower().split())
+        important = _IMPORTANT.search(value) is not None
+        value = _IMPORTANT.sub("", value).strip()
+        if _valid(prop, value) and (important or not declarations.get(prop, ("", False))[1]):
+            declarations[prop] = (value, important)
+    return {prop: value for prop, (value, _) in declarations.items()}
 
 
 def _hidden(node: Tag) -> bool:
-    return any(tag.has_attr("hidden") or "d2l-hidden" in tag.get_attribute_list("class")
-               or _HIDDEN_STYLE.search(str(tag.get("style", ""))) is not None
-               for tag in (node, *node.parents))
+    """Not rendered: ``display:none`` on it or an ancestor, or ``visibility:hidden`` it inherits.
+
+    An element can make itself visible again inside a ``visibility:hidden``
+    ancestor, so the nearest declared visibility decides. Visibility is
+    inherited, so ``inherit``, ``unset`` and ``revert`` leave it to the
+    ancestors, and ``initial`` is ``visible``.
+    """
+    visibility = None
+    for tag in (node, *node.parents):
+        style = _style(tag)
+        if tag.has_attr("hidden") or "d2l-hidden" in tag.get_attribute_list("class") or style.get("display") == "none":
+            return True
+        declared = style.get("visibility")
+        if visibility is None and declared not in {None, "inherit", "unset", "revert", "revert-layer"}:
+            visibility = declared
+    return visibility in {"hidden", "collapse"}
 
 
 def active_buttons(root: Tag, labels: Collection[str]) -> list[str]:
@@ -602,60 +737,104 @@ def _learner_option_id(checkbox: Tag, group: str) -> str:
 
 
 def _blanks(controls: list[Tag], group: str) -> tuple[list[dict[str, Any]], bool]:
-    """Each blank's id, its number in the question text and its current value."""
+    """Each blank's id, number in the question text and current value, and whether any is unusable.
+
+    A saved value too long to be one of the CLI's answers is not shown and
+    makes the question unsupported.
+    """
     blanks: list[dict[str, Any]] = []
     seen: set[str] = set()
-    disabled = False
+    unusable = False
     for number, blank in enumerate(controls, 1):
-        disabled = disabled or _disabled(blank) or blank.has_attr("readonly")
+        unusable = unusable or _disabled(blank) or blank.has_attr("readonly")
         blank_id = _suffix_id(blank, group)
         value = blank.get("value", "")
-        if blank_id in seen or not isinstance(value, str) or len(value) > 10000:
+        if blank_id in seen or not isinstance(value, str):
             raise PreviewPageError()
+        if len(value) > 10000:
+            unusable, value = True, ""
         seen.add(blank_id)
         blanks.append({"blank_id": blank_id, "number": number, "value": value})
-    return blanks, disabled
+    return blanks, unusable
+
+
+def _learner_kind(controls: list[Tag], group: str) -> str | None:
+    """The kind of a question whose controls are all of one known kind and named for its group.
+
+    Other question types may name their controls differently, so a stray
+    name makes the question unsupported instead of aborting the page.
+    """
+    types = {_input_type(control) for control in controls}
+    kind = _LEARNER_KINDS.get(types.pop()) if len(types) == 1 else None
+    names = [str(control.get("name", "")) for control in controls]
+    if kind == "single-choice":
+        return kind if all(name == group for name in names) else None
+    return kind if kind is not None and all(name.startswith(f"{group}_") for name in names) else None
+
+
+def _learner_text(container: Tag, kind: str | None, media: _Media) -> str:
+    """The question text, read before the choices so images are numbered in reading order."""
+    if kind == "fill-blank":
+        return _text(container, blanks=True, media=media)
+    # A known kind needs its prompt; any other question is reported as
+    # unsupported, not allowed to abort the whole page.
+    prompt = _prompt(container)
+    if prompt is None:
+        if kind is not None:
+            raise PreviewPageError()
+        return ""
+    # An image attached to the question is shown above its prompt.
+    attached = [_text(image, media=media) for image in container.select(".d2l-quiz-image-container")]
+    text = _text(prompt, media=media)
+    return " ".join(part for part in [*attached, text] if part) if text else ""
+
+
+def _media_count(expanded: BeautifulSoup) -> tuple[int, int]:
+    """The images and outermost equations a question shows; a noscript fallback is not shown."""
+    images = [image for image in expanded.find_all("img") if image.find_parent("noscript") is None]
+    equations = [m for m in expanded.find_all("math") if m.find_parent(["math", "noscript"]) is None]
+    return len(images), len(equations)
 
 
 def _learner_question(container: Tag, qid: int, ordinal: int, group: str, saved: bool | None) -> dict[str, Any]:
-    """One question of a single known kind; mixed or other controls are unsupported."""
+    """One question of a single known kind; mixed or other controls are unsupported.
+
+    Equations read as LaTeX and images as numbered markers, which ``images``
+    lists in reading order: an attached image, the prompt's, then each choice's.
+    """
     controls = [control for control in container.find_all("input") if _input_type(control) != "hidden"]
-    types = {_input_type(control) for control in controls}
-    kind = _LEARNER_KINDS.get(types.pop()) if len(types) == 1 else None
-    if kind == "fill-blank" and not all(str(control.get("name", "")).startswith(f"{group}_") for control in controls):
-        # Other text-box questions may name their boxes differently.
-        kind = None
+    kind = _learner_kind(controls, group)
     expanded = _expanded(container)
     # Inputs inside custom HTML blocks are content, not form controls.
-    unsupported = (bool(expanded.select("textarea, select, img, math, iframe, audio, video"))
+    # Browsers read <image> as <img>, and a picture can show a source other than its img.
+    unsupported = (bool(expanded.select("textarea, select, iframe, audio, video, svg, object, embed, canvas, "
+                                        "image, picture"))
+                   or bool(expanded.find_all(re.compile(r":math$")))
                    or len([c for c in expanded.find_all("input") if _input_type(c) != "hidden"]) != len(controls))
+    media = _Media()
+    text = _learner_text(container, kind, media)
     choices: list[dict[str, Any]] = []
     selected: list[str] = []
     blanks: list[dict[str, Any]] = []
     disabled = False
     if kind == "single-choice":
-        choices, selected, disabled = _choices(container, controls, group, _learner_radio_id)
+        choices, selected, disabled = _choices(container, controls, group, _learner_radio_id, media)
         if len(selected) > 1:
             raise PreviewPageError()
     elif kind == "multi-select":
-        choices, selected, disabled = _choices(container, controls, group, _learner_option_id)
+        choices, selected, disabled = _choices(container, controls, group, _learner_option_id, media)
     elif kind == "fill-blank":
         blanks, disabled = _blanks(controls, group)
-    if kind == "fill-blank":
-        text = _text(container, blanks=True)
-    else:
-        # A known kind needs its prompt; any other question is reported as
-        # unsupported, not allowed to abort the whole page.
-        prompt = _prompt(container)
-        if prompt is None and kind is not None:
-            raise PreviewPageError()
-        text = _text(prompt) if prompt is not None else ""
+    # Every image and equation must have been read into the text above.
+    unsupported = (unsupported or media.unsupported
+                   or (len(media.images), media.equations) != _media_count(expanded))
     supported = kind is not None and not (
         unsupported or disabled or not text or any(not choice["text"] for choice in choices))
     return {
         "question_id": qid, "number": ordinal, "text": text,
         "kind": kind if supported else "unsupported", "supported": supported,
-        "choices": choices, "selected_choice_ids": selected, "blanks": blanks, "saved": saved,
+        "choices": choices, "selected_choice_ids": selected, "blanks": blanks, "images": media.images,
+        "saved": saved,
     }
 
 
@@ -668,7 +847,8 @@ def parse_learner_page(
     per option and fill-in-the-blank is one text input per blank. Ids are
     strings, as multiple-choice values and option names carry opaque tokens.
     Hidden buttons, such as the always-present "Save All Responses", are not
-    controls. Unrecognized controls and media are reported as unsupported.
+    controls. Equations read as LaTeX and images as numbered markers; other
+    media and unrecognized controls are reported as unsupported.
     """
     form, hidden = _attempt_form(body, "", course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
     questions: list[dict[str, Any]] = []

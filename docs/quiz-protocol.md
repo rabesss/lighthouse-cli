@@ -204,6 +204,39 @@ with one question on each of two pages, forward-only) added:
 Preview has no resume, as each Start creates a new attempt with a fresh
 timer.
 
+## Question media (equations and images)
+
+A learner page in the disposable Brightspace sandbox, with questions from
+the question importer (MathML in the HTML, an image field) showed:
+
+- Prompt and option text is HTML in a `d2l-html-block` element's `html`
+  attribute. Multiple-choice option text is a `div.d2l-htmlblock-untrusted`
+  in the option's table row, with no `<label>`; multi-select options wrap
+  the same block in a `<label>`.
+- Equations are presentation MathML inline in that HTML
+  (`<math xmlns="http://www.w3.org/1998/Math/MathML">` with `msup`, `mfrac`,
+  `msqrt` and so on). Equation editors may add a `<semantics>` element with
+  a LaTeX `<annotation>`.
+- Inline images are `<img src="/content/enforced/<ou>-<code>/<file>">` with
+  the author's `alt`, often empty. An image attached to the question is in a
+  `div.d2l-quiz-image-container` before the prompt, served as
+  `/d2l/common/viewFile.d2lfile/Content/<base64 path>/<file>?ou=<ou>`.
+- Both kinds of image returned `image/png` to a plain GET with the
+  learner's session. `/content/...` is not an API path, so it is requested
+  on the LMS origin, not under the API root.
+
+The parser writes equations as LaTeX (`\( … \)`, display math `\[ … \]`),
+taking the author's LaTeX annotation when there is one, and images as
+`[image N]` or `[image N: alt]`. Each question's `images` lists `number`,
+`src` and `alt` in reading order: the attached image, the prompt's, then
+each choice's. A question is unsupported when an equation has no clear
+LaTeX form (unknown elements, stray text, prefixed `m:math`), an image
+source is not a root-relative or web address (`data:`, page-relative), an
+image or equation sits outside the prompt and choices, or the question
+has other media (SVG, audio, video, objects). `read_quiz_image` downloads
+a `src` only from the LMS itself (root-relative, or `https` on the same
+host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
+
 ## Timed quizzes (timed previews and learner attempts)
 
 - The timer frame renders the limit as script variables: `timeStartedTicks`
@@ -233,7 +266,7 @@ timer.
 
 | Area | Missing workflows / validation |
 | --- | --- |
-| Learner quizzes | Commands over the attempt transport (start, resume, save all, Next, submit and receipt check exist), image and equation questions, timers |
+| Learner quizzes | Commands over the attempt transport (start, resume, save all, Next, submit and receipt check exist), timers |
 | Quiz authoring | Question creation/import/edit, sections/pools, settings updates, special access, grading |
 | Assignments | Learner text submission, group submission, instructor feedback/rubric grading |
 | Discussions | Create/reply/edit, attachments, moderation |
