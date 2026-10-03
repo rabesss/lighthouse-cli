@@ -97,7 +97,7 @@ layers = [
     "lighthouse_cli.api | lighthouse_cli.ms_auth | lighthouse_cli.session_import",
     "lighthouse_cli.config",
     "lighthouse_cli.credential_store | lighthouse_cli.manifest | lighthouse_cli.ms_mfa | lighthouse_cli.quiz_attempt_page",
-    "lighthouse_cli.connection | lighthouse_cli.display | lighthouse_cli.ms_errors | lighthouse_cli.ms_parse | lighthouse_cli.ms_session | lighthouse_cli.quiz_rules | lighthouse_cli.request_protection | lighthouse_cli.utils",
+    "lighthouse_cli.connection | lighthouse_cli.display | lighthouse_cli.ms_errors | lighthouse_cli.ms_parse | lighthouse_cli.ms_session | lighthouse_cli.quiz_math | lighthouse_cli.quiz_rules | lighthouse_cli.request_protection | lighthouse_cli.utils",
 ]
 
 [[tool.importlinter.contracts]]

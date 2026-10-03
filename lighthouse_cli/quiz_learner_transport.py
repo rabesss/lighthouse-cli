@@ -56,8 +56,13 @@ REFUSE_START_BROWSER = "This quiz needs a browser step (such as LockDown Browser
 REFUSE_START_ROLE = "Brightspace does not let an impersonated role take a quiz."
 REFUSE_START_PROTECTION = "Quiz form protection could not be verified. Nothing was started."
 REFUSE_PAGE_PROTECTION = "Form protection could not be read from the quiz page. Nothing was sent."
+REFUSE_IMAGE_SOURCE = "This image is not stored on Brightspace, so the CLI does not download it."
 
 _SUMMARY_FLAGS = ("isImpersonatingRole", "canTakeQuiz", "startQuiz", "continueQuiz", "hasPass")
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# Raster formats an agent can view, by their leading bytes.
+_IMAGE_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
+                     (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
 
 
 def _identity(*values: int) -> None:
@@ -283,6 +288,39 @@ def read_learner_page(
     body, _ = client.get_raw(learner_page_path(course_id, quiz_id, attempt_id, page), max_bytes=MAX_PAGE_BYTES,
                              _replay_safe=False, headers={"Cache-Control": "no-cache"})
     return parse_learner_page(body, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page)
+
+
+def read_quiz_image(client: LighthouseClient, src: str) -> tuple[bytes, str]:
+    """Download one question image (an ``images`` entry's ``src``) and its media type.
+
+    Only images on the LMS itself are fetched, so the session never goes to
+    another site. The bytes must be PNG, JPEG, GIF or WebP whatever the
+    server's content type says.
+    """
+    if not isinstance(src, str) or not src or len(src) > 2048 or "\\" in src or not src.isprintable():
+        raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
+    if src.startswith("/") and not src.startswith("//"):
+        url = client.base_url + src
+    else:
+        try:
+            parsed = urlparse(src)
+            same_site = parsed.scheme.lower() == "https" and parsed.hostname == urlparse(client.base_url).hostname
+        except ValueError:
+            same_site = False
+        if not same_site:
+            raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
+        url = src
+    body, headers = client.get_raw(url, max_bytes=MAX_IMAGE_BYTES)
+    content_type = next((str(value) for key, value in headers.items() if key.lower() == "content-type"), "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if not (media_type.startswith("image/") or media_type == "application/octet-stream"):
+        raise NetworkError("The server did not return an image.")
+    if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
+        return body, "image/webp"
+    for signature, sniffed in _IMAGE_SIGNATURES:
+        if body.startswith(signature):
+            return body, sniffed
+    raise NetworkError("The image is not PNG, JPEG, GIF or WebP.")
 
 
 def current_learner_page(
