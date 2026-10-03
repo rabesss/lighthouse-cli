@@ -325,6 +325,9 @@ def test_learner_hidden_buttons_are_not_controls():
     styled = '<div style="color: red; DISPLAY: none"><button type="button">Next Page</button></div><button type="button" style="visibility:hidden">Previous Page</button>'
     page = learner(learner_question(1, radios(1, ["o1", "o2"])), extra=LEARNER_BUTTONS + styled)
     assert not page.has_next_control and not page.has_previous_control
+    # An unclosed comment does not cancel the declaration before it.
+    unclosed = '<button type="button" style="display:none /* x">Next Page</button>'
+    assert not learner(learner_question(1, radios(1, ["o1", "o2"])), extra=LEARNER_BUTTONS + unclosed).has_next_control
     shown = learner(learner_question(1, radios(1, ["o1", "o2"])), extra=LEARNER_BUTTONS + '<button type="button">Next Page</button>')
     assert shown.has_next_control
 

@@ -8,11 +8,12 @@ reported as unknown and never retried here: the caller re-reads the server.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs, urldefrag, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urldefrag, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -57,6 +58,11 @@ REFUSE_START_ROLE = "Brightspace does not let an impersonated role take a quiz."
 REFUSE_START_PROTECTION = "Quiz form protection could not be verified. Nothing was started."
 REFUSE_PAGE_PROTECTION = "Form protection could not be read from the quiz page. Nothing was sent."
 REFUSE_IMAGE_SOURCE = "This image is not stored on Brightspace, so the CLI does not download it."
+REFUSE_IMAGE_ROUTE = "This image address is a Brightspace page, not a file, so the CLI does not request it."
+# Pages a request can change: the quiz pages themselves (one past the last
+# page breaks the attempt) and signing out. Legacy ``.d2l`` pages anywhere
+# are refused too. Paths are case-insensitive.
+_ACTION_ROUTES = ("/d2l/lms/quizzing/", "/d2l/logout")
 
 _SUMMARY_FLAGS = ("isImpersonatingRole", "canTakeQuiz", "startQuiz", "continueQuiz", "hasPass")
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -217,7 +223,7 @@ def _follow_start(client: LighthouseClient, location: str, course_id: int, quiz_
 
 def start_learner(
     client: LighthouseClient, *, course_id: int, quiz_id: int, continue_only: bool = False,
-    on_identity: Callable[[int, int], None] | None = None,
+    on_identity: Callable[[int, int], None] | None = None, summary: LearnerSummary | None = None,
 ) -> LearnerPage:
     """Continue the attempt in progress, else start a new one (once).
 
@@ -225,12 +231,16 @@ def start_learner(
     confirm it first; ``continue_only`` refuses unless one is in progress.
     ``on_identity`` receives the attempt id and page before the readback,
     as for previews. A start whose outcome is unclear can be resolved from
-    the summary, which then offers to continue that attempt.
+    the summary, which then offers to continue that attempt. A ``summary``
+    just read saves reading it again.
     """
     if type(continue_only) is not bool:
         raise ValueError("Invalid quiz start settings.")
     summary_path = _summary_path(course_id, quiz_id)
-    summary = read_learner_summary(client, course_id=course_id, quiz_id=quiz_id)
+    if summary is None:
+        summary = read_learner_summary(client, course_id=course_id, quiz_id=quiz_id)
+    elif (summary.course_id, summary.quiz_id) != (course_id, quiz_id):
+        raise ValueError("Invalid quiz start settings.")
     fields, resume = _start_fields(summary, continue_only=continue_only)
     post_url = client.canonical_url(summary_path + "&" + urlencode({"inProgress": "true" if resume else "false"}))
     response = None
@@ -308,8 +318,12 @@ def read_quiz_image(client: LighthouseClient, src: str) -> tuple[bytes, str]:
         raise PreviewRefusedError(REFUSE_IMAGE_SOURCE) from None
     if not (same_site or (not parsed.scheme and not parsed.netloc and src.startswith("/"))):
         raise PreviewRefusedError(REFUSE_IMAGE_SOURCE)
+    path = "/" + posixpath.normpath(unquote(parsed.path)).lstrip("/").casefold() + "/"
+    if path.startswith(_ACTION_ROUTES) or any(segment.endswith(".d2l") for segment in path.split("/")):
+        raise PreviewRefusedError(REFUSE_IMAGE_ROUTE)
     url = client.base_url + parsed._replace(scheme="", netloc="").geturl()
-    body, headers = client.get_raw(url, max_bytes=MAX_IMAGE_BYTES)
+    # Sent once: if the address is a page after all, it is not repeated.
+    body, headers = client.get_raw(url, max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
     content_type = next((str(value) for key, value in headers.items() if key.lower() == "content-type"), "")
     media_type = content_type.split(";", 1)[0].strip().lower()
     if not (media_type.startswith("image/") or media_type == "application/octet-stream"):

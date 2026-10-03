@@ -462,7 +462,8 @@ def _radio_id(radio: Tag, group: str) -> int:
     return _id(radio.get("value"))
 
 
-_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# An unclosed comment runs to the end of the style, as in a browser.
+_CSS_COMMENT = re.compile(r"/\*.*?(?:\*/|\Z)", re.DOTALL)
 
 
 _IMPORTANT = re.compile(r"!\s*important$")
@@ -620,9 +621,10 @@ class LearnerPage:
             values[qid] = _answer_value(question, answer)
         return values
 
-    def unanswered(self) -> list[int]:
-        """Questions with no answer, or with an empty blank."""
-        return [q["question_id"] for q in self.questions if not (value := _learner_value(q)) or not all(value)]
+    def unanswered(self, values: Mapping[int, tuple[str, ...]] | None = None) -> list[int]:
+        """Questions with no answer, or with an empty blank, as read or as in ``values``."""
+        current = {q["question_id"]: _learner_value(q) for q in self.questions} if values is None else values
+        return [qid for qid, value in current.items() if not value or not all(value)]
 
     def confirms(self, values: Mapping[int, tuple[str, ...]], answered: Iterable[int]) -> bool:
         """A 200 response is insufficient: every value must read back as sent.

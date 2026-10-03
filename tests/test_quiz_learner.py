@@ -49,6 +49,7 @@ from lighthouse_cli.quiz_learner_transport import (
     LearnerStartUnknownError,
     advance_learner,
     parse_learner_summary,
+    read_learner_summary,
     save_learner_answers,
     start_learner,
 )
@@ -366,6 +367,18 @@ def test_continue_reopens_the_attempt_in_progress():
     page = start_learner(client, course_id=10, quiz_id=20, continue_only=True)
     assert page.attempt_id == 30
     assert client._request.call_args.args[1].endswith("&inProgress=true")
+
+
+def test_a_summary_just_read_is_not_requested_again():
+    client = start_client(summary())
+    read = read_learner_summary(client, course_id=10, quiz_id=20)
+    page = start_learner(client, course_id=10, quiz_id=20, summary=read)
+    assert page.attempt_id == 30
+    assert client._request.call_count == 1 and client.get_raw.call_count == 5
+    other = start_client(summary())
+    with pytest.raises(ValueError, match="Invalid quiz start settings"):
+        start_learner(other, course_id=10, quiz_id=21, summary=read_learner_summary(other, course_id=10, quiz_id=20))
+    other._request.assert_not_called()
 
 
 @pytest.mark.parametrize("page, kwargs, message", [

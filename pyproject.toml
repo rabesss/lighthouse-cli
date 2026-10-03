@@ -90,8 +90,8 @@ type = "layers"
 layers = [
     "lighthouse_cli.cli",
     "lighthouse_cli.assessment_commands",
-    "lighthouse_cli.quiz_preview_commands",
-    "lighthouse_cli.commands | lighthouse_cli.quiz_preview_session",
+    "lighthouse_cli.quiz_learner_commands | lighthouse_cli.quiz_preview_commands",
+    "lighthouse_cli.commands | lighthouse_cli.quiz_learner_session | lighthouse_cli.quiz_preview_session",
     "lighthouse_cli.course_read_commands | lighthouse_cli.quiz_learner_finish | lighthouse_cli.quiz_preview_finish | lighthouse_cli.show | lighthouse_cli.sync_engine",
     "lighthouse_cli.assessment_api | lighthouse_cli.assignments | lighthouse_cli.auth | lighthouse_cli.course_config | lighthouse_cli.quiz_learner_transport | lighthouse_cli.quiz_preview_transport | lighthouse_cli.submit",
     "lighthouse_cli.api | lighthouse_cli.ms_auth | lighthouse_cli.session_import",
@@ -118,6 +118,7 @@ forbidden_modules = [
     "lighthouse_cli.commands",
     "lighthouse_cli.assessment_commands",
     "lighthouse_cli.course_read_commands",
+    "lighthouse_cli.quiz_learner_commands",
     "lighthouse_cli.quiz_preview_commands",
     "lighthouse_cli.auth",
     "lighthouse_cli.cli",
