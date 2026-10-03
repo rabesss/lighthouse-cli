@@ -60,6 +60,28 @@ def test_declarative_form_bootstrap_is_parsed_without_executing_code():
     assert len({protection.next_hit_code() for _ in range(100)}) == 100
 
 
+def xsrf_init(seed: object) -> bytes:
+    record = json.dumps({"_type": "func", "N": "D2L.LP.Web.Authentication.Xsrf.Init", "P": ["d2l_referrer", "SYNTHETIC_TOKEN", seed]})
+    return ('<script>const graph={"1":'+json.dumps(record)+'};</script>').encode()
+
+
+@pytest.mark.parametrize("seed", [1234567890, -1234567890, 0, 2**53 - 1, -(2**53) + 1])
+def test_hit_codes_start_with_the_seed_as_written(seed):
+    # Some accounts get a negative seed; the browser's hit code then starts
+    # with the minus sign, so the seed string is used verbatim.
+    protection = form_protection_from_homepage(xsrf_init(seed))
+    assert protection.hit_code_seed == str(seed)
+    assert protection.next_hit_code().startswith(str(seed))
+
+
+# The browser reads the seed as a double: outside the safe-integer range
+# its hit codes could start with a different, rounded number.
+@pytest.mark.parametrize("seed", [2**53, -(2**53), -9007199254740993, 10**16, True, 1.5, "1234567890"])
+def test_out_of_range_or_non_integer_seed_is_rejected(seed):
+    with pytest.raises(ValueError, match="Could not initialize form protection"):
+        form_protection_from_homepage(xsrf_init(seed))
+
+
 def test_form_bootstrap_rejects_missing_initializer_without_echoing_body():
     with pytest.raises(ValueError, match="Could not initialize form protection"):
         form_protection_from_homepage(b"<script>throw 'SECRET_SENTINEL';</script>")
