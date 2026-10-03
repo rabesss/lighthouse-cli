@@ -16,11 +16,13 @@ from lighthouse_cli.api import NetworkError, SessionExpiredError
 from lighthouse_cli.cli import cli
 from lighthouse_cli.quiz_attempt_page import (
     REFUSE_LEARNER_LAST_PAGE,
+    REFUSE_LEARNER_NOT_LAST_PAGE,
     REFUSE_LEARNER_NOT_ON_PAGE,
     REFUSE_LEARNER_UNANSWERED,
     PreviewPageError,
     PreviewRefusedError,
 )
+from lighthouse_cli.quiz_learner_finish import LearnerSubmitUnknownError, LearnerUnansweredError
 from lighthouse_cli.quiz_learner_session import (
     LearnerWorkflow,
     LearnerWorkflowError,
@@ -184,7 +186,7 @@ def test_an_unknown_start_without_an_identity_is_kept(remote):
     assert started.call_args.kwargs["continue_only"] is False
 
 
-@pytest.mark.parametrize("operation", ["start", "answer", "next"])
+@pytest.mark.parametrize("operation", ["start", "answer", "next", "submit"])
 def test_a_known_attempt_with_an_unverified_change_is_only_continued(remote, operation):
     workflow = LearnerWorkflow(10, 20)
     start(workflow)
@@ -358,6 +360,7 @@ def test_nothing_runs_without_a_started_attempt(remote):
 @pytest.mark.parametrize("change", [
     {"mode": "preview"}, {"actor_id": 0}, {"page": 0}, {"attempt_id": None}, {"status": "uncertain"},
     {"operation": "answer"}, {"quiz_id": 21}, {"origin": "https://other.example"},
+    {"status": "submitted", "operation": "submit"}, {"status": "closed"}, {"operation": "finish"},
 ])
 def test_a_tampered_cursor_is_rejected(remote, change):
     workflow = LearnerWorkflow(10, 20)
@@ -385,6 +388,115 @@ def test_one_operation_at_a_time(remote):
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released afterwards
     finally:
         os.close(descriptor)
+
+
+# -- submit and verify ----------------------------------------------------------
+
+RECEIPT = {"mode": "learner", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "submitted": True,
+           "attempt_number": 1, "score": 3.0, "out_of": 4.0}
+
+
+def test_submit_records_its_intent_then_closes_the_attempt(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    last = open_page(next_control=False)
+    seen = {}
+
+    def fake_submit(client, **kwargs):
+        seen.update(saved(workflow))
+        return RECEIPT
+    with patch(f"{SESSION}.read_learner_page", return_value=last), \
+            patch(f"{SESSION}.submit_learner", side_effect=fake_submit) as submit:
+        assert workflow.submit(allow_unanswered=True) == RECEIPT
+    assert (seen["status"], seen["operation"]) == ("uncertain", "submit")
+    assert submit.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1,
+                                       "allow_unanswered": True, "current": last}
+    assert workflow.status() == {"mode": "learner", "status": "submitted", "course_id": 10, "quiz_id": 20,
+                                 "attempt_id": 30, "page": 1, "operation": None}
+    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit:
+        for action in (workflow.page, workflow.next, workflow.submit, workflow.images,
+                       lambda: workflow.answer({101: "o1"})):
+            with pytest.raises(LearnerWorkflowError, match="has been submitted"):
+                action()
+    read.assert_not_called()
+    submit.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [
+    LearnerUnansweredError([{"page": 1, "question_id": 101, "number": 1}]),
+    PreviewRefusedError(REFUSE_LEARNER_NOT_LAST_PAGE), NetworkError("no"),
+])
+def test_a_submission_stopped_before_its_final_request_keeps_the_attempt_open(remote, failure):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    before = saved(workflow)
+    with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
+            patch(f"{SESSION}.submit_learner", side_effect=failure):
+        with pytest.raises(type(failure)):
+            workflow.submit()
+    assert saved(workflow) == before
+
+
+def test_an_unverified_submission_is_settled_only_by_its_receipt(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    with patch(f"{SESSION}.read_learner_page", return_value=open_page(next_control=False)), \
+            patch(f"{SESSION}.submit_learner", side_effect=LearnerSubmitUnknownError()):
+        with pytest.raises(LearnerSubmitUnknownError):
+            workflow.submit()
+    assert (workflow.status()["status"], workflow.status()["operation"]) == ("uncertain", "submit")
+    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit:
+        for action in (workflow.page, workflow.next, workflow.submit, lambda: workflow.answer({101: "o1"})):
+            with pytest.raises(LearnerWorkflowError, match="Run attempt verify"):
+                action()
+    read.assert_not_called()
+    submit.assert_not_called()
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerSubmitUnknownError()):
+        with pytest.raises(LearnerSubmitUnknownError):
+            workflow.verify()
+    assert workflow.status()["status"] == "uncertain"
+    with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
+        assert workflow.verify() == RECEIPT
+    assert verify.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
+    assert (workflow.status()["status"], workflow.status()["operation"]) == ("submitted", None)
+
+
+@pytest.mark.parametrize(("change", "actor"), [
+    ({"status": "submitted"}, 7), ({"status": "submitted"}, 8),
+])
+def test_other_cursors_never_restrict_a_new_attempt(remote, change, actor):
+    _, state, _ = remote
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    workflow._save({**saved(workflow), **change})
+    state["actor"] = actor
+    with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
+        workflow.start()
+    assert started.call_args.kwargs["continue_only"] is False
+    assert workflow.status()["status"] == "active"
+
+
+def test_verify_reads_only_this_accounts_started_attempt(remote):
+    _, state, _ = remote
+    workflow = LearnerWorkflow(10, 20)
+    with patch(f"{SESSION}.verify_learner_submission") as verify:
+        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
+            workflow.verify()
+        with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
+            with pytest.raises(LearnerStartUnknownError):
+                workflow.start()
+        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
+            workflow.verify()
+        start(workflow)
+        state["actor"] = 8
+        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
+            workflow.verify()
+    verify.assert_not_called()
+    state["actor"] = 7
+    # An attempt submitted elsewhere, e.g. in the browser, closes the cursor too.
+    with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT):
+        workflow.verify()
+    assert workflow.status()["status"] == "submitted"
 
 
 # -- images ---------------------------------------------------------------------
@@ -524,7 +636,7 @@ def invoke(*args: str):
 def test_cli_lists_the_attempt_commands():
     result = invoke("--help")
     assert result.exit_code == 0
-    for name in ("start", "page", "answer", "next", "images", "status"):
+    for name in ("start", "page", "answer", "next", "submit", "verify", "images", "status"):
         assert name in result.stdout
 
 
@@ -534,7 +646,7 @@ def test_cli_dry_run_and_declined_write_send_nothing():
         assert result.exit_code == 0
         assert json.loads(result.stdout)["options"] == {"answers": {"101": "o2"}, "advance": True,
                                                        "allow_unanswered": False}
-        for args in (("start", "10", "20"), ("next", "10", "20"),
+        for args in (("start", "10", "20"), ("next", "10", "20"), ("submit", "10", "20"),
                      ("answer", "10", "20", "--answers", '{"101": "o2"}')):
             declined = invoke(*args, "--json")
             assert declined.exit_code == 1
@@ -563,6 +675,13 @@ def test_cli_runs_each_operation_with_its_options():
         workflow.return_value.next.return_value = {}
         assert invoke("next", "10", "20", "--allow-unanswered", "--yes").exit_code == 0
         workflow.return_value.next.assert_called_once_with(allow_unanswered=True)
+        workflow.return_value.submit.return_value = RECEIPT
+        result = invoke("submit", "10", "20", "--allow-unanswered", "--yes", "--json")
+        assert result.exit_code == 0 and json.loads(result.stdout) == RECEIPT
+        workflow.return_value.submit.assert_called_once_with(allow_unanswered=True)
+        workflow.return_value.verify.return_value = RECEIPT
+        assert invoke("verify", "10", "20", "--json").exit_code == 0
+        workflow.return_value.verify.assert_called_once_with()
 
 
 def test_cli_errors_are_fixed_or_sanitized():
@@ -576,4 +695,12 @@ def test_cli_errors_are_fixed_or_sanitized():
         assert "preview" not in result.stdout and "run attempt start" in json.loads(result.stdout)["error"]
         workflow.return_value.next.side_effect = LearnerAdvanceUnknownError()
         result = invoke("next", "10", "20", "--yes", "--json")
-    assert json.loads(result.stdout)["error"] == str(LearnerAdvanceUnknownError())
+        assert json.loads(result.stdout)["error"] == str(LearnerAdvanceUnknownError())
+        workflow.return_value.verify.side_effect = LearnerSubmitUnknownError()
+        assert json.loads(invoke("verify", "10", "20", "--json").stdout)["error"] == str(LearnerSubmitUnknownError())
+        unanswered = [{"page": 2, "question_id": 104, "number": 4}]
+        workflow.return_value.submit.side_effect = LearnerUnansweredError(unanswered)
+        result = invoke("submit", "10", "20", "--yes", "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"mode": "learner", "course_id": 10, "quiz_id": 20,
+                                         "error": str(LearnerUnansweredError(unanswered)), "unanswered": unanswered}

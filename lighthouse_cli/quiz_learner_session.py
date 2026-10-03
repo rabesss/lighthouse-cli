@@ -4,7 +4,9 @@ Brightspace keeps an attempt's position itself: Continue Quiz reopens the
 attempt on the page the server holds, even after a Next. So the cursor only
 records the attempt and the last page that read back, which keeps every page
 request to one the server showed, and a write whose outcome is unknown is
-resolved by starting again, which continues that attempt.
+resolved by starting again, which continues that attempt. A submission whose
+outcome is unknown is settled by reading its receipt instead, as starting
+again could begin a new, graded attempt.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _require_positive_endpoint_id
 from .connection import active_connection
@@ -28,6 +30,11 @@ from .quiz_attempt_page import (
     REFUSE_LEARNER_UNANSWERED,
     LearnerPage,
     PreviewRefusedError,
+)
+from .quiz_learner_finish import (
+    LearnerSubmitUnknownError,
+    submit_learner,
+    verify_learner_submission,
 )
 from .quiz_learner_transport import (
     LearnerAdvanceUnknownError,
@@ -47,17 +54,21 @@ class LearnerWorkflowError(ValueError):
     """Only fixed local messages may be passed to this exception."""
 
 
-UNCERTAIN = (LearnerStartUnknownError, LearnerSaveUnknownError, LearnerAdvanceUnknownError)
+UNCERTAIN = (LearnerStartUnknownError, LearnerSaveUnknownError, LearnerAdvanceUnknownError, LearnerSubmitUnknownError)
+_T = TypeVar("_T")
 
 _INVALID = "The saved quiz attempt checkpoint is invalid."
 _NOT_OPEN = "No attempt of this quiz is open in the CLI. Run attempt start."
 _REOPEN = "The last change could not be verified. Run attempt start to reopen the attempt where Brightspace has it."
 _SAVE_UNVERIFIED = "The last answer save could not be verified. Run attempt page to read what Brightspace stored."
+_SUBMITTED = "This attempt has been submitted. Run attempt start for a new attempt."
+_SUBMIT_UNVERIFIED = ("The last submission could not be verified. Run attempt verify to check it, "
+                      "or attempt start to continue the attempt if it is still open.")
 _OTHER_ACCOUNT = "The saved attempt belongs to a different signed-in account."
 _OTHER_UNSETTLED = ("A change by a different signed-in account to this quiz could not be verified. "
                     "Sign in as that account and run attempt start to settle it.")
 _NOT_CONTINUABLE = ("The attempt whose last change could not be verified cannot be continued, "
-                    "so no new attempt was started. Check it in Brightspace.")
+                    "so no new attempt was started. Run attempt verify to check whether it was submitted.")
 _SETTINGS = "The quiz settings could not be read, so nothing was started."
 _TIMED = "Timed quizzes are not supported yet, so nothing was started."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
@@ -191,9 +202,9 @@ class LearnerWorkflow:
                 or type(state.get("course_id")) is not int or state["course_id"] != self.course_id
                 or type(state.get("quiz_id")) is not int or state["quiz_id"] != self.quiz_id
                 or type(state.get("actor_id")) is not int or state["actor_id"] <= 0
-                or state.get("status") not in ("active", "uncertain")
-                or state.get("operation") not in (None, "start", "answer", "next")
-                or (state["status"] == "active") != (state["operation"] is None)):
+                or state.get("status") not in ("active", "uncertain", "submitted")
+                or state.get("operation") not in (None, "start", "answer", "next", "submit")
+                or (state["status"] != "uncertain") != (state["operation"] is None)):
             raise LearnerWorkflowError(_INVALID)
         # Only an unresolved start may lack its attempt and page.
         if state["operation"] != "start" or state.get("attempt_id") is not None or state.get("page") is not None:
@@ -219,7 +230,11 @@ class LearnerWorkflow:
             raise LearnerWorkflowError(_NOT_OPEN)
         if self._actor(client) != state["actor_id"]:
             raise LearnerWorkflowError(_OTHER_ACCOUNT)
+        if state["status"] == "submitted":
+            raise LearnerWorkflowError(_SUBMITTED)
         if state["status"] == "uncertain":
+            if state["operation"] == "submit":
+                raise LearnerWorkflowError(_SUBMIT_UNVERIFIED)
             if state["operation"] != "answer":
                 raise LearnerWorkflowError(_REOPEN)
             if not unverified_save:
@@ -230,17 +245,18 @@ class LearnerWorkflow:
         return {"course_id": self.course_id, "quiz_id": self.quiz_id,
                 "attempt_id": state["attempt_id"], "page": state["page"]}
 
-    def _write(self, state: dict[str, Any], operation: str, action: Callable[[], LearnerPage]) -> LearnerPage:
-        """Record the intent durably, run one write, then commit the page it read back.
+    def _intent(self, state: dict[str, Any], operation: str, action: Callable[[], _T]) -> _T:
+        """Record the intent durably, then run one write.
 
         An unknown outcome leaves the cursor uncertain. Any other failure
-        happened before the request was sent, so the cursor is restored.
+        happened before the request was sent (or, for an unanswered quiz,
+        only re-saved the page's own answers), so the cursor is restored.
         """
         previous = dict(state)
         state.update(status="uncertain", operation=operation)
         self._save(state)
         try:
-            page = action()
+            return action()
         except UNCERTAIN:
             raise
         except Exception:
@@ -248,6 +264,10 @@ class LearnerWorkflow:
             state.update(previous)
             self._save(state)
             raise
+
+    def _write(self, state: dict[str, Any], operation: str, action: Callable[[], LearnerPage]) -> LearnerPage:
+        """One write, then commit the page it read back."""
+        page = self._intent(state, operation, action)
         state.update(status="active", operation=None, page=page.page)
         self._save(state)
         return page
@@ -346,6 +366,39 @@ class LearnerWorkflow:
             current = read_learner_page(client, **identity)
             return self._write(state, "next", lambda: advance_learner(
                 client, **identity, allow_unanswered=allow_unanswered, current=current)).public_data()
+
+    def submit(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
+        """Submit the attempt from its last page, once, and report the verified receipt.
+
+        Unanswered questions anywhere in the quiz stop the submission unless
+        ``allow_unanswered``; the error lists them.
+        """
+        with self._locked(), self._client() as client:
+            state = self._open(client)
+            identity = self._identity(state)
+            current = read_learner_page(client, **identity)
+            receipt = self._intent(state, "submit", lambda: submit_learner(
+                client, **identity, allow_unanswered=allow_unanswered, current=current))
+            state.update(status="submitted", operation=None)
+            self._save(state)
+            return receipt
+
+    def verify(self) -> dict[str, Any]:
+        """Read-only: confirm the cursor's attempt is submitted, from its receipt and submissions row."""
+        with self._locked(), self._client() as client:
+            state = self._load()
+            if state is None:
+                raise LearnerWorkflowError(_NOT_OPEN)
+            if state["attempt_id"] is None:
+                raise LearnerWorkflowError(_REOPEN)
+            if self._actor(client) != state["actor_id"]:
+                raise LearnerWorkflowError(_OTHER_ACCOUNT)
+            receipt = verify_learner_submission(client, course_id=self.course_id, quiz_id=self.quiz_id,
+                                                attempt_id=state["attempt_id"])
+            if state["status"] != "submitted":
+                state.update(status="submitted", operation=None)
+                self._save(state)
+            return receipt
 
     def images(self, *, question_id: int | None = None, directory: Path | None = None) -> dict[str, Any]:
         """Download the cursor page's images (or one question's) into ``directory`` or a new temporary one."""
