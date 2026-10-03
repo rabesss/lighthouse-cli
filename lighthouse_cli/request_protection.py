@@ -74,6 +74,8 @@ def form_protection_from_homepage(body: bytes) -> FormProtection:
     Brightspace's object graph embeds a JSON record inside a JSON string:
     {"_type":"func","N":initializer,"P":[parameter,token,numeric_seed]}.
     Only that exact record is recognized. Other function records are ignored.
+    The seed can be negative for some accounts; the browser then sends hit
+    codes that start with its minus sign, so the seed is kept as written.
     """
     if not isinstance(body, bytes) or len(body) > 2 * 1024 * 1024:
         raise ValueError("Could not initialize form protection.")
@@ -96,7 +98,7 @@ def form_protection_from_homepage(body: bytes) -> FormProtection:
                 continue
             token, seed = args[1:]
             if (not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=\-]{1,4096}", token)
-                    or type(seed) is not int or not 0 <= seed < 10**16):
+                    or type(seed) is not int or not -10**16 < seed < 10**16):
                 continue
             found.add((token, str(seed)))
     if len(found) != 1:
