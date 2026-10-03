@@ -2,12 +2,8 @@
 
 Each course directory contains a `.lighthouse.json` file (hidden dotfile) that
 maps topic_id -> {sha256, filename, size, downloaded_at, last_modified}.
-
-This module provides:
-- Manifest class: load(), save(), validate(), atomic_write()
-- SHA-256 computation from exact file bytes
-- Atomic writes via temp file + os.replace()
-- last_modified sourced from TOC LastModifiedDate (not HTTP headers)
+SHA-256 is computed from the exact file bytes; last_modified is sourced from
+the TOC LastModifiedDate (not HTTP headers).
 """
 
 from __future__ import annotations
@@ -19,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .utils import _parse_finite_float, _reject_non_finite_json, atomic_write
+from .utils import _loads_strict_json, atomic_write
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -85,6 +81,23 @@ def _path_has_symlink_component(path: Path) -> bool:
     return False
 
 
+def _normalized_entries(entries: dict[str, Any]) -> dict[str, Any]:
+    """Copy *entries* with string keys and canonical (or empty) digests.
+
+    Keep legacy records loadable, but never carry arbitrary strings forward as
+    content identity.  A later save persists the isolated empty value after
+    the topic is reconciled.  Entries without ``sha256`` fail validation.
+    """
+    return {
+        str(topic_id): (
+            {**entry, "sha256": normalize_sha256(entry["sha256"])}
+            if isinstance(entry, dict) and "sha256" in entry
+            else entry
+        )
+        for topic_id, entry in entries.items()
+    }
+
+
 def compute_sha256(content: bytes) -> str:
     """Compute SHA-256 hex digest of raw file bytes."""
     return hashlib.sha256(content).hexdigest()
@@ -138,30 +151,14 @@ class Manifest:
             return Manifest()
 
         try:
-            data = json.loads(
-                path.read_text(encoding="utf-8"),
-                parse_constant=_reject_non_finite_json,
-                parse_float=_parse_finite_float,
-            )
+            data = _loads_strict_json(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeError, ValueError):
             raise ManifestCorruptError("Manifest is corrupt or unreadable.") from None
 
         if not isinstance(data, dict):
             raise ManifestCorruptError("Manifest is not a JSON object.")
 
-        normalized_entries: dict[str, Any] = {}
-        for topic_id, entry in data.items():
-            if isinstance(entry, dict):
-                entry = dict(entry)
-                digest = normalize_sha256(entry.get("sha256"))
-                # Keep legacy records loadable, but never carry arbitrary
-                # strings forward as content identity.  A later save will
-                # persist the isolated empty value after the topic is
-                # reconciled.
-                if "sha256" in entry:
-                    entry["sha256"] = digest
-            normalized_entries[str(topic_id)] = entry
-        manifest = Manifest(normalized_entries)
+        manifest = Manifest(_normalized_entries(data))
         if errors := manifest.validate():
             detail = "; ".join(errors[:8])
             if len(errors) > 8:
@@ -173,66 +170,27 @@ class Manifest:
     # -- validation --------------------------------------------------------
 
     def validate_entry(self, _topic_id: str, entry: Any) -> list[str]:
-        """Validate a single manifest entry.
-
-        Returns:
-            List of error messages (empty if valid).
-        """
-        errors: list[str] = []
+        """Return the validation errors for a single manifest entry."""
         if not isinstance(entry, dict):
             return ["Manifest entry is not an object"]
-
+        errors: list[str] = []
         if missing := REQUIRED_ENTRY_KEYS - set(entry.keys()):
             errors.append(f"Manifest entry missing keys: {missing}")
-
-        # Type checks
-        type_map = {
-            "sha256": str,
-            "filename": str,
-            "downloaded_at": str,
-            "last_modified": str,
-            "path": str,
-        }
-        for key, expected_type in type_map.items():
-            if key in entry and not isinstance(entry[key], expected_type):
-                errors.append(
-                    f"Manifest entry: {key} must be a {expected_type}"
-                )
-
-        if (
-            "sha256" in entry
-            and isinstance(entry["sha256"], str)
-            and entry["sha256"]
-            and not is_valid_sha256(entry["sha256"])
-        ):
-            errors.append(
-                "Manifest entry: sha256 must be a 64-character hexadecimal digest"
-            )
-
-        if "size" in entry:
-            size = entry["size"]
-            invalid_size = (
-                isinstance(size, bool)
-                or not isinstance(size, int)
-                or size < 0
-                or size > MAX_MANIFEST_SIZE
-            )
-            if invalid_size:
-                errors.append(
-                    "Manifest entry: size must be a finite non-negative number"
-                )
-
-        if "filename" in entry and isinstance(entry["filename"], str) and not entry["filename"]:
+        for key in ("sha256", "filename", "downloaded_at", "last_modified", "path"):
+            if key in entry and not isinstance(entry[key], str):
+                errors.append(f"Manifest entry: {key} must be a <class 'str'>")
+        sha256 = entry.get("sha256")
+        if isinstance(sha256, str) and sha256 and not is_valid_sha256(sha256):
+            errors.append("Manifest entry: sha256 must be a 64-character hexadecimal digest")
+        size = entry.get("size", 0)
+        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= MAX_MANIFEST_SIZE:
+            errors.append("Manifest entry: size must be a finite non-negative number")
+        if entry.get("filename") == "":
             errors.append("Manifest entry: filename must not be empty")
-
         return errors
 
     def validate(self) -> list[str]:
-        """Validate all entries in the manifest.
-
-        Returns:
-            List of error messages (empty if all valid).
-        """
+        """Return the validation errors for every entry in the manifest."""
         if not isinstance(self.entries, dict):
             return ["Manifest entries is not a dict"]
         return [e for tid, entry in self.entries.items() for e in self.validate_entry(tid, entry)]
@@ -252,14 +210,7 @@ class Manifest:
             if len(errors) > 8:
                 detail += f"; and {len(errors) - 8} more"
             raise ManifestError(f"Invalid manifest: {detail}")
-        entries_to_save: dict[str, Any] = {}
-        for topic_id, entry in self.entries.items():
-            if isinstance(entry, dict):
-                entry = dict(entry)
-                if "sha256" in entry:
-                    entry["sha256"] = normalize_sha256(entry.get("sha256"))
-            entries_to_save[str(topic_id)] = entry
-        self.entries = entries_to_save
+        self.entries = entries_to_save = _normalized_entries(self.entries)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(
             path,

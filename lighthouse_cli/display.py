@@ -42,7 +42,9 @@ class _JsonUsageError(click.UsageError):
 
 
 def _safe_usage_error(ctx: click.Context, *, json_requested: bool) -> click.UsageError:
-    """Build a UsageError that never echoes the rejected input."""
+    """Emit the JSON usage record if requested; return a UsageError hiding the input."""
+    if json_requested and not ctx.resilient_parsing:
+        output_json({"error": JSON_USAGE_ERROR})
     error_type = _JsonUsageError if json_requested else click.UsageError
     return error_type(JSON_USAGE_ERROR, ctx=ctx)
 
@@ -66,27 +68,14 @@ class JsonOutputCommand(click.Command):
         try:
             return super().parse_args(ctx, args)
         except click.UsageError:
-            if requested_json and not ctx.resilient_parsing:
-                output_json({"error": JSON_USAGE_ERROR})
             # Click's original UsageError includes the invalid value. Replace
             # it before rendering so a pasted password, token, or URL cannot
             # reach stderr.
             raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
 
-class JsonOutputGroup(click.Group):
+class JsonOutputGroup(JsonOutputCommand, click.Group):
     """Apply the JSON usage-error contract at a group boundary as well."""
-
-    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        requested_json = _has_json_option(list(args))
-        self._json_requested = requested_json
-        ctx.meta["json_requested"] = requested_json
-        try:
-            return super().parse_args(ctx, args)
-        except click.UsageError:
-            if requested_json and not ctx.resilient_parsing:
-                output_json({"error": JSON_USAGE_ERROR})
-            raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
     def invoke(self, ctx: click.Context) -> Any:
         try:
@@ -98,8 +87,6 @@ class JsonOutputGroup(click.Group):
             if exc.message == JSON_USAGE_ERROR:
                 raise
             requested_json = bool(getattr(self, "_json_requested", False))
-            if requested_json and not ctx.resilient_parsing:
-                output_json({"error": JSON_USAGE_ERROR})
             raise _safe_usage_error(ctx, json_requested=requested_json) from None
 
 
@@ -414,10 +401,7 @@ def _safe_local_message(raw: str) -> str | None:
         return "No semesters found. Run: lighthouse semesters"
     if lowered.startswith("no courses to "):
         return "No courses available for this operation."
-    if re.match(
-        r"(?is)^course\b.*\bnot found in your enrollments\b",
-        normalized,
-    ):
+    if re.match(r"(?is)^course\b.*\bnot found in your enrollments\b", normalized):
         return "Course not found in your enrollments. Run: lighthouse courses"
     if re.match(r"(?is)^course\b.*\bnot found\b", normalized):
         return "Course not found. Run: lighthouse courses"
@@ -426,9 +410,7 @@ def _safe_local_message(raw: str) -> str | None:
             "No tracked courses mapped to the requested semester. "
             "Run: lighthouse config courses"
         )
-    if lowered.startswith("dropbox folder") and " not found" in lowered:
-        return "Dropbox folder not found. Run: lighthouse assignments"
-    if lowered.startswith("folder ") and " not found" in lowered:
+    if lowered.startswith(("dropbox folder", "folder ")) and " not found" in lowered:
         return "Dropbox folder not found. Run: lighthouse assignments"
     if lowered.startswith("requested assignment folder was not found"):
         return "Assignment folder not found. Run: lighthouse assignments"
@@ -500,23 +482,21 @@ def _safe_local_message(raw: str) -> str | None:
     return None
 
 
+_STATUS_CATEGORIES = {
+    401: "Session expired", 403: "Permission denied", 404: "Not found", 429: "Rate limited",
+}
+
+
 def _status_message(status: int) -> str:
     """Map an HTTP status to a short category suitable for a user."""
-    try:
-        phrase = HTTPStatus(status).phrase
-    except ValueError:
-        phrase = "HTTP error"
-    if status == 401:
-        return "Session expired"
-    if status == 403:
-        return "Permission denied"
-    if status == 404:
-        return "Not found"
-    if status == 429:
-        return "Rate limited"
+    if status in _STATUS_CATEGORIES:
+        return _STATUS_CATEGORIES[status]
     if status >= 500:
         return "Remote server error"
-    return phrase
+    try:
+        return HTTPStatus(status).phrase
+    except ValueError:
+        return "HTTP error"
 
 
 def format_user_error(error_value: BaseException | str) -> str:
@@ -568,55 +548,30 @@ def format_user_error(error_value: BaseException | str) -> str:
 
     status = _status_code(error, raw)
     if status is not None:
-        category = _status_message(status)
-        result = f"{category} (HTTP {status})."
-        return f"{result} {hint}" if hint else result
-
-    if name in _TRANSPORT_ERROR_NAMES or "requests.exceptions" in str(error.__class__.__module__).lower():
+        result = f"{_status_message(status)} (HTTP {status})."
+    elif name in _TRANSPORT_ERROR_NAMES or "requests.exceptions" in str(error.__class__.__module__).lower():
         category = "Network error"
         if name and name not in {"requestexception", "networkerror"}:
             category = f"{category} ({error.__class__.__name__})"
         result = f"{category}. Check your connection and try again."
-        return f"{result} {hint}" if hint else result
-
-    if any(marker in lowered for marker in _TRANSPORT_MARKERS):
+    elif any(marker in lowered for marker in _TRANSPORT_MARKERS):
         result = "Network error. Check your connection and try again."
-        return f"{result} {hint}" if hint else result
-
     # A secret-bearing field can be nested in JSON-ish headers, camelCase
     # exception text, or a bare ``password hunter2`` fragment.  Once detected,
     # do not return any portion of the original string.
-    if _UNSAFE_FIELD_RE.search(raw) or _SECRET_FIELD_RE.search(raw) or _SECRET_SHAPED_VALUE_RE.search(raw):
-        return f"Command failed. {hint}".strip()
-
-    if name == "permissionerror":
+    elif _UNSAFE_FIELD_RE.search(raw) or _SECRET_FIELD_RE.search(raw) or _SECRET_SHAPED_VALUE_RE.search(raw):
+        result = "Command failed."
+    elif name == "permissionerror":
         result = "Permission denied."
-        return f"{result} {hint}" if hint else result
-    if name == "filenotfounderror":
+    elif name == "filenotfounderror":
         result = "File or resource not found."
-        return f"{result} {hint}" if hint else result
-
-    # Unknown upstream exception text is intentionally not echoed.  Only the
-    # categorized branches and the explicit local allowlist above retain
-    # detailed diagnostics.
-    return f"Command failed. {hint}".strip()
-
-
-def command_error(
-    error_value: BaseException | str,
-    *,
-    json_output: bool = False,
-    payload: dict[str, Any] | None = None,
-    exit_code: int = 1,
-) -> int:
-    """Print a safe diagnostic and, optionally, one structured error object."""
-    safe_message = format_user_error(error_value)
-    print(f"Error: {safe_message}", file=sys.stderr)
-    if json_output:
-        result = dict(payload or {})
-        result["error"] = safe_message
-        output_json(result)
-    return exit_code
+    else:
+        # Unknown upstream exception text is intentionally not echoed.  Only the
+        # categorized branches and the explicit local allowlist above retain
+        # detailed diagnostics.
+        result = "Command failed."
+    # ``hint`` is empty or a fixed allowlisted ``Run: lighthouse ...`` command.
+    return f"{result} {hint}" if hint else result
 
 
 def print_table(columns: list[str], rows: list[list[str]], title: str = "") -> None:
@@ -647,9 +602,7 @@ def output_json(data: Any) -> None:
             return None
         if isinstance(value, dict):
             return {key: replace_non_finite(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [replace_non_finite(item) for item in value]
-        if isinstance(value, tuple):
+        if isinstance(value, (list, tuple)):
             return [replace_non_finite(item) for item in value]
         return value
 
@@ -672,12 +625,13 @@ def error(
     their command's JSON schema can pass ``json_output=True`` and a payload
     containing its empty result fields.
     """
-    return command_error(
-        msg,
-        json_output=json_output,
-        payload=payload,
-        exit_code=exit_code,
-    )
+    safe_message = format_user_error(msg)
+    print(f"Error: {safe_message}", file=sys.stderr)
+    if json_output:
+        result = dict(payload or {})
+        result["error"] = safe_message
+        output_json(result)
+    return exit_code
 
 
 # ---------------------------------------------------------------------------

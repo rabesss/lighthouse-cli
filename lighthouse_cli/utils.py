@@ -159,17 +159,8 @@ def _positive_course_id(value: Any) -> int | None:
     not let Python's broad ``int()`` coercion turn booleans or fractional
     values into valid-looking org-unit IDs.
     """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value > 0 else None
-    if isinstance(value, str):
-        try:
-            course_id = int(value.strip())
-        except ValueError:
-            return None
-        return course_id if course_id > 0 else None
-    return None
+    course_id = _course_identifier(value)
+    return course_id if course_id is not None and course_id > 0 else None
 
 
 def _is_unmodified_bound_method(client: Any, name: str, candidate: Any) -> bool:
@@ -210,8 +201,6 @@ def _is_explicit_legacy_override(client: Any, candidate: Any) -> bool:
             getattr(candidate, "side_effect", None) is not None
         )
     return True
-
-
 
 
 def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
@@ -271,10 +260,9 @@ def get_enrolled_course_catalog(client: Any) -> list[dict[str, Any]]:
             continue
         course = dict(raw_course)
         course["OrgUnitId"] = course_id
-        if not isinstance(course.get("Name"), str):
-            course["Name"] = ""
-        if not isinstance(course.get("Code"), str):
-            course["Code"] = ""
+        for key in ("Name", "Code"):
+            if not isinstance(course.get(key), str):
+                course[key] = ""
         courses[course_id] = course
     return [courses[course_id] for course_id in sorted(courses)]
 
@@ -296,15 +284,10 @@ def get_course_name(client: Any, org_id: int) -> str:
     except (TypeError, ValueError):
         return fallback
 
+    # Catalog entries are dicts with a positive int OrgUnitId and a str Name.
     for course in courses:
-        if not isinstance(course, dict):
-            continue
-        try:
-            course_id = int(course.get("OrgUnitId", 0))
-        except (TypeError, ValueError):
-            continue
-        if course_id == target_id:
-            name = course.get("Name")
+        if course["OrgUnitId"] == target_id:
+            name = course["Name"]
             return name if isinstance(name, str) and name else fallback
     return fallback
 
