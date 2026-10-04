@@ -62,7 +62,8 @@ def _run_json(cli_runner, tmp_path, args, courses, semesters=(SEM_I,), toc=ONE_F
          patch.object(LighthouseClient, "get_courses", return_value=catalog), \
          patch.object(LighthouseClient, "get_content_toc", side_effect=toc), \
          patch.object(LighthouseClient, "download_topic_file", side_effect=download), \
-         patch.object(LighthouseClient, "get_topic_html", return_value=(b"", "empty.html")):
+         patch.object(LighthouseClient, "get_topic_html",
+                      side_effect=AssertionError("File topics fetch no HTML")):
         result = cli_runner.invoke(cli, [*args, "-o", str(output_dir), "--json"])
     assert result.exit_code == exit_code, f"exit={result.exit_code} output={result.output}"
     return json.loads(result.output)

@@ -246,7 +246,7 @@ class TestManifestAddEntry:
         assert "T" in entry["downloaded_at"]
         assert entry["downloaded_at"].endswith("Z")
         assert "12345" in m
-        assert 12345 in m
+        assert 12345 in m  # int also works
 
 
 class TestBinaryIntegrity:

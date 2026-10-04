@@ -38,13 +38,14 @@ def _download(cli_runner, output_dir, toc, *args, name="Test", org_id=44347, fil
     """Run ``download ORG_ID -o OUTPUT_DIR *ARGS`` against one patched course.
 
     ``files`` are the successive download_topic_file results (any extra call
-    fails); ``html`` is the get_topic_html result.
+    fails); ``html`` is the get_topic_html result (without it, any call fails).
     """
+    html_stub = {"return_value": html} if html else {"side_effect": AssertionError("HTML fetch")}
     with patch.object(LighthouseClient, "get_courses", return_value=[
         {"OrgUnitId": org_id, "Name": name, "Code": "X"}
     ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
          patch.object(LighthouseClient, "download_topic_file", side_effect=list(files)), \
-         patch.object(LighthouseClient, "get_topic_html", return_value=html):
+         patch.object(LighthouseClient, "get_topic_html", **html_stub):
         return cli_runner.invoke(cli, ["download", str(org_id), "-o", str(output_dir), *args])
 
 
