@@ -17,6 +17,7 @@ from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredErr
 from lighthouse_cli.quiz_attempt_page import (
     REFUSE_ANSWER_SHAPE,
     REFUSE_BLANK_TEXT,
+    REFUSE_LEARNER_FIRST_PAGE,
     REFUSE_LEARNER_LAST_PAGE,
     REFUSE_LEARNER_NOT_LAST_PAGE,
     REFUSE_LEARNER_NOT_ON_PAGE,
@@ -55,6 +56,7 @@ from lighthouse_cli.quiz_learner_transport import (
     parse_learner_timer,
     read_learner_summary,
     read_learner_timer,
+    retreat_learner,
     save_learner_answers,
     start_learner,
 )
@@ -71,6 +73,7 @@ from tests.test_quiz_attempt_page import (
 )
 
 NEXT = '<button type="button" class="d2l-button">Next Page</button>'
+PREVIOUS = '<button type="button" class="d2l-button" style="float:left;">Previous Page</button>'
 IDENTITY = {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
 
 
@@ -216,6 +219,27 @@ def test_next_needs_a_rendered_next_control_and_answered_questions():
         open_page.advance_fields(open_page._protection)
     fields = open_page.advance_fields(open_page._protection, allow_unanswered=True)
     assert answer_fields(fields) == {"tAtom201_300": "o1", "tAtom203_300_601": "", "tAtom203_300_602": ""}
+
+
+def test_previous_needs_a_rendered_previous_control_after_the_first_page():
+    for page in (parse(body(ANSWERED)),
+                 parse(body(ANSWERED, extra=LEARNER_BUTTONS + PREVIOUS.replace("button\"", "button\" disabled", 1))),
+                 parse(body(ANSWERED, extra=LEARNER_BUTTONS + PREVIOUS)),  # never a page below 1
+                 parse(body(questions(page=2), page=2), page=2)):  # forward-only
+        with pytest.raises(PreviewRefusedError, match=re.escape(REFUSE_LEARNER_FIRST_PAGE)):
+            page.retreat_fields(page._protection)
+    # The page stays open to come back to, so its empty answers are allowed.
+    second = parse(body(questions(page=2, sc=("o1",), fb=("four", "")), page=2, extra=LEARNER_BUTTONS + PREVIOUS), page=2)
+    fields = second.retreat_fields(second._protection)
+    assert (fields["d2l_action"], fields["d2l_actionparam"], fields["pg"]) == ("Update", "2,1,2", "2")
+    assert answer_fields(fields) == {"tAtom201_300": "o1", "tAtom203_300_601": "four", "tAtom203_300_602": ""}
+    # Unanswered, the choice is left out as a browser leaves out unchecked radios.
+    empty = parse(body(questions(page=2), page=2, extra=LEARNER_BUTTONS + PREVIOUS), page=2)
+    assert answer_fields(empty.retreat_fields(empty._protection)) == {"tAtom203_300_601": "", "tAtom203_300_602": ""}
+    media = learner_question(4, radios(4, ["o1", "o2"]), prompt='Which? <img src="x.png">', page=2)
+    unsupported = parse(body(questions(page=2) + media, page=2, extra=LEARNER_BUTTONS + PREVIOUS), page=2)
+    with pytest.raises(PreviewRefusedError, match=re.escape(REFUSE_LEARNER_UNSUPPORTED)):
+        unsupported.retreat_fields(unsupported._protection)
 
 
 def test_finish_is_only_from_the_last_page():
@@ -571,6 +595,7 @@ def test_later_pages_are_never_read_from_a_bare_page_number():
     client, _ = write_client()
     for call in (lambda: save_learner_answers(client, **IDENTITY, page=2, answers={101: "o1"}),
                  lambda: advance_learner(client, **IDENTITY, page=2),
+                 lambda: retreat_learner(client, **IDENTITY, page=2),
                  lambda: submit_learner(client, **IDENTITY, page=2)):
         with pytest.raises(ValueError):
             call()
@@ -672,6 +697,72 @@ def test_next_rejected_by_the_server_is_unknown_and_never_reads_the_next_page():
         advance_learner(client, **IDENTITY, page=1)
     client._request.assert_called_once()
     client.get_raw.assert_called_once()
+
+
+def second_page(extra: str = LEARNER_BUTTONS + PREVIOUS, *, protected: bool = True):
+    # Pages after the first come from a verified readback.
+    return parse(body(questions(page=2, sc=("o1",)), page=2, extra=extra, protected=protected), page=2)
+
+
+def test_previous_posts_the_page_and_reads_the_one_before():
+    client, response = write_client(body(ANSWERED, extra=LEARNER_BUTTONS + NEXT))
+    page = retreat_learner(client, **IDENTITY, page=2, current=second_page())
+    assert page.page == 1 and page.questions[0]["selected_choice_ids"] == ["o2"]
+    client._request.assert_called_once()
+    call = client._request.call_args
+    # The Previous Page button posts without cfql and fromQB, unlike Next.
+    assert call.args[1].endswith("/d2l/lms/quizzing/user/attempt/quiz_attempt_save_auto.d2l?d2l_body_type=3&ou=10")
+    assert "&pg=2&" in call.kwargs["headers"]["Referer"]
+    fields = {key: value for key, (_, value) in call.kwargs["files"]}
+    assert (fields["d2l_actionparam"], fields["pg"], fields["tAtom201_300"]) == ("2,1,2", "2", "o1")
+    client.get_raw.assert_called_once()
+    assert "&pg=1&" in client.get_raw.call_args.args[0]
+    response.close.assert_called_once()
+
+
+@pytest.mark.parametrize("call, message, reads", [
+    # Page 1: no control (the page read fresh), a disabled one, or an enabled one below which there is no page.
+    (lambda client: retreat_learner(client, **IDENTITY, page=1), REFUSE_LEARNER_FIRST_PAGE, 1),
+    (lambda client: retreat_learner(client, **IDENTITY, page=1, current=parse(body(ANSWERED, extra=LEARNER_BUTTONS + PREVIOUS.replace(
+        "button\"", "button\" disabled", 1)))), REFUSE_LEARNER_FIRST_PAGE, 0),
+    (lambda client: retreat_learner(client, **IDENTITY, page=1, current=parse(body(ANSWERED, extra=LEARNER_BUTTONS + PREVIOUS))),
+     REFUSE_LEARNER_FIRST_PAGE, 0),
+    (lambda client: retreat_learner(client, **IDENTITY, page=2, current=second_page(LEARNER_BUTTONS + NEXT)),
+     REFUSE_LEARNER_FIRST_PAGE, 0),
+    (lambda client: retreat_learner(client, **IDENTITY, page=2, current=second_page(protected=False)), REFUSE_PAGE_PROTECTION, 0),
+])
+def test_previous_refusals_send_nothing(call, message, reads):
+    client, _ = write_client(body(ANSWERED))
+    with pytest.raises(PreviewRefusedError, match=re.escape(message)):
+        call(client)
+    client._request.assert_not_called()
+    assert client.get_raw.call_count == reads
+
+
+@pytest.mark.parametrize("readback", [SessionExpiredError("session expired"), body(questions(page=2), page=2)])
+def test_unverified_previous_is_unknown_and_not_retried(readback):
+    client, _ = write_client(readback)
+    with pytest.raises(LearnerAdvanceUnknownError):
+        retreat_learner(client, **IDENTITY, page=2, current=second_page())
+    client._request.assert_called_once()
+
+
+def test_previous_rejected_by_the_server_is_unknown_and_never_reads_a_page():
+    client, response = write_client(status=500)
+    with pytest.raises(LearnerAdvanceUnknownError):
+        retreat_learner(client, **IDENTITY, page=2, current=second_page())
+    client._request.assert_called_once()
+    client.get_raw.assert_not_called()
+    response.close.assert_called_once()
+
+
+def test_previous_post_auth_expiry_is_unknown_after_dispatch():
+    client, _ = write_client()
+    client._request = Mock(side_effect=SessionExpiredError("session expired"))
+    with pytest.raises(LearnerAdvanceUnknownError):
+        retreat_learner(client, **IDENTITY, page=2, current=second_page())
+    client._request.assert_called_once()
+    client.get_raw.assert_not_called()
 
 
 # -- submit and verify --------------------------------------------------------------

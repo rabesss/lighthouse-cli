@@ -29,6 +29,7 @@ from .api import LighthouseClient, NetworkError, SessionExpiredError, _require_p
 from .connection import active_connection
 from .credential_store import CredentialStore, CredentialStoreError, _validate_credential_path
 from .quiz_attempt_page import (
+    REFUSE_LEARNER_FIRST_PAGE,
     REFUSE_LEARNER_LAST_PAGE,
     REFUSE_LEARNER_NOT_ON_PAGE,
     REFUSE_LEARNER_UNANSWERED,
@@ -52,6 +53,7 @@ from .quiz_learner_transport import (
     read_learner_summary,
     read_learner_timer,
     read_quiz_image,
+    retreat_learner,
     save_learner_answers,
     start_learner,
 )
@@ -258,9 +260,10 @@ class LearnerWorkflow:
                 or type(state.get("quiz_id")) is not int or state["quiz_id"] != self.quiz_id
                 or type(state.get("actor_id")) is not int or state["actor_id"] <= 0
                 or state.get("status") not in ("active", "uncertain", "submitted")
-                or state.get("operation") not in (None, "start", "answer", "next", "submit")
+                or state.get("operation") not in (None, "start", "answer", "next", "previous", "submit")
                 or (state["status"] != "uncertain") != (state["operation"] is None)
-                or not _valid_timer(state.get("timer"))):  # cursors from before timed quizzes have none
+                or not _valid_timer(state.get("timer"))  # cursors from before timed quizzes have none
+                or not isinstance(state.get("forward_only"), (bool, type(None)))):  # nor from before previous
             raise LearnerWorkflowError(_INVALID)
         # Only an unresolved start may lack its attempt and page.
         if state["operation"] != "start" or state.get("attempt_id") is not None or state.get("page") is not None:
@@ -369,6 +372,7 @@ class LearnerWorkflow:
                 "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "uncertain", "operation": "start",
                 "attempt_id": None if kept is None else kept["attempt_id"], "page": None if kept is None else kept["page"],
                 "timer": None if kept is None else kept.get("timer"),
+                "forward_only": info["forward_only"],
             }
             self._save(state)  # durable intent before the start request
 
@@ -451,15 +455,25 @@ class LearnerWorkflow:
                     client, **identity, allow_unanswered=allow_unanswered, current=saved))
             return {**saved.public_data(), "timer": _clock(state.get("timer"))}
 
-    def next(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
-        """Move to the next page, keeping this page's saved answers."""
+    def _turn(self, operation: str, change: Callable[..., LearnerPage], **options: Any) -> dict[str, Any]:
+        """Change page from the cursor's page, read just before, and commit the page read back."""
         with self._locked(), self._client() as client:
             state = self._open(client)
+            # The page's Previous control is the gate; the quiz's own setting backs it up.
+            if operation == "previous" and state.get("forward_only"):
+                raise PreviewRefusedError(REFUSE_LEARNER_FIRST_PAGE)
             identity = self._identity(state)
             current = read_learner_page(client, **identity)
-            moved = self._write(state, "next", lambda: advance_learner(
-                client, **identity, allow_unanswered=allow_unanswered, current=current))
+            moved = self._write(state, operation, lambda: change(client, **identity, **options, current=current))
             return {**moved.public_data(), "timer": _clock(state.get("timer"))}
+
+    def next(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
+        """Move to the next page, keeping this page's saved answers."""
+        return self._turn("next", advance_learner, allow_unanswered=allow_unanswered)
+
+    def previous(self) -> dict[str, Any]:
+        """Move back to the previous page, keeping this page's saved answers."""
+        return self._turn("previous", retreat_learner)
 
     def submit(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
         """Submit the attempt from its last page, once, and report the verified receipt.

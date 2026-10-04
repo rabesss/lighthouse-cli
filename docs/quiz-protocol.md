@@ -105,6 +105,28 @@ posts:
    quiz's last page permanently broke preview attempts (every later read
    redirects to `/d2l/error/500`). It was not tried on a learner attempt;
    treat it as fatal there too.
+
+   Backward navigation (a learner attempt in the disposable Brightspace
+   sandbox, on a two-page quiz that allows moving back): both "Previous
+   Page" buttons, above and below the questions, post the same save with
+   `d2l_actionparam=2,<page - 1>,<page>` and the whole page form (with
+   `pg=<page>` and the page's own answers) to
+   `quiz_attempt_save_auto.d2l?d2l_body_type=3&ou=<ou>`, without the
+   `cfql` and `fromQB` that Next's URL has. Their handler is an inline
+   `NavInfo` in the page's `d2l_controlMap`; the page script's
+   `GoPreviousPage`, which would add `cfql` and `fromQB`, is not what they
+   call. No dialog asks for confirmation. The save frame then loaded page
+   `pg=<page - 1>`, where the answer saved there earlier was still
+   selected, and the attempt submitted normally from it. Continue Quiz
+   after a Previous reopened the attempt on the page moved back to, with
+   both pages' answers kept. The CLI's own Previous request, sent from
+   page 2 of that quiz, landed on page 1 with its answer kept, and the
+   attempt then submitted normally. On page 1 both buttons are in the markup
+   with the `disabled` attribute (handler `return false;`). Forward-only
+   and one-page quizzes render no Previous button at all. The CLI moves
+   back only from a page after the first with a visible, enabled Previous
+   control, so it never requests a page below 1, and never on a quiz whose
+   settings forbid moving back.
 5. Manual submission (time-up differs; see "Timed quizzes"): preparatory
    save (`d2l_actionparam=5,<page>`), confirmation page
    `quiz_confirm_submit_auto.d2l`, then RPC

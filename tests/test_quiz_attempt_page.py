@@ -342,6 +342,41 @@ def test_learner_next_control_follows_the_rendered_buttons():
         assert not learner(learner_question(1, options), extra=LEARNER_BUTTONS + unusable).has_next_control
 
 
+def test_learner_previous_control_follows_the_rendered_buttons():
+    # As observed: page 1 of a quiz that allows moving back renders both
+    # "Previous Page" buttons disabled; later pages render them enabled, and
+    # forward-only or one-page quizzes render none.
+    first = '<button type="button" class="d2l-button" id="z_e" disabled style="float:left;">Previous Page</button>'
+    options = radios(1, ["o1", "o2"])
+    assert not learner(learner_question(1, options), extra=LEARNER_BUTTONS + first * 2).has_previous_control
+    assert not learner(learner_question(1, options)).has_previous_control
+    later = html(learner_question(1, options, page=2), page=2, extra=LEARNER_BUTTONS + first.replace(" disabled", "") * 2, isprv="")
+    page = parse_learner_page(later, course_id=10, quiz_id=20, attempt_id=30, page=2)
+    assert page.has_previous_control and not page.has_next_control
+    assert page.public_data()["has_previous_control"] is True
+
+
+@pytest.mark.parametrize("unusable", [
+    '<fieldset disabled><button type="button">Previous Page</button></fieldset>',
+    '<template><button type="button">Previous Page</button></template>',
+    '<button type="button" inert>Previous Page</button>',
+    '<div inert><button type="button">Previous Page</button></div>',
+    '<button type="button" aria-disabled="true">Previous Page</button>',
+    '<div class="d2l-hidden"><button type="button">Previous Page</button></div>',
+    '<button type="button" style="display: none">Previous Page</button>',
+])
+def test_learner_previous_control_ignores_unusable_buttons(unusable):
+    options = radios(1, ["o1", "o2"])
+    page = parse_learner_page(html(learner_question(1, options, page=2), page=2, extra=LEARNER_BUTTONS + unusable, isprv=""),
+                              course_id=10, quiz_id=20, attempt_id=30, page=2)
+    assert not page.has_previous_control
+    # A button inside a question is its content, not page navigation.
+    content = learner_question(1, options, page=2).replace(
+        "<fieldset>", '<div><button type="button">Previous Page</button></div><fieldset>', 1)
+    page = parse_learner_page(html(content, page=2, extra=LEARNER_BUTTONS, isprv=""), course_id=10, quiz_id=20, attempt_id=30, page=2)
+    assert not page.has_previous_control
+
+
 @pytest.mark.parametrize(("authored", "shown"), [
     ("Practice good password management", "Practice good password management"),
     ("Use a secret token generator", "Use a secret token generator"),

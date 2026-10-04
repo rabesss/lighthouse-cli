@@ -129,8 +129,8 @@ stderr. `--help` remains human-readable.
   the local download root (`--output-dir`, default `~/Downloads/lighthouse`).
 - **[REMOTE WRITE]:** `submit` sends a file to Brightspace. Instructor
   `quiz-create` and `assignment-create` create hidden assessments.
-  `student attempt start`, `answer`, `next` and `submit` change your own
-  graded quiz attempt. These commands require confirmation unless `--yes` is supplied.
+  `student attempt start`, `answer`, `next`, `previous` and `submit` change
+  your own graded quiz attempt. These commands require confirmation unless `--yes` is supplied.
 
 `download --dry-run` writes nothing: it does not
 create or replace a manifest, create directories, or download file bodies.
@@ -238,6 +238,8 @@ lighthouse student attempt page COURSE_ID QUIZ_ID --json
 # Save every answer on the page in one request; --next then moves on:
 lighthouse student attempt answer COURSE_ID QUIZ_ID --answers '{"101": "CHOICE_ID", "102": ["OPTION_ID"], "103": ["blank text"]}' --next --yes --json
 lighthouse student attempt next COURSE_ID QUIZ_ID --yes --json
+# Back a page, where the quiz allows moving back:
+lighthouse student attempt previous COURSE_ID QUIZ_ID --yes --json
 # Download the page's question images to view them:
 lighthouse student attempt images COURSE_ID QUIZ_ID --json
 # From the last page: submit once and verify the receipt (final and graded):
@@ -256,7 +258,9 @@ keep their saved answers. Equations read as LaTeX and images as
 `[image N]` markers, whose files `images` saves (in a new private temporary
 directory, or `--dir`). Next is refused on the last page and, unless
 `--allow-unanswered`, while a question is unanswered; `answer --next` checks
-that before saving anything. Every change is read back before it is
+that before saving anything. `previous` is refused on the first page and on
+forward-only quizzes; it sends the page's answers as they stand, empty ones
+included, since the page can be visited again. Every change is read back before it is
 reported. If one cannot be verified, `page` settles an answer save, and
 `start` continues the attempt on the page Brightspace has. Once `start` has
 opened an attempt, until it is submitted `start` continues only that attempt
@@ -277,7 +281,7 @@ enforced (or, after a `start` that did not settle, not yet read). No request
 is made for it, and the countdown may end a second or two early, never late.
 Submit before `seconds_left` reaches 0.
 On a quiz that submits itself, nothing more is sent once time is up:
-`page`, `answer`, `next`, `submit`, `images` and `start` are refused, and
+`page`, `answer`, `next`, `previous`, `submit`, `images` and `start` are refused, and
 `verify` reports that Brightspace has yet to submit the attempt until it has
 (shortly after the limit). If Brightspace still has the attempt open with
 time left (extra time, or a computer clock that was off), `verify` reads the

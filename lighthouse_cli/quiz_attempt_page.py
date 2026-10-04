@@ -51,6 +51,7 @@ REFUSE_ANSWER_SHAPE = ("Answer a single-choice question with one choice id, a mu
 REFUSE_BLANK_TEXT = "Each blank takes one line of printable text of at most 1000 characters."
 REFUSE_NO_ANSWERS = "Give at least one answer to save."
 REFUSE_LEARNER_LAST_PAGE = "This is the last page. Submit the quiz instead."
+REFUSE_LEARNER_FIRST_PAGE = "There is no previous page: this is the first page, or the quiz does not allow moving back."
 REFUSE_LEARNER_NOT_LAST_PAGE = "Move to the last page before submitting."
 REFUSE_LEARNER_UNANSWERED = "This page has unanswered questions. Answer them, or explicitly allow leaving them unanswered."
 
@@ -627,6 +628,16 @@ class LearnerPage(_AttemptPage):
         if self.unanswered() and allow_unanswered is not True:
             raise PreviewRefusedError(REFUSE_LEARNER_UNANSWERED)
         return self._form(self.intended({}), protection, f"2,{self.page + 1},{self.page}")
+
+    def retreat_fields(self, protection: FormProtection) -> dict[str, str]:
+        """Back to the previous page, which a visible, enabled Previous control after page 1 proves exists.
+
+        Empty answers are allowed: the page can be revisited, and Next and
+        submit still check them.
+        """
+        if not self.has_previous_control or self.page <= 1:
+            raise PreviewRefusedError(REFUSE_LEARNER_FIRST_PAGE)
+        return self._form(self.intended({}), protection, f"2,{self.page - 1},{self.page}")
 
     def finish_fields(self, protection: FormProtection) -> dict[str, str]:
         """The save that opens the submission confirmation page."""
