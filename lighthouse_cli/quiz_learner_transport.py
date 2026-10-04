@@ -53,7 +53,7 @@ class LearnerSaveUnknownError(NetworkError):
 
 class LearnerAdvanceUnknownError(NetworkError):
     def __init__(self) -> None:
-        super().__init__("Page change could not be verified. Read the quiz state before continuing.")
+        super().__init__("Page change could not be verified. Run attempt start to reopen the attempt where Brightspace has it.")
 
 
 REFUSE_START_UNAVAILABLE = "This quiz cannot be started or continued now (closed, not yet open or out of attempts)."
@@ -353,8 +353,8 @@ def read_learner_page(
     """Read one page of the attempt; never infer or move the server's cursor.
 
     ``page`` must be one the server showed for this attempt (its start or
-    continue page, or a Next readback): reading past the last page breaks
-    the attempt.
+    continue page, or a Next or Previous readback): reading past the last
+    page breaks the attempt.
     """
     body, _ = client.get_raw(learner_page_path(course_id, quiz_id, attempt_id, page), max_bytes=MAX_PAGE_BYTES,
                              _replay_safe=False, headers={"Cache-Control": "no-cache"})
@@ -459,6 +459,27 @@ def save_learner_answers(
             _close_response(response)
 
 
+def _change_page(
+    client: LighthouseClient, fields: dict[str, str], query: Mapping[str, int], *, course_id: int, quiz_id: int,
+    attempt_id: int, page: int, target: int,
+) -> LearnerPage:
+    """Send one page change once, then read ``target`` back; any surprise after sending is unknown."""
+    response = None
+    try:
+        response = _post_form(client, ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l?" + urlencode(query), fields,
+                              learner_page_path(course_id, quiz_id, attempt_id, page))
+        if response.status_code != 200:
+            raise LearnerAdvanceUnknownError()
+        _close_response(response)
+        response = None
+        return read_learner_page(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=target)
+    except Exception:
+        raise LearnerAdvanceUnknownError() from None
+    finally:
+        if response is not None:
+            _close_response(response)
+
+
 def advance_learner(
     client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
     allow_unanswered: bool = False, current: LearnerPage | None = None,
@@ -475,18 +496,23 @@ def advance_learner(
     current, protection = current_learner_page(client, current, course_id=course_id, quiz_id=quiz_id,
                                                attempt_id=attempt_id, page=page)
     fields = current.advance_fields(protection, allow_unanswered=allow_unanswered)
-    response = None
-    try:
-        response = _post_form(client, ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l?" + urlencode(
-            {"cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id}), fields,
-            learner_page_path(course_id, quiz_id, attempt_id, page))
-        if response.status_code != 200:
-            raise LearnerAdvanceUnknownError()
-        _close_response(response)
-        response = None
-        return read_learner_page(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page + 1)
-    except Exception:
-        raise LearnerAdvanceUnknownError() from None
-    finally:
-        if response is not None:
-            _close_response(response)
+    return _change_page(client, fields, {"cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id},
+                        course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page, target=page + 1)
+
+
+def retreat_learner(
+    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
+    current: LearnerPage | None = None,
+) -> LearnerPage:
+    """Move back one page, sending the page's answers as they stand.
+
+    Only a visible, enabled Previous control on a page after the first
+    allows it, so no page below 1 is ever requested. The browser's Previous
+    Page button posts without the ``cfql`` and ``fromQB`` that Next sends.
+    The previous page must then read back.
+    """
+    current, protection = current_learner_page(client, current, course_id=course_id, quiz_id=quiz_id,
+                                               attempt_id=attempt_id, page=page)
+    fields = current.retreat_fields(protection)
+    return _change_page(client, fields, {"d2l_body_type": 3, "ou": course_id},
+                        course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id, page=page, target=page - 1)

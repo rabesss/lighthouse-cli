@@ -16,7 +16,7 @@ from .quiz_learner_finish import LearnerNotSubmittedError, LearnerUnansweredErro
 from .quiz_learner_session import UNCERTAIN, LearnerWorkflow, LearnerWorkflowError, parse_answers
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
-_CONFIRMED = {"start", "answer", "next", "submit", "forget"}
+_CONFIRMED = {"start", "answer", "next", "previous", "submit", "forget"}
 _NOT_CURRENT = ("Brightspace did not return a supported current page of this attempt. If the attempt "
                 "changed elsewhere, run attempt start to continue it where Brightspace has it.")
 
@@ -26,9 +26,10 @@ def attempt() -> None:
     """Take your own quiz attempts as a learner. Attempts are graded, unlike previews.
 
     Start (or continue) an attempt, read its page, answer the questions on
-    it, move on with Next, and submit from the last page. Every change is
-    read back from Brightspace before it is reported. On a timed quiz every
-    page reports the time left; submit before it runs out.
+    it, move on with Next (or back with Previous, where the quiz allows it),
+    and submit from the last page. Every change is read back from Brightspace
+    before it is reported. On a timed quiz every page reports the time left;
+    submit before it runs out.
     """
 
 
@@ -125,6 +126,17 @@ def next_page(course_id: int, quiz_id: int, allow_unanswered: bool, yes: bool, d
               json_output: bool) -> None:
     """Move to the next page. On a forward-only quiz there is no way back."""
     _execute("next", course_id, quiz_id, json_output, yes, dry_run, allow_unanswered=allow_unanswered)
+
+
+@_command("previous")
+@WRITE_OPTIONS
+def previous_page(course_id: int, quiz_id: int, yes: bool, dry_run: bool, json_output: bool) -> None:
+    """Move back to the previous page. The first page and forward-only quizzes have none.
+
+    This page's answers are sent as they stand; empty ones can be filled in
+    on a later visit.
+    """
+    _execute("previous", course_id, quiz_id, json_output, yes, dry_run)
 
 
 @_command("submit")
