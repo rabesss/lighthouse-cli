@@ -44,6 +44,7 @@ from lighthouse_cli.quiz_learner_transport import (
     REFUSE_PAGE_PROTECTION,
     REFUSE_START_BROWSER,
     REFUSE_START_PASSWORD,
+    REFUSE_START_PROCESSING,
     REFUSE_START_PROTECTION,
     REFUSE_START_ROLE,
     REFUSE_START_UNAVAILABLE,
@@ -314,7 +315,7 @@ def test_other_rpc_replies_are_rejected(chunks):
 
 
 def summary(*, impersonating: str = "false", can_take: str = "true", start: str = "true", resume: str = "false",
-            password: str = "false", button: str | None = "Start Quiz!", progress: str = "",
+            password: str = "false", button: str | None = "Start Quiz!", disabled: bool = False, progress: str = "",
             fields: dict[str, str] | None = None, protected: bool = True, extra: str = "") -> bytes:
     hidden = {"d2l_action": "", "d2l_actionparam": "", "d2l_hitCode": "", "hps": "", "drc": "0",
               "LockDownBrowserUrl": "0", "d2l_referrer": "SESSION_SENTINEL", **(fields or {})}
@@ -322,23 +323,36 @@ def summary(*, impersonating: str = "false", can_take: str = "true", start: str 
     script = (f"<script>var isImpersonatingRole = {impersonating};\nvar canTakeQuiz = {can_take};\n"
               f"var startQuiz = {start};\nvar continueQuiz = {resume};\nvar hasPass = {password};</script>")
     # The start button is rendered outside the form.
-    action = f'<button type="button" primary="" class="d2l-button">{button}</button>' if button else ""
+    action = (f'<button type="button" primary="" class="d2l-button"{" disabled" if disabled else ""}>{button}</button>'
+              if button else "")
     return (f"<h1>Summary - Quiz</h1><p>{progress}</p>{script}{action}<form>{inputs}{extra}</form>").encode() + (
         bootstrap() if protected else b"")
 
 
 IN_PROGRESS = {"start": "false", "resume": "true", "button": "Continue Quiz...", "progress": "Completed - 0 (Attempt 2 in progress)"}
+# While Brightspace submits an attempt whose time ran out (observed in a
+# disposable Brightspace sandbox): Continue is flagged, Start Quiz! is disabled.
+PROCESSING = {"start": "false", "resume": "true", "disabled": True,
+              "progress": "Allowed - Unlimited, Completed - 9 (Attempt 10 is being processed)"}
 
 
 def test_summary_reports_start_and_continue_state():
     fresh = parse_learner_summary(summary(), course_id=10, quiz_id=20)
     assert fresh.public_data() == {"course_id": 10, "quiz_id": 20, "can_start": True, "can_continue": False,
-                                   "attempt_in_progress": None}
+                                   "attempt_in_progress": None, "attempt_processing": None}
     assert "SESSION_SENTINEL" not in repr(fresh)
     resumed = parse_learner_summary(summary(**IN_PROGRESS), course_id=10, quiz_id=20)
     assert (resumed.can_start, resumed.can_continue, resumed.attempt_in_progress) == (False, True, 2)
+    assert resumed.attempt_processing is None
     closed = parse_learner_summary(summary(can_take="false", button=None), course_id=10, quiz_id=20)
     assert not closed.can_start and not closed.can_continue
+
+
+@pytest.mark.parametrize("page", [summary(**PROCESSING), summary(**{**PROCESSING, "button": None})])
+def test_an_attempt_brightspace_is_still_submitting_can_be_neither_continued_nor_started(page):
+    processing = parse_learner_summary(page, course_id=10, quiz_id=20)
+    assert processing.public_data() == {"course_id": 10, "quiz_id": 20, "can_start": False, "can_continue": False,
+                                        "attempt_in_progress": None, "attempt_processing": 10}
 
 
 @pytest.mark.parametrize("page", [
@@ -348,6 +362,13 @@ def test_summary_reports_start_and_continue_state():
     summary(extra='<script>var startQuiz = false;</script>'),
     summary(start="maybe"),
     summary(extra='<button type="button">Continue Quiz...</button>'),
+    summary(**{**PROCESSING, "resume": "false"}),  # being processed without continueQuiz
+    summary(**{**PROCESSING, "start": "true"}),
+    summary(**{**PROCESSING, "disabled": False}),  # an enabled start
+    summary(**{**PROCESSING, "button": "Continue Quiz...", "disabled": False}),
+    summary(**{**PROCESSING, "progress": "(Attempt 9 is being processed) (Attempt 10 is being processed)"}),
+    summary(**{**PROCESSING, "progress": "(Attempt 10 in progress) (Attempt 10 is being processed)"}),
+    summary(**{**IN_PROGRESS, "progress": "(Attempt 2 in progress) (Attempt 3 is being processed)"}),
 ])
 def test_inconsistent_summary_is_rejected(page):
     with pytest.raises(PreviewPageError):
@@ -459,6 +480,19 @@ def test_start_posts_the_summary_action_once_and_reads_the_first_page():
     assert "isprv=&" in client.get_raw.call_args_list[4].args[0]
 
 
+def test_start_refuses_while_brightspace_is_still_submitting_an_attempt():
+    client = start_client(summary(**PROCESSING))
+    read = read_learner_summary(client, course_id=10, quiz_id=20)
+    with pytest.raises(PreviewRefusedError) as exc_info:
+        start_learner(client, course_id=10, quiz_id=20, summary=read)
+    assert str(exc_info.value) == ("Brightspace is still submitting attempt 10 after its time ran out, so nothing was "
+                                   "started. Run attempt start again in a few minutes, or attempt verify if the CLI was "
+                                   "taking that attempt.")
+    # Neither Continue, which the summary flags, nor Start was sent.
+    client._request.assert_not_called()
+    client.get_raw.assert_called_once()
+
+
 @pytest.mark.parametrize("page", [1, 3])
 def test_continue_reopens_the_attempt_in_progress_on_the_page_the_server_names(page):
     client = start_client(summary(**IN_PROGRESS), resume=True, script=f"<script>\nparent.GoToAttemptQuizAuto( 30,{page},0 );\n</script>".encode(),
@@ -495,6 +529,9 @@ def test_a_summary_just_read_is_not_requested_again():
     (summary(fields={"hps": "1"}), {}, REFUSE_START_BROWSER),
     (summary(protected=False), {}, REFUSE_START_PROTECTION),
     (summary(fields={"d2l_referrer": "OTHER_SESSION"}), {}, REFUSE_START_PROTECTION),
+    (summary(**PROCESSING), {}, REFUSE_START_PROCESSING.format(10)),
+    (summary(**PROCESSING), {"continue_only": True}, REFUSE_START_PROCESSING.format(10)),
+    (summary(**PROCESSING, password="true"), {}, REFUSE_START_PROCESSING.format(10)),  # pragma: allowlist secret
 ])
 def test_start_refusals_send_nothing(page, kwargs, message):
     client, _ = write_client(page)
@@ -908,10 +945,14 @@ def test_verification_reports_no_score_when_the_quiz_hides_it():
     assert result["submitted"] and result["score"] is None and result["out_of"] is None
 
 
-@pytest.mark.parametrize("state", ["<label> (In progress)</label>", "<label> (IN PROGRESS)</label>"])
-def test_verification_reports_an_attempt_in_progress_without_reading_its_receipt(state):
+@pytest.mark.parametrize("submissions", [
+    listing(state="<label> (In progress)</label>"), listing(state="<label> (IN PROGRESS)</label>"),
+    # An attempt Brightspace is still submitting after its time ran out.
+    listing(grade="<label>Auto-grading in progress</label>"),
+])
+def test_verification_reports_an_attempt_in_progress_without_reading_its_receipt(submissions):
     client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(listing(state=state), {})])
+    client.get_raw = Mock(side_effect=[(submissions, {})])
     with pytest.raises(LearnerNotSubmittedError, match="still in progress"):
         verify_learner_submission(client, **IDENTITY)
     assert "quiz_submissions.d2l?" in client.get_raw.call_args.args[0]

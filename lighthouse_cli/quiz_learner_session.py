@@ -53,6 +53,7 @@ from .quiz_learner_transport import (
     read_learner_summary,
     read_learner_timer,
     read_quiz_image,
+    refuse_while_processing,
     retreat_learner,
     save_learner_answers,
     start_learner,
@@ -363,6 +364,9 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_TIME_UP)
             info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
             summary = read_learner_summary(client, course_id=self.course_id, quiz_id=self.quiz_id)
+            # Refused whether or not the CLI kept that attempt (after forget,
+            # or on another computer, it did not), before anything is written.
+            refuse_while_processing(summary)
             if kept is not None and not summary.can_continue:
                 raise LearnerWorkflowError(_NOT_CONTINUABLE)
             # The intent keeps the CLI's attempt and its limit, so a start that
