@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import math
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -24,42 +25,54 @@ from lighthouse_cli.display import (
 from lighthouse_cli.utils import get_course_name, get_enrolled_course_catalog
 
 
-def test_content_json_failure_has_one_command_shaped_document() -> None:
-    with patch.object(
-        LighthouseClient,
-        "get_content_toc",
-        side_effect=RuntimeError(
+def _one_topic_toc(module_title: str = "Module", **topic: object) -> dict[str, object]:
+    return {"Modules": [{"ModuleId": 1, "Title": module_title, "Modules": [], "Topics": [topic]}]}
+
+
+@pytest.mark.parametrize(
+    ("method", "argv", "error_text", "sentinel", "expected"),
+    [
+        pytest.param(
+            "get_content_toc",
+            ["content", "123", "--json"],
             "HTTP 503 Server Error for url: "
-            "https://lighthouse.example/content?token=CONTENT_SENTINEL"
+            "https://lighthouse.example/content?token=CONTENT_SENTINEL",
+            "CONTENT_SENTINEL",
+            {"course_id": 123, "modules": [], "error": "Remote server error (HTTP 503)."},
+            id="content",
         ),
-    ):
-        result = CliRunner().invoke(cli, ["content", "123", "--json"])
+        pytest.param(
+            "get_quiz_detail",
+            ["quiz", "123", "7", "--json"],
+            "HTTP 404 Client Error for url: "
+            "https://lighthouse.example/quizzes/7?cookie=QUIZ_SENTINEL",
+            "QUIZ_SENTINEL",
+            {"course_id": 123, "quiz": {}, "error": "Not found (HTTP 404)."},
+            id="quiz",
+        ),
+    ],
+)
+def test_json_failure_has_one_command_shaped_document(
+    method: str, argv: list[str], error_text: str, sentinel: str, expected: dict[str, object],
+) -> None:
+    with patch.object(LighthouseClient, method, side_effect=RuntimeError(error_text)):
+        result = CliRunner().invoke(cli, argv)
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
-        "course_id": 123,
-        "modules": [],
-        "error": "Remote server error (HTTP 503).",
-    }
-    assert "CONTENT_SENTINEL" not in result.stdout + result.stderr
+    assert json.loads(result.stdout) == expected
+    assert sentinel not in result.stdout + result.stderr
     assert "https://" not in result.stdout + result.stderr
     assert "Error:" in result.stderr
 
 
 def test_content_projection_suppresses_quoted_secret_labels() -> None:
-    toc = {
-        "Modules": [{
-            "ModuleId": 1,
-            "Title": 'headers={"Cookie":"abcd1234"}',
-            "Modules": [],
-            "Topics": [{
-                "TopicId": 2,
-                "Title": 'data={"password":"abcd1234"}',
-                "TypeIdentifier": "File",
-                "Url": "https://example.invalid/content?page=2",
-            }],
-        }],
-    }
+    toc = _one_topic_toc(
+        'headers={"Cookie":"abcd1234"}',
+        TopicId=2,
+        Title='data={"password":"abcd1234"}',
+        TypeIdentifier="File",
+        Url="https://example.invalid/content?page=2",
+    )
     with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
         result = CliRunner().invoke(cli, ["content", "123", "--json"])
 
@@ -89,19 +102,7 @@ def test_content_projection_suppresses_quoted_secret_labels() -> None:
 def test_content_projection_omits_unsafe_or_secret_bearing_urls(
     unsafe_url: str,
 ) -> None:
-    toc = {
-        "Modules": [{
-            "ModuleId": 1,
-            "Title": "Module",
-            "Modules": [],
-            "Topics": [{
-                "TopicId": 2,
-                "Title": "Topic",
-                "TypeIdentifier": "File",
-                "Url": unsafe_url,
-            }],
-        }],
-    }
+    toc = _one_topic_toc(TopicId=2, Title="Topic", TypeIdentifier="File", Url=unsafe_url)
     with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
         result = CliRunner().invoke(cli, ["content", "123", "--json"])
 
@@ -262,34 +263,23 @@ def _deep_content_toc(depth: int = 1100) -> dict[str, object]:
     }
 
 
-def test_content_human_renderer_bounds_deep_and_malformed_toc() -> None:
-    toc = _deep_content_toc()
-    with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
-        result = CliRunner().invoke(cli, ["content", "123"])
+def test_content_human_and_json_renderers_bound_deep_and_malformed_toc() -> None:
+    # A fresh TOC per call, so the second render cannot see the first one's mutations.
+    with patch.object(LighthouseClient, "get_content_toc", side_effect=lambda _cid: _deep_content_toc()):
+        human = CliRunner().invoke(cli, ["content", "123"])
+        structured = CliRunner().invoke(cli, ["content", "123", "--json"])
 
-    assert result.exit_code == 0
-    assert "Visible sibling" in result.stdout
-    assert "Visible topic sibling" in result.stdout
-    assert "[content truncated]" in result.stdout
-    assert "CONTENT_SECRET_SENTINEL" not in result.stdout + result.stderr
-    assert "CONTROL_SENTINEL" not in result.stdout + result.stderr
-    assert "\x1b" not in result.stdout + result.stderr
-
-
-def test_content_json_renderer_bounds_deep_and_malformed_toc() -> None:
-    toc = _deep_content_toc()
-    with patch.object(LighthouseClient, "get_content_toc", return_value=toc):
-        result = CliRunner().invoke(cli, ["content", "123", "--json"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
+    assert "Visible topic sibling" in human.stdout
+    payload = json.loads(structured.stdout)
     assert payload["course_id"] == 123
     assert isinstance(payload["modules"], list)
-    assert "Visible sibling" in result.stdout
-    assert "[content truncated]" in result.stdout
-    assert "CONTENT_SECRET_SENTINEL" not in result.stdout + result.stderr
-    assert "CONTROL_SENTINEL" not in result.stdout + result.stderr
-    assert "\x1b" not in result.stdout + result.stderr
+    for result in (human, structured):
+        assert result.exit_code == 0
+        assert "Visible sibling" in result.stdout
+        assert "[content truncated]" in result.stdout
+        assert "CONTENT_SECRET_SENTINEL" not in result.stdout + result.stderr
+        assert "CONTROL_SENTINEL" not in result.stdout + result.stderr
+        assert "\x1b" not in result.stdout + result.stderr
 
 
 def test_quiz_human_renderer_projects_malformed_deep_fields() -> None:
@@ -386,15 +376,7 @@ def test_json_detection_stops_at_bare_option_terminator() -> None:
     assert _has_json_option(["--json", "--", "--json"])
 
 
-def test_post_terminator_json_value_does_not_trigger_json_usage_output() -> None:
-    result = CliRunner().invoke(cli, ["content", "--", "--json", "extra"])
-
-    assert result.exit_code == 2
-    assert result.stdout == ""
-    assert "Invalid command arguments. See --help." in result.stderr
-
-
-def test_auth_status_invalid_json_has_safe_error_and_failing_exit_code() -> None:
+def test_auth_status_invalid_json_and_human_paths_fail_safely() -> None:
     sentinel = "COOKIE_VALUE_SENTINEL"
     client = Mock()
     client.cookies = {"d2lSecureSessionVal": sentinel}
@@ -402,6 +384,7 @@ def test_auth_status_invalid_json_has_safe_error_and_failing_exit_code() -> None
 
     with patch("lighthouse_cli.commands.LighthouseClient", return_value=client):
         result = CliRunner().invoke(cli, ["auth", "status", "--json"])
+        human = CliRunner().invoke(cli, ["auth", "status"])
 
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {
@@ -410,18 +393,8 @@ def test_auth_status_invalid_json_has_safe_error_and_failing_exit_code() -> None
         "error": "Session expired. Run: lighthouse auth login",
     }
     assert sentinel not in result.stdout + result.stderr
-
-
-def test_auth_status_invalid_human_path_matches_json_failure() -> None:
-    client = Mock()
-    client.cookies = {"d2lSecureSessionVal": "COOKIE_VALUE_SENTINEL"}
-    client.check_auth.return_value = False
-
-    with patch("lighthouse_cli.commands.LighthouseClient", return_value=client):
-        result = CliRunner().invoke(cli, ["auth", "status"])
-
-    assert result.exit_code == 1
-    assert "Error: Session expired. Run: lighthouse auth login" in result.stderr
+    assert human.exit_code == 1
+    assert "Error: Session expired. Run: lighthouse auth login" in human.stderr
 
 
 def test_semesters_normalize_malformed_records_for_human_and_json() -> None:
@@ -450,64 +423,18 @@ def test_semesters_normalize_malformed_records_for_human_and_json() -> None:
     assert sentinel not in human.stdout + human.stderr
 
 
-def test_quiz_json_failure_has_one_command_shaped_document() -> None:
-    with patch.object(
-        LighthouseClient,
-        "get_quiz_detail",
-        side_effect=RuntimeError(
-            "HTTP 404 Client Error for url: "
-            "https://lighthouse.example/quizzes/7?cookie=QUIZ_SENTINEL"
-        ),
-    ):
-        result = CliRunner().invoke(cli, ["quiz", "123", "7", "--json"])
-
-    assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
-        "course_id": 123,
-        "quiz": {},
-        "error": "Not found (HTTP 404).",
-    }
-    assert "QUIZ_SENTINEL" not in result.stdout + result.stderr
-    assert "https://" not in result.stdout + result.stderr
-    assert "Error:" in result.stderr
-
-
-def test_json_usage_error_is_parseable_but_human_usage_stays_on_stderr() -> None:
-    result = CliRunner().invoke(cli, ["content", "--json"])
-
-    assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
-        "error": "Invalid command arguments. See --help."
-    }
-    assert "Invalid command arguments. See --help." in result.stderr
-
-    human = CliRunner().invoke(cli, ["content"])
-    assert human.exit_code == 2
-    assert human.stdout == ""
-    assert "Invalid command arguments. See --help." in human.stderr
-
-
-def test_json_usage_errors_cover_nested_leaf_commands() -> None:
-    result = CliRunner().invoke(cli, ["auth", "verify", "--json"])
-
-    assert result.exit_code == 1
-    assert json.loads(result.stdout)["error"]
-    assert "Invalid command arguments. See --help." in result.stderr
-
-
 @pytest.mark.parametrize(
-    "argv_and_sentinel",
+    "argv",
     [
-        (["auth", "login", "--mfa-method", "PASSWORD_SENTINEL", "--json"], "PASSWORD_SENTINEL"),
-        (["download", "44347", "--assignment", "TOKEN_SENTINEL", "--json"], "TOKEN_SENTINEL"),
-        (["quiz", "44347", "QUIZ_SENTINEL", "--json"], "QUIZ_SENTINEL"),
+        ["content", "--json"],
+        ["auth", "verify", "--json"],
+        ["auth", "login", "--mfa-method", "PASSWORD_SENTINEL", "--json"],
+        ["download", "44347", "--assignment", "TOKEN_SENTINEL", "--json"],
+        ["quiz", "44347", "QUIZ_SENTINEL", "--json"],
     ],
+    ids=["missing-argument", "nested-leaf", "mfa-method", "assignment", "quiz-id"],
 )
-def test_json_usage_errors_never_echo_invalid_secret_like_values(
-    argv_and_sentinel: tuple[list[str], str],
-) -> None:
-    argv, sentinel = argv_and_sentinel
-
+def test_json_usage_errors_are_parseable_and_never_echo_values(argv: list[str]) -> None:
     result = CliRunner().invoke(cli, argv)
 
     assert result.exit_code == 1
@@ -515,21 +442,26 @@ def test_json_usage_errors_never_echo_invalid_secret_like_values(
         "error": "Invalid command arguments. See --help."
     }
     assert "Invalid command arguments. See --help." in result.stderr
-    assert sentinel not in result.stdout + result.stderr
+    assert "SENTINEL" not in result.stdout + result.stderr
 
 
-def test_human_usage_errors_never_echo_invalid_secret_like_values() -> None:
-    sentinel = "PASSWORD_SENTINEL"
-
-    result = CliRunner().invoke(
-        cli,
-        ["auth", "login", "--mfa-method", sentinel],
-    )
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["content"],
+        # A --json after the bare "--" terminator is a value, not the option.
+        ["content", "--", "--json", "extra"],
+        ["auth", "login", "--mfa-method", "PASSWORD_SENTINEL"],
+    ],
+    ids=["missing-argument", "post-terminator-json", "mfa-method"],
+)
+def test_human_usage_errors_stay_on_stderr_and_never_echo_values(argv: list[str]) -> None:
+    result = CliRunner().invoke(cli, argv)
 
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "Invalid command arguments. See --help." in result.stderr
-    assert sentinel not in result.stdout + result.stderr
+    assert "SENTINEL" not in result.stdout + result.stderr
 
 
 def test_format_user_error_keeps_status_and_category_without_transport_details() -> None:
@@ -548,29 +480,6 @@ def test_format_user_error_keeps_status_and_category_without_transport_details()
     assert "PASSWORD_SENTINEL" not in message
     assert "BODY_SENTINEL" not in message
     assert "https://" not in message
-
-
-def test_fixed_cookie_and_download_limit_errors_remain_actionable() -> None:
-    assert format_user_error("No cookies found. Run: lighthouse auth login") == (
-        "No cookies found. Run: lighthouse auth login"
-    )
-    assert format_user_error(
-        NetworkError("Binary download exceeds the configured size limit.")
-    ) == "Binary download exceeds the configured size limit."
-    assert format_user_error(
-        NetworkError("The server returned an unexpected redirect.")
-    ) == "The server returned an unexpected redirect."
-
-
-def test_format_user_error_strips_relative_query_and_body() -> None:
-    message = format_user_error(
-        "Request failed: /d2l/api?session=SESSION_SENTINEL; "
-        "response body: BODY_SENTINEL"
-    )
-
-    assert message == "Network error. Check your connection and try again."
-    assert "SESSION_SENTINEL" not in message
-    assert "BODY_SENTINEL" not in message
 
 
 @pytest.mark.parametrize(
@@ -605,10 +514,6 @@ def test_format_user_error_never_echoes_secret_shaped_transport_text(raw: str) -
     assert "PASSWORD_SENTINEL" not in message
     assert "abcd1234" not in message
     assert "abcdef123" not in message
-
-
-def test_format_user_error_uses_generic_fallback_for_unknown_upstream_text() -> None:
-    assert format_user_error("opaque upstream implementation detail") == "Command failed."
 
 
 @pytest.mark.parametrize(
@@ -832,17 +737,26 @@ def test_course_catalog_uses_configured_legacy_mock_when_projection_is_empty() -
     assert client.get_courses.call_count == 2
 
 
+def _course_row(
+    org_unit_id: int, name: str = "", code: str = "", *,
+    active: bool = True, semester: str = "", source: str = "unmapped",
+) -> dict[str, object]:
+    """One `courses --json` entry."""
+    return {
+        "OrgUnitId": org_unit_id,
+        "Name": name,
+        "Code": code,
+        "IsActive": active,
+        "semester": semester,
+        "semester_source": source,
+    }
+
+
 def test_courses_expose_explicit_semester_state_without_writing_config(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "course-config.json"
-    original = json.dumps(
-        {
-            "tracked_courses": {
-                "123": {"name": "Mapped", "semester": "Sem V"},
-            }
-        }
-    )
+    original = json.dumps({"tracked_courses": {"123": {"name": "Mapped", "semester": "Sem V"}}})
     config_path.write_text(original, encoding="utf-8")
     enrollments = [
         {"OrgUnit": {"Id": 123, "Name": "Mapped", "Code": "M"}},
@@ -855,34 +769,15 @@ def test_courses_expose_explicit_semester_state_without_writing_config(
         return_value=enrollments,
     ):
         result = CliRunner().invoke(cli, ["courses", "--json"])
+        written = config_path.read_text(encoding="utf-8")
+        human = CliRunner().invoke(cli, ["courses"])
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == [
-        {
-            "OrgUnitId": 123,
-            "Name": "Mapped",
-            "Code": "M",
-            "IsActive": True,
-            "semester": "Sem V",
-            "semester_source": "config",
-        },
-        {
-            "OrgUnitId": 456,
-            "Name": "Unmapped",
-            "Code": "U",
-            "IsActive": True,
-            "semester": "",
-            "semester_source": "unmapped",
-        },
+        _course_row(123, "Mapped", "M", semester="Sem V", source="config"),
+        _course_row(456, "Unmapped", "U"),
     ]
-    assert config_path.read_text(encoding="utf-8") == original
-
-    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path), patch.object(
-        LighthouseClient,
-        "get_course_enrollments",
-        return_value=enrollments,
-    ):
-        human = CliRunner().invoke(cli, ["courses"])
+    assert written == original
     assert human.exit_code == 0
     assert "Unmapped" in human.stdout
 
@@ -914,24 +809,7 @@ def test_courses_project_malformed_enrollment_labels_for_human_and_json() -> Non
         human = CliRunner().invoke(cli, ["courses"])
 
     assert structured.exit_code == 0
-    assert json.loads(structured.stdout) == [
-        {
-            "OrgUnitId": 123,
-            "Name": "",
-            "Code": "",
-            "IsActive": True,
-            "semester": "",
-            "semester_source": "unmapped",
-        },
-        {
-            "OrgUnitId": 456,
-            "Name": "",
-            "Code": "",
-            "IsActive": True,
-            "semester": "",
-            "semester_source": "unmapped",
-        },
-    ]
+    assert json.loads(structured.stdout) == [_course_row(123), _course_row(456)]
     assert human.exit_code == 0
     assert sentinel not in structured.stdout + structured.stderr + human.stdout + human.stderr
     assert "CODE_CONTROL_SENTINEL" not in structured.stdout + structured.stderr + human.stdout + human.stderr
@@ -1029,19 +907,9 @@ def test_dry_run_preserves_local_path_validation_errors_as_json(tmp_path: Path) 
     outside = tmp_path / "outside"
     outside.mkdir()
     (output_root / "Course-123").symlink_to(outside, target_is_directory=True)
-    toc = {
-        "Modules": [{
-            "ModuleId": 1,
-            "Title": "Module",
-            "Modules": [],
-            "Topics": [{
-                "TopicId": 7,
-                "Title": "notes.pdf",
-                "TypeIdentifier": "File",
-                "LastModifiedDate": "2026-01-01T00:00:00Z",
-            }],
-        }],
-    }
+    toc = _one_topic_toc(
+        TopicId=7, Title="notes.pdf", TypeIdentifier="File", LastModifiedDate="2026-01-01T00:00:00Z",
+    )
     with patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
         patch.object(LighthouseClient, "get_courses", return_value=[{"OrgUnitId": 123, "Name": "Course"}]):
         result = CliRunner().invoke(
@@ -1106,22 +974,17 @@ def test_single_sync_empty_toc_preserves_orphaned_entries_and_exit_code(
 ) -> None:
     sentinel = "password=SECRET_SENTINEL"
     output_root = tmp_path / "out"
-    output_root.mkdir()
     course_root = output_root / "Course-44347"
-    course_root.mkdir()
+    course_root.mkdir(parents=True)
+    manifest_entry = {
+        "sha256": "a" * 64,
+        "filename": sentinel,
+        "size": 3,
+        "downloaded_at": "2026-01-01T00:00:00Z",
+        "last_modified": "2026-01-01T00:00:00Z",
+    }
     (course_root / ".lighthouse.json").write_text(
-        json.dumps(
-            {
-                "99": {
-                    "sha256": "a" * 64,
-                    "filename": sentinel,
-                    "size": 3,
-                    "downloaded_at": "2026-01-01T00:00:00Z",
-                    "last_modified": "2026-01-01T00:00:00Z",
-                }
-            }
-        ),
-        encoding="utf-8",
+        json.dumps({"99": manifest_entry}), encoding="utf-8",
     )
 
     with patch.object(
@@ -1129,26 +992,13 @@ def test_single_sync_empty_toc_preserves_orphaned_entries_and_exit_code(
         "get_enrolled_courses",
         return_value=[{"OrgUnitId": 44347, "Name": "Course"}],
     ), patch.object(LighthouseClient, "get_content_toc", return_value={"Modules": []}):
-        structured = CliRunner().invoke(
-            cli,
-            ["sync", "44347", "--json", "-o", str(output_root)],
-        )
-        human = CliRunner().invoke(
-            cli,
-            ["sync", "44347", "-o", str(output_root)],
-        )
+        structured = CliRunner().invoke(cli, ["sync", "44347", "--json", "-o", str(output_root)])
+        human = CliRunner().invoke(cli, ["sync", "44347", "-o", str(output_root)])
 
     assert structured.exit_code == 0
     payload = json.loads(structured.stdout)
     assert payload["downloaded"] == []
-    assert payload["orphaned"] == [
-        {
-            "topic_id": "99",
-            "size": 3,
-            "size_kb": 0.0,
-            "sha256": "a" * 64,
-        }
-    ]
+    assert payload["orphaned"] == [{"topic_id": "99", "size": 3, "size_kb": 0.0, "sha256": "a" * 64}]
     assert sentinel not in structured.stdout + structured.stderr
     assert human.exit_code == 0
     assert "1 orphaned" in human.stdout
@@ -1160,32 +1010,12 @@ def test_multi_course_errors_drop_server_provided_filename_and_title(
     sentinel = "TOKEN_SENTINEL"
     config_path = tmp_path / "course-config.json"
     config_path.write_text(
-        json.dumps(
-            {
-                "tracked_courses": {
-                    "111": {"name": "Course", "semester": "Sem I"},
-                }
-            }
-        ),
+        json.dumps({"tracked_courses": {"111": {"name": "Course", "semester": "Sem I"}}}),
         encoding="utf-8",
     )
-    toc = {
-        "Modules": [
-            {
-                "ModuleId": 1,
-                "Title": "Module",
-                "Modules": [],
-                "Topics": [
-                    {
-                        "TopicId": 7,
-                        "Title": sentinel,
-                        "TypeIdentifier": "File",
-                        "LastModifiedDate": "2026-01-01T00:00:00Z",
-                    }
-                ],
-            }
-        ]
-    }
+    toc = _one_topic_toc(
+        TopicId=7, Title=sentinel, TypeIdentifier="File", LastModifiedDate="2026-01-01T00:00:00Z",
+    )
 
     with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", config_path), \
         patch.object(LighthouseClient, "get_semesters", return_value=[{"OrgUnitId": 100, "Name": "Sem I"}]), \
@@ -1200,41 +1030,39 @@ def test_multi_course_errors_drop_server_provided_filename_and_title(
         ), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
         patch.object(LighthouseClient, "download_topic_file", side_effect=RuntimeError("download failed")):
         result = CliRunner().invoke(
-            cli,
-            ["download", "--semester", "100", "--json", "-o", str(tmp_path / "out")],
+            cli, ["download", "--semester", "100", "--json", "-o", str(tmp_path / "out")],
         )
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
-    assert payload["courses"][0]["errors"] == [
-        {"topic_id": "7", "error": "Command failed."}
-    ]
+    assert payload["courses"][0]["errors"] == [{"topic_id": "7", "error": "Command failed."}]
     assert sentinel not in result.stdout + result.stderr
 
 
-def test_semesters_runtime_failure_is_one_json_document() -> None:
-    with patch.object(LighthouseClient, "get_semesters", side_effect=RuntimeError("opaque")):
-        result = CliRunner().invoke(cli, ["semesters", "--json"])
+@pytest.mark.parametrize(
+    ("argv", "failing", "key"),
+    [
+        (["semesters", "--json"], ["lighthouse_cli.api.LighthouseClient.get_semesters"], "semesters"),
+        (
+            ["courses", "--json"],
+            [
+                "lighthouse_cli.api.LighthouseClient.get_enrolled_courses",
+                "lighthouse_cli.api.LighthouseClient.get_courses",
+            ],
+            "courses",
+        ),
+        (["config", "courses", "--list", "--json"], ["lighthouse_cli.course_config.load"], "courses"),
+    ],
+    ids=["semesters", "courses", "config"],
+)
+def test_runtime_failure_is_one_json_document(argv: list[str], failing: list[str], key: str) -> None:
+    with ExitStack() as stack:
+        for target in failing:
+            stack.enter_context(patch(target, side_effect=RuntimeError("opaque")))
+        result = CliRunner().invoke(cli, argv)
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {"semesters": [], "error": "Command failed."}
-
-
-def test_courses_runtime_failure_is_one_json_document() -> None:
-    with patch.object(LighthouseClient, "get_enrolled_courses", side_effect=RuntimeError("opaque")), \
-        patch.object(LighthouseClient, "get_courses", side_effect=RuntimeError("opaque fallback")):
-        result = CliRunner().invoke(cli, ["courses", "--json"])
-
-    assert result.exit_code == 1
-    assert json.loads(result.stdout) == {"courses": [], "error": "Command failed."}
-
-
-def test_config_runtime_failure_is_one_json_document() -> None:
-    with patch("lighthouse_cli.course_config.load", side_effect=RuntimeError("opaque")):
-        result = CliRunner().invoke(cli, ["config", "courses", "--list", "--json"])
-
-    assert result.exit_code == 1
-    assert json.loads(result.stdout) == {"courses": [], "error": "Command failed."}
+    assert json.loads(result.stdout) == {key: [], "error": "Command failed."}
 
 
 def test_config_add_normalizes_positive_ids_and_keeps_first_duplicate(
@@ -1273,30 +1101,7 @@ def test_courses_skips_bad_ids_and_normalizes_boolean_like_active_values() -> No
         result = CliRunner().invoke(cli, ["courses", "--json"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == [
-        {
-            "OrgUnitId": 11,
-            "Name": "",
-            "Code": "",
-            "IsActive": False,
-            "semester": "",
-            "semester_source": "unmapped",
-        },
-        {
-            "OrgUnitId": 12,
-            "Name": "Active",
-            "Code": "",
-            "IsActive": True,
-            "semester": "",
-            "semester_source": "unmapped",
-        },
-    ]
-
-
-def test_recovery_hint_discards_arbitrary_credential_arguments() -> None:
-    assert format_user_error("Run: lighthouse auth login --pass PASSWORD_SENTINEL") == (
-        "Run: lighthouse auth login"
-    )
+    assert json.loads(result.stdout) == [_course_row(11, active=False), _course_row(12, "Active")]
 
 
 @pytest.mark.parametrize(
@@ -1354,10 +1159,44 @@ def test_recovery_hint_discards_arbitrary_credential_arguments() -> None:
             "Submission outcome is unknown because the API returned an unsupported "
             "result shape. Verify the assignment status before trying again.",
         ),
+        (
+            "No cookies found. Run: lighthouse auth login",
+            "No cookies found. Run: lighthouse auth login",
+        ),
+        (
+            NetworkError("Binary download exceeds the configured size limit."),
+            "Binary download exceeds the configured size limit.",
+        ),
+        (
+            NetworkError("The server returned an unexpected redirect."),
+            "The server returned an unexpected redirect.",
+        ),
+        (
+            "Request failed: /d2l/api?session=SESSION_SENTINEL; "
+            "response body: BODY_SENTINEL",
+            "Network error. Check your connection and try again.",
+        ),
+        ("opaque upstream implementation detail", "Command failed."),
+        ("Run: lighthouse auth login --pass PASSWORD_SENTINEL", "Run: lighthouse auth login"),
+        (
+            "opaque upstream response: {"
+            '"headers": {"Cookie": "d2lSecureSessionVal=cookie-value-sentinel", '
+            '"X-Api-Key": "sk-test-api-key-sentinel"}, '
+            '"credentials": {"password": "correct-horse-sentinel"}, '
+            '"config": {"apiKey": "sk-live-api-key-sentinel"}}',
+            "Command failed.",
+        ),
+        (
+            NetworkError(
+                "Submission request was rate limited; no retry was attempted. "
+                "response body: {\"token\": \"TOKEN_SENTINEL\"}"
+            ),
+            "Rate limited. No retry was attempted.",
+        ),
     ],
 )
 def test_format_user_error_uses_fixed_templates_for_known_local_errors(
-    raw: str, expected: str,
+    raw: object, expected: str,
 ) -> None:
     message = format_user_error(raw)
 
@@ -1368,33 +1207,3 @@ def test_format_user_error_uses_fixed_templates_for_known_local_errors(
     assert "789" not in message
     assert "/private/" not in message
     assert "available folders" not in message.lower()
-
-
-def test_format_user_error_redacts_nested_cookie_password_and_api_key_values() -> None:
-    raw = (
-        "opaque upstream response: {"
-        '"headers": {"Cookie": "d2lSecureSessionVal=cookie-value-sentinel", '
-        '"X-Api-Key": "sk-test-api-key-sentinel"}, '
-        '"credentials": {"password": "correct-horse-sentinel"}, '
-        '"config": {"apiKey": "sk-live-api-key-sentinel"}}'
-    )
-
-    message = format_user_error(raw)
-
-    assert message == "Command failed."
-    for secret in (
-        "cookie-value-sentinel",
-        "sk-test-api-key-sentinel",
-        "correct-horse-sentinel",
-        "sk-live-api-key-sentinel",
-    ):
-        assert secret not in message
-
-
-def test_format_user_error_keeps_typed_submission_rate_limit_actionable() -> None:
-    error = NetworkError(
-        "Submission request was rate limited; no retry was attempted. "
-        "response body: {\"token\": \"TOKEN_SENTINEL\"}"
-    )
-
-    assert format_user_error(error) == "Rate limited. No retry was attempted."

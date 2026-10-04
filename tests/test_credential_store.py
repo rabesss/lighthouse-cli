@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 
+from lighthouse_cli import credential_store
 from lighthouse_cli.auth import CredentialStore, CredentialStoreError
+from lighthouse_cli.config import ensure_config_dir
+from lighthouse_cli.credential_store import _derive_passphrase_key
+from lighthouse_cli.utils import _loads_strict_json
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 @pytest.fixture
-def config_dir(tmp_path: Path) -> Path:
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fresh config directory that LIGHTHOUSE_CONFIG_DIR points at."""
     d = tmp_path / ".config" / "lighthouse-cli"
     d.mkdir(parents=True)
+    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(d))
     return d
 
 
@@ -30,16 +35,9 @@ def credentials_path(config_dir: Path) -> Path:
 # VAL-AUTH-013: Encrypted credential storage
 # ---------------------------------------------------------------------------
 
-def test_save_credentials_encrypted(
-    config_dir: Path,
-    credentials_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_save_credentials_encrypted(credentials_path: Path) -> None:
     """Credentials are stored encrypted, not plaintext."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
-    store.save("user@manipal.edu", "secret_password")
+    CredentialStore().save("user@manipal.edu", "secret_password")
 
     assert credentials_path.exists()
     content = credentials_path.read_text()
@@ -50,14 +48,8 @@ def test_save_credentials_encrypted(
     assert "gAAAAA" in content or "{" in content  # encrypted or JSON structure
 
 
-def test_load_credentials_decrypts(
-    config_dir: Path,
-    credentials_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_load_credentials_decrypts(config_dir: Path) -> None:
     """Stored credentials can be decrypted and loaded."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
     store = CredentialStore()
     store.save("user@manipal.edu", "secret_password")
 
@@ -67,19 +59,11 @@ def test_load_credentials_decrypts(
     assert loaded[1] == "secret_password"
 
 
-def test_credentials_file_permissions(
-    config_dir: Path,
-    credentials_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_credentials_file_permissions(credentials_path: Path) -> None:
     """credentials.json has 0600 permissions."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
+    CredentialStore().save("user@manipal.edu", "secret_password")
 
-    store = CredentialStore()
-    store.save("user@manipal.edu", "secret_password")
-
-    mode = credentials_path.stat().st_mode & 0o777
-    assert mode == 0o600
+    assert credentials_path.stat().st_mode & 0o777 == 0o600
 
 
 # ---------------------------------------------------------------------------
@@ -87,14 +71,10 @@ def test_credentials_file_permissions(
 # ---------------------------------------------------------------------------
 
 def test_corrupted_credentials_fallback(
-    config_dir: Path,
     credentials_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Corrupted credentials.json raises CredentialStoreError."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    # Write garbage
     credentials_path.write_text("not valid json {{{{[[[")
     monkeypatch.setenv("LIGHTHOUSE_USERNAME", "")
     monkeypatch.setenv("LIGHTHOUSE_PASSWORD", "")
@@ -109,39 +89,26 @@ def test_corrupted_credentials_fallback(
 # ---------------------------------------------------------------------------
 
 def test_passphrase_sealed_survives_keyring_loss(
-    config_dir: Path,
     credentials_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Decryption uses the RECORDED key source: a passphrase-sealed artifact
     still opens when the system keyring disappears entirely."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
-    store.save("user@manipal.edu", "secret_password")
+    CredentialStore().save("user@manipal.edu", "secret_password")
 
     # The premise below IS the passphrase source — pin it explicitly.
-    doc = json.loads(credentials_path.read_text())
-    assert doc["key_source"] == "passphrase"
+    assert json.loads(credentials_path.read_text())["key_source"] == "passphrase"
 
-    import sys as _sys
-    monkeypatch.setitem(_sys.modules, "keyring", None)  # import becomes unavailable
-    store2 = CredentialStore()
-    assert store2.load() == ("user@manipal.edu", "secret_password")
+    monkeypatch.setitem(sys.modules, "keyring", None)  # import becomes unavailable
+    assert CredentialStore().load() == ("user@manipal.edu", "secret_password")
 
 
 def test_keyring_sealed_fails_cleanly_on_wrong_key(
-    config_dir: Path,
     credentials_path: Path,
     fake_keyring: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A keyring-sealed artifact raises a clean error when the keyring entry
     no longer matches (different machine scenario)."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    from cryptography.fernet import Fernet
-
     fake_keyring.backend.set_password(
         "lighthouse-cli", "credential-key", Fernet.generate_key().decode()
     )
@@ -161,30 +128,21 @@ def test_keyring_sealed_fails_cleanly_on_wrong_key(
 # VAL-AUTH-030 / VAL-AUTH-031: Empty username/password rejection
 # ---------------------------------------------------------------------------
 
-def test_empty_password_rejected_in_store(
+@pytest.mark.parametrize(
+    ("username", "password", "field"),
+    [("user@manipal.edu", "", "password"), ("", "secret", "username")],
+    ids=["empty-password", "empty-username"],
+)
+def test_empty_credential_rejected_in_store(
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    username: str,
+    password: str,
+    field: str,
 ) -> None:
-    """Empty password is rejected before saving."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
+    """An empty username or password is rejected before saving."""
     with pytest.raises(CredentialStoreError) as exc_info:
-        store.save("user@manipal.edu", "")
-    assert "password" in str(exc_info.value).lower()
-
-
-def test_empty_username_rejected_in_store(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Empty username is rejected before saving."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
-    with pytest.raises(CredentialStoreError) as exc_info:
-        store.save("", "secret")
-    assert "username" in str(exc_info.value).lower()
+        CredentialStore().save(username, password)
+    assert field in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +158,9 @@ def test_config_dir_env_var_respected(
     custom_dir.mkdir()
     monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(custom_dir))
 
-    store = CredentialStore()
-    store.save("user@manipal.edu", "secret")
+    CredentialStore().save("user@manipal.edu", "secret")
 
-    expected_path = custom_dir / "credentials.json"
-    assert expected_path.exists()
+    assert (custom_dir / "credentials.json").exists()
     assert not (tmp_path / ".config" / "lighthouse-cli" / "credentials.json").exists()
 
 
@@ -233,11 +189,9 @@ def test_save_rejects_symlinked_config_dir_without_touching_target(
 
 def test_write_artifact_rejects_symlinked_target_without_touching_target(
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """An artifact symlink is rejected before atomic replacement."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     outside = tmp_path / "outside.json"
     outside.write_text("outside-sentinel", encoding="utf-8")
     artifact = config_dir / "credentials.json"
@@ -256,11 +210,9 @@ def test_write_artifact_rejects_symlinked_target_without_touching_target(
 
 def test_load_rejects_symlinked_artifact_without_reading_target(
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Credential reads do not follow an artifact symlink outside config."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     outside = tmp_path / "outside.json"
     outside.write_text("not-a-credential-document", encoding="utf-8")
     (config_dir / "credentials.json").symlink_to(outside)
@@ -277,8 +229,6 @@ def test_legacy_migration_rejects_symlinked_config_dir_without_resealing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Legacy migration cannot read or replace through a config symlink."""
-    from cryptography.fernet import Fernet
-
     outside = tmp_path / "outside"
     outside.mkdir()
     key = Fernet.generate_key()
@@ -305,8 +255,6 @@ def test_ensure_config_dir_rejects_symlink_without_chmod_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Directory setup does not chmod through a config-directory symlink."""
-    from lighthouse_cli.config import ensure_config_dir
-
     outside = tmp_path / "outside"
     outside.mkdir()
     outside.chmod(0o755)
@@ -322,18 +270,9 @@ def test_ensure_config_dir_rejects_symlink_without_chmod_target(
     assert config_link.is_symlink()
 
 
-# ---------------------------------------------------------------------------
-# Additional tests for CredentialStore
-# ---------------------------------------------------------------------------
-
-def test_store_no_credentials_file_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_store_no_credentials_file_returns_none(config_dir: Path) -> None:
     """load() returns None when credentials file doesn't exist."""
-    config_dir = tmp_path / ".config" / "lighthouse-cli"
-    config_dir.mkdir(parents=True)
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
-    store = CredentialStore()
-    assert store.load() is None
+    assert CredentialStore().load() is None
 
 
 @pytest.mark.parametrize(
@@ -347,11 +286,9 @@ def test_store_no_credentials_file_returns_none(monkeypatch: pytest.MonkeyPatch,
 )
 def test_malformed_stored_credentials_raise_without_echoing_values(
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
     secret: dict[str, object],
 ) -> None:
     """Malformed decrypted values fail closed with a generic local error."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     store = CredentialStore()
     store.write_artifact(store.credentials_file, metadata={}, secret=secret)
 
@@ -363,13 +300,8 @@ def test_malformed_stored_credentials_raise_without_echoing_values(
     assert "PASSWORD_SENTINEL" not in message
 
 
-def test_non_finite_secret_data_is_rejected_without_raw_exception(
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_non_finite_secret_data_is_rejected_without_raw_exception(config_dir: Path) -> None:
     """Credential envelopes never persist JSON NaN/Infinity extensions."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-
     with pytest.raises(CredentialStoreError, match="malformed"):
         CredentialStore().write_artifact(
             config_dir / "credentials.json",
@@ -379,8 +311,6 @@ def test_non_finite_secret_data_is_rejected_without_raw_exception(
 
 
 def test_strict_json_loader_rejects_overflowing_floats() -> None:
-    from lighthouse_cli.utils import _loads_strict_json
-
     with pytest.raises(ValueError, match="non-finite JSON number"):
         _loads_strict_json('{"value": 1e999}')
 
@@ -390,52 +320,39 @@ def test_strict_json_loader_rejects_overflowing_floats() -> None:
 # binascii.Error / UnicodeEncodeError / ValueError traceback.
 # ---------------------------------------------------------------------------
 
-def _sealed_doc(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+def _sealed_doc(config_dir: Path) -> dict:
     """Save credentials and return the parsed sealed envelope."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     CredentialStore().save("user@manipal.edu", "secret_password")
     return json.loads((config_dir / "credentials.json").read_text())
 
 
-def test_truncated_kdf_salt_raises_clean_error(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    doc = _sealed_doc(config_dir, monkeypatch)
-    # 11 chars: not a multiple of 4, so b64decode(validate=True) rejects the
-    # broken padding (a 12-char truncation would still decode cleanly).
-    doc["kdf_salt"] = doc["kdf_salt"][:11]
+@pytest.mark.parametrize(
+    ("field", "corrupt"),
+    [
+        # 11 chars: not a multiple of 4, so b64decode(validate=True) rejects the
+        # broken padding (a 12-char truncation would still decode cleanly).
+        pytest.param("kdf_salt", lambda salt: salt[:11], id="truncated-kdf-salt"),
+        pytest.param("kdf_salt", lambda _salt: "!!!not-base64!!!", id="non-base64-kdf-salt"),
+        pytest.param(
+            "ciphertext",
+            lambda _token: "gAAAA-ünïcödé-ciphertext",
+            id="non-ascii-ciphertext",
+        ),
+    ],
+)
+def test_malformed_envelope_field_raises_clean_error(config_dir: Path, field, corrupt) -> None:
+    doc = _sealed_doc(config_dir)
+    doc[field] = corrupt(doc[field])
     (config_dir / "credentials.json").write_text(json.dumps(doc))
     with pytest.raises(CredentialStoreError):
         CredentialStore().load()
 
-
-def test_non_base64_kdf_salt_raises_clean_error(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    doc = _sealed_doc(config_dir, monkeypatch)
-    doc["kdf_salt"] = "!!!not-base64!!!"
-    (config_dir / "credentials.json").write_text(json.dumps(doc))
-    with pytest.raises(CredentialStoreError):
-        CredentialStore().load()
-
-
-def test_non_ascii_ciphertext_raises_clean_error(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    doc = _sealed_doc(config_dir, monkeypatch)
-    doc["ciphertext"] = "gAAAA-ünïcödé-ciphertext"
-    (config_dir / "credentials.json").write_text(json.dumps(doc))
-    with pytest.raises(CredentialStoreError):
-        CredentialStore().load()
 
 def test_corrupt_keyring_entry_raises_clean_error(
-    config_dir: Path,
     credentials_path: Path,
     fake_keyring: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A hand-mangled keyring entry wraps Fernet's raw ValueError cleanly."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
     fake_keyring.set_password("lighthouse-cli", "credential-key", "not-a-fernet-key")
     credentials_path.write_text(json.dumps({
         "v": 2, "key_source": "keyring", "ciphertext": "gAAAAA",
@@ -448,34 +365,22 @@ def test_corrupt_keyring_entry_raises_clean_error(
 # F15: the passphrase-derived-key cache is bounded.
 # ---------------------------------------------------------------------------
 
-def test_passphrase_key_cache_is_bounded(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from lighthouse_cli.credential_store import _derive_passphrase_key
-
+def test_passphrase_key_cache_is_bounded() -> None:
     # iterations=1 keeps this a cache-behavior test, not 40 real PBKDF2 runs.
     for i in range(40):
         _derive_passphrase_key(f"pass-{i}", bytes([i]) * 16, 1)
-    info = _derive_passphrase_key.cache_info()
-    assert info.currsize <= 32
+    assert _derive_passphrase_key.cache_info().currsize <= 32
 
 
-def test_passphrase_envelope_records_kdf_iterations(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_passphrase_envelope_records_kdf_iterations(config_dir: Path) -> None:
     """Sealed envelopes record their KDF count; envelopes from before the
     field existed still open via the pre-record fallback (no orphans)."""
-    monkeypatch.setenv("LIGHTHOUSE_CONFIG_DIR", str(config_dir))
-    CredentialStore().save("user@manipal.edu", "secret_password")
-    doc = json.loads((config_dir / "credentials.json").read_text())
-    assert doc["kdf_iterations"] == 600_000
+    assert _sealed_doc(config_dir)["kdf_iterations"] == 600_000
 
     # Simulate a genuine pre-record envelope: actually seal at the legacy
     # 300k count, then strip the recorded field.
-    import lighthouse_cli.credential_store as cs
-
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(cs, "_KDF_ITERATIONS", 300_000)
+        mp.setattr(credential_store, "_KDF_ITERATIONS", 300_000)
         CredentialStore().save("user@manipal.edu", "secret_password")
     legacy_doc = json.loads((config_dir / "credentials.json").read_text())
     assert legacy_doc["kdf_iterations"] == 300_000
@@ -491,16 +396,14 @@ def test_passphrase_envelope_records_kdf_iterations(
 @pytest.mark.parametrize("bad_iterations", [True, 0, -1, "600000", 600_001, 10**12])
 def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
     bad_iterations: object,
 ) -> None:
-    doc = _sealed_doc(config_dir, monkeypatch)
+    doc = _sealed_doc(config_dir)
     doc["kdf_iterations"] = bad_iterations
     (config_dir / "credentials.json").write_text(json.dumps(doc))
-    expected = "unsupported KDF iteration" if isinstance(
-        bad_iterations, int
-    ) and not isinstance(bad_iterations, bool) else "invalid KDF iteration"
+    is_int = isinstance(bad_iterations, int) and not isinstance(bad_iterations, bool)
+    expected = "unsupported KDF iteration" if is_int else "invalid KDF iteration"
     with pytest.raises(CredentialStoreError, match=expected) as exc_info:
         CredentialStore().load()
-    if isinstance(bad_iterations, int) and not isinstance(bad_iterations, bool):
+    if is_int:
         assert str(bad_iterations) in str(exc_info.value)
