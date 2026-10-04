@@ -283,11 +283,13 @@ Submit before `seconds_left` reaches 0.
 On a quiz that submits itself, nothing more is sent once time is up:
 `page`, `answer`, `next`, `previous`, `submit`, `images` and `start` are refused, and
 `verify` reports that Brightspace has yet to submit the attempt until it has
-(shortly after the limit). If Brightspace still has the attempt open with
-time left (extra time, or a computer clock that was off), `verify` reads the
-new limit and the attempt can be continued with `start`. Without
-auto-submit, answers can still be saved and submitted after the limit; the
-quiz's late-submission setting decides how they count.
+(shortly after the limit). Until then `start` starts nothing even without the
+CLI's record of the attempt (after `forget`, or on another computer), as the
+quiz page says Brightspace is still submitting it. If Brightspace still has
+the attempt open with time left (extra time, or a computer clock that was
+off), `verify` reads the new limit and the attempt can be continued with
+`start`. Without auto-submit, answers can still be saved and submitted after
+the limit; the quiz's late-submission setting decides how they count.
 
 Question authoring, teacher grading and full
 course-administration parity are **not implemented** yet. Instructor question

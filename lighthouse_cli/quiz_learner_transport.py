@@ -62,6 +62,9 @@ REFUSE_START_PASSWORD = "This quiz needs a password, which the CLI does not supp
 REFUSE_START_BROWSER = "This quiz needs a browser step (such as LockDown Browser) that the CLI cannot do."
 REFUSE_START_ROLE = "Brightspace does not let an impersonated role take a quiz."
 REFUSE_START_PROTECTION = "Quiz form protection could not be verified. Nothing was started."
+# Filled in with the attempt's number alone, an integer.
+REFUSE_START_PROCESSING = ("Brightspace is still submitting attempt {} after its time ran out, so nothing was started. "
+                           "Run attempt start again in a few minutes, or attempt verify if the CLI was taking that attempt.")
 REFUSE_PAGE_PROTECTION = "Form protection could not be read from the quiz page. Nothing was sent."
 REFUSE_IMAGE_SOURCE = "This image is not stored on Brightspace, so the CLI does not download it."
 REFUSE_IMAGE_ROUTE = "This image address is a Brightspace page, not a file, so the CLI does not request it."
@@ -110,13 +113,19 @@ def _summary_path(course_id: int, quiz_id: int) -> str:
 
 @dataclass(frozen=True)
 class LearnerSummary:
-    """The quiz summary's own start state. Private fields are secret-bearing."""
+    """The quiz summary's own start state. Private fields are secret-bearing.
+
+    ``attempt_processing`` is the number of an attempt Brightspace is still
+    submitting after its time ran out. Until it has, the summary flags
+    Continue, yet that attempt cannot be continued and no new one started.
+    """
 
     course_id: int
     quiz_id: int
     can_start: bool
     can_continue: bool
     attempt_in_progress: int | None
+    attempt_processing: int | None
     _flags: dict[str, bool] = field(repr=False, compare=False)
     _hidden_fields: dict[str, str] = field(repr=False, compare=False)
     _password_input: bool = field(repr=False, compare=False)
@@ -125,7 +134,8 @@ class LearnerSummary:
 
     def public_data(self) -> dict[str, Any]:
         return {"course_id": self.course_id, "quiz_id": self.quiz_id, "can_start": self.can_start,
-                "can_continue": self.can_continue, "attempt_in_progress": self.attempt_in_progress}
+                "can_continue": self.can_continue, "attempt_in_progress": self.attempt_in_progress,
+                "attempt_processing": self.attempt_processing}
 
 
 def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int) -> LearnerSummary:
@@ -145,7 +155,12 @@ def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int) -> Learn
         raise PreviewPageError()
     text = " ".join(soup.get_text(" ", strip=True).split())
     progress = re.findall(r"\(Attempt ([0-9]{1,6}) in progress\)", text)
-    if len(progress) > 1 or bool(progress) != flags["continueQuiz"]:
+    processing = re.findall(r"\(Attempt ([0-9]{1,6}) is being processed\)", text)
+    # continueQuiz names one attempt: in progress, or still being submitted
+    # after its time ran out, which nothing on the page may start or continue.
+    if len(progress) + len(processing) > 1 or bool(progress or processing) != flags["continueQuiz"]:
+        raise PreviewPageError()
+    if processing and (flags["startQuiz"] or labels):
         raise PreviewPageError()
     try:
         protection: FormProtection | None = form_protection_from_homepage(body)
@@ -155,8 +170,9 @@ def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int) -> Learn
     return LearnerSummary(
         course_id, quiz_id,
         can_start=takeable and flags["startQuiz"] and not flags["continueQuiz"],
-        can_continue=takeable and flags["continueQuiz"] and not flags["startQuiz"],
+        can_continue=takeable and flags["continueQuiz"] and not flags["startQuiz"] and not processing,
         attempt_in_progress=int(progress[0]) if progress else None,
+        attempt_processing=int(processing[0]) if processing else None,
         _flags=flags, _hidden_fields=hidden,
         _password_input=bool(form.select('input[type="password"]') or soup.select('input[name="password"]')),
         _button=labels[0] if labels else None, _protection=protection,
@@ -247,8 +263,15 @@ def read_learner_timer(client: LighthouseClient, *, course_id: int, quiz_id: int
     return None if timer is None else dataclasses.replace(timer, clock_offset=offset)
 
 
+def refuse_while_processing(summary: LearnerSummary) -> None:
+    """Refuse to start or continue while Brightspace is still submitting an attempt whose time ran out."""
+    if summary.attempt_processing is not None:
+        raise PreviewRefusedError(REFUSE_START_PROCESSING.format(int(summary.attempt_processing)))
+
+
 def _start_fields(summary: LearnerSummary, *, continue_only: bool) -> tuple[dict[str, str], bool]:
     """The summary form's start or continue action, or a fixed refusal."""
+    refuse_while_processing(summary)
     flags = summary._flags
     if flags["isImpersonatingRole"]:
         raise PreviewRefusedError(REFUSE_START_ROLE)

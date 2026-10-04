@@ -40,6 +40,7 @@ from lighthouse_cli.quiz_learner_session import (
 )
 from lighthouse_cli.quiz_learner_transport import (
     REFUSE_IMAGE_SOURCE,
+    REFUSE_START_PROCESSING,
     REFUSE_START_UNAVAILABLE,
     LearnerAdvanceUnknownError,
     LearnerSaveUnknownError,
@@ -57,6 +58,11 @@ ACTIVE = {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
           "operation": None, "timer": None}
 
 
+def summary_state(*, resumed: bool = False, processing: int | None = None) -> Mock:
+    """The quiz summary: whether it offers Continue, and the number of an attempt Brightspace is still submitting."""
+    return Mock(can_continue=resumed, attempt_processing=processing)
+
+
 def open_page(number: int = 1, *, next_control: bool = True, content: str | None = None):
     content = questions(page=number) if content is None else content
     return parse(body(content, page=number, extra=LEARNER_BUTTONS + (NEXT if next_control else "")), page=number)
@@ -70,7 +76,7 @@ def remote():
     client.get_json.side_effect = lambda path, **kwargs: {"Identifier": state["actor"]}
     client.get_quiz_detail.return_value = dict(QUIZ)
     with patch(f"{SESSION}.LighthouseClient", return_value=client), \
-            patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=False)) as summary, \
+            patch(f"{SESSION}.read_learner_summary", return_value=summary_state()) as summary, \
             patch(f"{SESSION}.read_learner_timer", return_value=None):
         yield client, state, summary
 
@@ -81,7 +87,7 @@ def saved(workflow):
 
 def start(workflow, page=None, *, resumed: bool = False):
     page = open_page() if page is None else page
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=resumed)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=resumed)), \
             patch(f"{SESSION}.start_learner", return_value=page) as started:
         result = workflow.start()
     started.assert_called_once()
@@ -121,7 +127,7 @@ def assert_refused(workflow, message, actions=("page", "next", "submit", "images
 def test_start_records_its_intent_first_and_reports_the_quiz(remote):
     workflow = LearnerWorkflow(10, 20)
     seen = {}
-    summary = Mock(can_continue=False)
+    summary = summary_state()
 
     def fake_start(client, *, on_identity, **kwargs):
         seen.update(saved(workflow))
@@ -184,7 +190,7 @@ def test_a_refused_start_keeps_the_previous_cursor(remote):
             workflow.start()
     assert workflow.status()["status"] == "absent"
     start(workflow, open_page(2), resumed=True)
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", side_effect=PreviewRefusedError(REFUSE_START_UNAVAILABLE)):
         with pytest.raises(PreviewRefusedError):
             workflow.start()
@@ -228,7 +234,7 @@ def test_the_clis_unsubmitted_attempt_is_only_continued(workflow, change):
     before = saved(workflow)
     assert_refused(workflow, "no new attempt was started", ("start",))
     assert saved(workflow) == before
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", return_value=open_page(2)) as started:
         workflow.start()
     assert started.call_args.kwargs["continue_only"] is True
@@ -563,7 +569,7 @@ def test_a_recovery_start_that_fails_midway_still_names_the_clis_attempt(remote)
     workflow = LearnerWorkflow(10, 20)
     start(workflow, open_page(2), resumed=True)
     workflow._save({**saved(workflow), "status": "uncertain", "operation": "submit"})
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
         with pytest.raises(LearnerStartUnknownError):
             workflow.start()
@@ -582,7 +588,7 @@ def test_another_attempt_in_progress_is_not_taken_over(workflow):
     def continued(client, *, on_identity, **kwargs):
         on_identity(31, 1)
         return other
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", side_effect=continued):
         with pytest.raises(LearnerWorkflowError, match="different attempt in progress"):
             workflow.start()
@@ -673,6 +679,58 @@ def test_once_time_is_up_nothing_is_sent_and_verify_waits_for_brightspace(remote
     assert workflow.status()["status"] == "submitted"
     # A new attempt has a limit of its own.
     assert 190 <= start_timed(workflow, timed(200))["timer"]["seconds_left"] <= 200
+
+
+PROCESSING = REFUSE_START_PROCESSING.format(10)
+
+
+@pytest.mark.parametrize("cursor", ["none", "forgotten", "submitted"])
+def test_while_brightspace_submits_an_attempt_start_without_its_cursor_sends_nothing(remote, cursor):
+    workflow = LearnerWorkflow(10, 20)
+    if cursor != "none":
+        start(workflow)
+        if cursor == "forgotten":
+            workflow.forget()
+        else:
+            with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT):
+                workflow.verify()
+    before = workflow.path.read_bytes() if workflow.path.exists() else None
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(processing=10)), \
+            patch(f"{SESSION}.start_learner") as started:
+        with pytest.raises(PreviewRefusedError, match=re.escape(PROCESSING)):
+            workflow.start()
+    started.assert_not_called()
+    assert (workflow.path.read_bytes() if workflow.path.exists() else None) == before  # not even rewritten
+    assert workflow.status()["status"] == ("submitted" if cursor == "submitted" else "absent")
+    # Once Brightspace has submitted it, start begins a new attempt.
+    with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
+        workflow.start()
+    assert started.call_args.kwargs["continue_only"] is False
+
+
+@pytest.mark.parametrize(("timer", "change"), [
+    (None, {}),  # untimed by its frame (special access) or read before the quiz was timed
+    (200, {}),  # a local clock that runs behind
+    (None, {"status": "uncertain", "operation": "start"}),  # its limit could not be read
+])
+def test_while_brightspace_submits_an_attempt_start_with_its_cursor_sends_nothing(remote, timer, change):
+    workflow = LearnerWorkflow(10, 20)
+    start_timed(workflow, None if timer is None else timed(timer))
+    workflow._save({**saved(workflow), **change})
+    before = workflow.path.read_bytes()
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(processing=10)), \
+            patch(f"{SESSION}.start_learner") as started:
+        with pytest.raises(PreviewRefusedError, match=re.escape(PROCESSING)):
+            workflow.start()
+    started.assert_not_called()
+    assert workflow.path.read_bytes() == before
+    # verify reads the attempt as not submitted until Brightspace has submitted it.
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()):
+        with pytest.raises(LearnerNotSubmittedError):
+            workflow.verify()
+    with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT):
+        assert workflow.verify() == RECEIPT
+    assert workflow.status()["status"] == "submitted"
 
 
 @pytest.mark.parametrize("operation", ["answer", "next", "previous", "submit"])
@@ -789,7 +847,7 @@ def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote, fail
     assert workflow.status() == {**ACTIVE, "status": "uncertain", "operation": "start"}
     assert_refused(workflow, "Run attempt start", ("page",))
     # Starting again only continues that attempt and reads its limit again.
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", return_value=open_page()) as again, \
             patch(f"{SESSION}.read_learner_timer", return_value=timed(200)):
         assert workflow.start()["timer"]["limit_seconds"] == 240
@@ -802,7 +860,7 @@ def test_a_recovery_start_that_finds_the_time_up_refuses_the_attempt(remote):
             patch(f"{SESSION}.read_learner_timer", side_effect=NetworkError("no")):
         with pytest.raises(LearnerWorkflowError, match="time limit could not be read"):
             workflow.start()
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", return_value=open_page()), \
             patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
         with pytest.raises(LearnerWorkflowError, match=TIME_UP):
@@ -816,7 +874,7 @@ def test_a_recovery_start_keeps_the_attempts_limit(remote):
     start_timed(workflow, timed(200))
     timer = saved(workflow)["timer"]
     workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
-    with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
         with pytest.raises(LearnerStartUnknownError):
             workflow.start()
@@ -1051,6 +1109,8 @@ def test_cli_errors_are_fixed_or_sanitized():
         assert json.loads(invoke("verify", "10", "20", "--json").stdout)["error"] == str(LearnerSubmitUnknownError())
         workflow.return_value.verify.side_effect = LearnerNotSubmittedError()
         assert json.loads(invoke("verify", "10", "20", "--json").stdout)["error"] == str(LearnerNotSubmittedError())
+        workflow.return_value.start.side_effect = PreviewRefusedError(PROCESSING)
+        assert json.loads(invoke("start", "10", "20", "--yes", "--json").stdout)["error"] == PROCESSING
         unanswered = [{"page": 2, "question_id": 104, "number": 4}]
         workflow.return_value.submit.side_effect = LearnerUnansweredError(unanswered)
         # Without --json the questions are listed on stderr.

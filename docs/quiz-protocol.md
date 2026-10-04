@@ -42,7 +42,8 @@ posts:
    when the quiz was opened from a content link. A password-protected quiz
    also needs the summary form's `password` field. The summary script's
    state says what a start would do: `canTakeQuiz`, `startQuiz` (a new
-   attempt), `continueQuiz` (one in progress) and `hasPass`. `DoAction`'s
+   attempt), `continueQuiz` (one in progress, or one the server is still
+   submitting; see "Timed quizzes") and `hasPass`. `DoAction`'s
    code refuses to start while its `isImpersonatingRole` flag is set; a
    direct start POST with that flag set was not tried. In the sandbox's
    "View as Student" role the flag was false, `canTakeQuiz` was true and
@@ -250,6 +251,14 @@ the question importer (MathML in the HTML, an image field) showed:
 - Both kinds of image returned `image/png` to a plain GET with the
   learner's session. `/content/...` is not an API path, so it is requested
   on the LMS origin, not under the API root.
+- The same attempt, continued a day later with `start` and read with
+  `page`, parsed all six questions as supported (single choice,
+  multi-select, true/false). `images` saved its seven images (the attached
+  one and six inline, four of them in choices) as `image/png`, each
+  byte-identical to the uploaded file; a file used twice in one question
+  is listed and saved once per use. A Unicode identifier stays as typed
+  (`<mi>π</mi>` gives `\( π \)`, not `\pi`). The answers saved, and the
+  attempt was submitted and verified.
 
 The parser writes equations as LaTeX (`\( … \)`, display math `\[ … \]`),
 taking the author's LaTeX annotation when there is one, and images as
@@ -284,9 +293,29 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
 - With no browser open, the server still submits the attempt: an abandoned
   2-minute auto-submit preview was marked completed about 100 seconds after
   its limit, and an abandoned learner attempt (4 minutes, `graceLimit=0`)
-  about 38 seconds after, both with no client request. The varying delay
-  suggests a periodic server job, and whether grace or late settings change
-  it is unknown, so do not rely on that timing: submit before the limit.
+  about 38 seconds after, both with no client request. Two abandoned
+  2-minute learner attempts a day later took 148 and 158 seconds, and two
+  more 49 and 158 seconds. The varying delay suggests a periodic server
+  job, and whether grace or late settings change it is unknown, so do not
+  rely on that timing: submit before the limit.
+- Past the limit the frame still read `timeExceeded=false` (reads 15 and
+  56 seconds after it), and `DoUtcTimeRequest` returned a negative time
+  left, e.g. `["0:02:57","0:00:-57","177.2"]`. The deadline is
+  `timeStartedTicks` plus `timeLimit`, not that flag.
+- While the server submits an expired attempt, the learner summary reads
+  "Completed - 9 (Attempt 10 is being processed)" instead of "(Attempt 10
+  in progress)", with `continueQuiz=true`, `startQuiz=false` and a disabled
+  Start Quiz! button, from the first reads after the limit (21 and 60
+  seconds after it) until the REST `Completed` time. The attempt's
+  submissions row read "Attempt 10 Auto-grading in progress" 124 seconds
+  after the limit, and the row held "in progress" for `verify` from 20
+  seconds after the limit until then.
+- The limit is fixed when the attempt starts. Raising the quiz's limit
+  from 2 to 8 minutes (REST quiz PUT) during an open attempt left its frame
+  at `timeLimit=120` with the same `timeStartedTicks`, the REST
+  `AttemptSubmissionTimeLimit` at 2, and the summary at "Time Limit 2
+  minutes" until the attempt ended; the server submitted it 148 seconds
+  after the original limit. The next attempt's frame had `timeLimit=480`.
 - The CLI reads a learner attempt's timer frame once, when `start` opens or
   continues it: `quiz_attempt_top_auto.d2l?ou=<ou>&isprv=&impcf=&qi=<qi>&ai=<ai>&dnb=0&cfql=0&fromQB=0&cft=&d2l_body_type=3`.
   An untimed attempt's frame declares the same variables, with
@@ -299,6 +328,32 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
   down without a request. Once the deadline passes, `verify` reads the frame
   again while the attempt is still in progress, as extra time or a local
   clock that was reset gives time back. Grace and late limits are not counted.
+- In the sandbox the CLI refused `page` past the limit with nothing sent,
+  `verify` reported Brightspace had not submitted yet (the frame read again
+  gave the same deadline) while the row held "in progress", then reported
+  the receipt. The CLI reads the "is being processed" summary only with
+  `continueQuiz=true`, `startQuiz=false`, that one marker (no "in progress"
+  one) and no enabled Start or Continue button; anything else is still a
+  page error. Then `start` refuses before any start POST, naming the
+  attempt, whether or not a cursor is kept for it (after `forget`, or from
+  another computer). With the cursor kept and its deadline passed, `start`
+  refuses with time-up first, before reading the summary. In the sandbox,
+  after `forget`, `start` 31 seconds past the limit refused naming the
+  attempt, with no POST (it read only the user, the REST quiz and the
+  summary), and opened the next attempt once the server had submitted it.
+- Extra time and reopened attempts are not observed. The sandbox's learner
+  attempts come from the instructor account's "View as Student" role and
+  belong to the instructor user. Special access takes only learner-role
+  users: REST `PUT /d2l/api/le/1.93/<ou>/quizzes/<qi>/specialaccess/<userId>`
+  with `{"SubmissionTimeLimit":{"IsEnforced":true,"TimeLimitValue":8}, ...}`
+  returned 404 "Resource Not Found" for the instructor user and 200 for
+  the course's learner-role user (read back in the list GET, then deleted),
+  and the special access dialog lists only that user. The Grade page, which
+  holds Reopen, lists only learner-role users too, with "No Search Results"
+  for users with attempts in progress or completed. So the frame re-read in
+  `verify` is untested against extra time; D2L's documentation says special
+  access added after an attempt starts applies only to new attempts, and
+  that Reopen can add extra time.
 
 ## Not yet implemented
 
