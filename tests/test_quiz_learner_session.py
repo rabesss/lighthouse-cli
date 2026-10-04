@@ -10,6 +10,7 @@ import re
 import stat
 import time
 from datetime import datetime, timezone
+from functools import partial
 from unittest.mock import Mock, patch
 
 import pytest
@@ -51,6 +52,8 @@ SESSION = "lighthouse_cli.quiz_learner_session"
 QUIZ = {"Name": "Week 3", "PreventMovingBackwards": True, "SubmissionTimeLimit": {"IsEnforced": False},
         "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": 2}}
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+ACTIVE = {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1,
+          "operation": None, "timer": None}
 
 
 def open_page(number: int = 1, *, next_control: bool = True, content: str | None = None):
@@ -84,6 +87,32 @@ def start(workflow, page=None, *, resumed: bool = False):
     return result
 
 
+@pytest.fixture
+def workflow(remote):
+    """A cursor for an attempt started on page 1."""
+    workflow = LearnerWorkflow(10, 20)
+    start(workflow)
+    return workflow
+
+
+def seal_and_open(client, *, on_identity, **kwargs):
+    on_identity(30, 1)
+    return open_page()
+
+
+def assert_refused(workflow, message, actions=("page", "next", "submit", "images", "answer")):
+    """Each action is refused with the message before anything is read or sent."""
+    with patch(f"{SESSION}.start_learner") as started, patch(f"{SESSION}.read_learner_page") as read, \
+            patch(f"{SESSION}.save_learner_answers") as save, patch(f"{SESSION}.advance_learner") as advance, \
+            patch(f"{SESSION}.submit_learner") as submit, patch(f"{SESSION}.verify_learner_submission") as verify:
+        for name in actions:
+            action = partial(workflow.answer, {101: "o1"}) if name == "answer" else getattr(workflow, name)
+            with pytest.raises(LearnerWorkflowError, match=message):
+                action()
+    for request in (started, read, save, advance, submit, verify):
+        request.assert_not_called()
+
+
 # -- start ----------------------------------------------------------------------
 
 
@@ -107,8 +136,7 @@ def test_start_records_its_intent_first_and_reports_the_quiz(remote):
     assert result["attempt_id"] == 30 and result["resumed"] is False
     assert result["quiz"] == {"name": "Week 3", "forward_only": True, "attempts_allowed": 2, "time_limit_minutes": None}
     assert result["timer"] is None
-    assert workflow.status() == {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 1, "operation": None, "timer": None}
+    assert workflow.status() == ACTIVE
     assert '"actor_id"' not in workflow.path.read_text()  # the cursor is sealed
 
 
@@ -135,10 +163,7 @@ def test_a_quiz_the_cli_cannot_take_is_refused_before_anything_is_sent(remote, q
     client, _, summary = remote
     client.get_quiz_detail.return_value = quiz
     workflow = LearnerWorkflow(10, 20)
-    with patch(f"{SESSION}.start_learner") as started:
-        with pytest.raises(LearnerWorkflowError, match=message):
-            workflow.start()
-    started.assert_not_called()
+    assert_refused(workflow, message, ("start",))
     summary.assert_not_called()
     assert workflow.status()["status"] == "absent"
 
@@ -161,8 +186,7 @@ def test_a_refused_start_keeps_the_previous_cursor(remote):
             patch(f"{SESSION}.start_learner", side_effect=PreviewRefusedError(REFUSE_START_UNAVAILABLE)):
         with pytest.raises(PreviewRefusedError):
             workflow.start()
-    assert workflow.status() == {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 2, "operation": None, "timer": None}
+    assert workflow.status() == {**ACTIVE, "page": 2}
 
 
 def test_an_unknown_start_is_settled_only_by_starting_again(remote):
@@ -176,12 +200,7 @@ def test_an_unknown_start_is_settled_only_by_starting_again(remote):
             workflow.start()
     assert workflow.status()["status"] == "uncertain"
     assert workflow.status()["operation"] == "start"
-    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.save_learner_answers") as save:
-        for action in (workflow.page, workflow.next, lambda: workflow.answer({101: "o1"})):
-            with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-                action()
-    read.assert_not_called()
-    save.assert_not_called()
+    assert_refused(workflow, "Run attempt start", ("page", "next", "answer"))
     start(workflow, open_page(1), resumed=True)
     assert workflow.status()["status"] == "active"
 
@@ -202,15 +221,10 @@ def test_an_unknown_start_without_an_identity_is_kept(remote):
 @pytest.mark.parametrize("change", [
     {}, *({"status": "uncertain", "operation": operation} for operation in ("start", "answer", "next", "submit")),
 ])
-def test_the_clis_unsubmitted_attempt_is_only_continued(remote, change):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_the_clis_unsubmitted_attempt_is_only_continued(workflow, change):
     workflow._save({**saved(workflow), **change})
     before = saved(workflow)
-    with patch(f"{SESSION}.start_learner") as started:
-        with pytest.raises(LearnerWorkflowError, match="no new attempt was started"):
-            workflow.start()
-    started.assert_not_called()
+    assert_refused(workflow, "no new attempt was started", ("start",))
     assert saved(workflow) == before
     with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
             patch(f"{SESSION}.start_learner", return_value=open_page(2)) as started:
@@ -219,20 +233,15 @@ def test_the_clis_unsubmitted_attempt_is_only_continued(remote, change):
     assert (workflow.status()["status"], workflow.status()["page"]) == ("active", 2)
 
 
-def test_another_accounts_unverified_change_is_never_replaced(remote):
+def test_another_accounts_unverified_change_is_never_replaced(remote, workflow):
     client, state, _ = remote
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
     state["actor"] = 8
     start(workflow)  # an active cursor of another account is replaced
     assert saved(workflow)["actor_id"] == 8
     workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
     before = saved(workflow)
     state["actor"] = 7
-    with patch(f"{SESSION}.start_learner") as started:
-        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
-            workflow.start()
-    started.assert_not_called()
+    assert_refused(workflow, "different signed-in account", ("start",))
     client.get_quiz_detail.assert_called()
     assert saved(workflow) == before
 
@@ -240,9 +249,7 @@ def test_another_accounts_unverified_change_is_never_replaced(remote):
 # -- answers and Next -----------------------------------------------------------
 
 
-def test_answers_are_saved_from_the_page_just_read_then_next_uses_the_readback(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_answers_are_saved_from_the_page_just_read_then_next_uses_the_readback(workflow):
     current, answered, following = open_page(), open_page(content=ANSWERED), open_page(2)
     with patch(f"{SESSION}.read_learner_page", return_value=current) as read, \
             patch(f"{SESSION}.save_learner_answers", return_value=answered) as save, \
@@ -262,9 +269,7 @@ def test_answers_are_saved_from_the_page_just_read_then_next_uses_the_readback(r
     (open_page(), {101: "o2", 102: ["o11"], 103: ["four", ""]}, False, REFUSE_LEARNER_UNANSWERED),
     (open_page(), {999: "o2"}, True, REFUSE_LEARNER_NOT_ON_PAGE),
 ])
-def test_answer_and_next_is_checked_before_anything_is_saved(remote, current, answers, allow, message):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_answer_and_next_is_checked_before_anything_is_saved(workflow, current, answers, allow, message):
     with patch(f"{SESSION}.read_learner_page", return_value=current), \
             patch(f"{SESSION}.save_learner_answers") as save, patch(f"{SESSION}.advance_learner") as advance:
         with pytest.raises(PreviewRefusedError, match=message):
@@ -274,22 +279,17 @@ def test_answer_and_next_is_checked_before_anything_is_saved(remote, current, an
     assert workflow.status()["status"] == "active"
 
 
-def test_a_next_refused_after_the_save_keeps_the_saved_answers(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_next_refused_after_the_save_keeps_the_saved_answers(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
             patch(f"{SESSION}.save_learner_answers", return_value=open_page(content=ANSWERED)) as save, \
             patch(f"{SESSION}.advance_learner", side_effect=PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)):
         with pytest.raises(PreviewRefusedError):
             workflow.answer({101: "o2"}, advance=True, allow_unanswered=True)
     save.assert_called_once()
-    assert workflow.status() == {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 1, "operation": None, "timer": None}
+    assert workflow.status() == ACTIVE
 
 
-def test_unanswered_questions_can_be_left_explicitly(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_unanswered_questions_can_be_left_explicitly(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
             patch(f"{SESSION}.save_learner_answers", return_value=open_page()), \
             patch(f"{SESSION}.advance_learner", return_value=open_page(2)) as advance:
@@ -297,21 +297,13 @@ def test_unanswered_questions_can_be_left_explicitly(remote):
     assert advance.call_args.kwargs["allow_unanswered"] is True
 
 
-def test_an_unverified_save_is_settled_by_reading_the_page(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_an_unverified_save_is_settled_by_reading_the_page(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
             patch(f"{SESSION}.save_learner_answers", side_effect=LearnerSaveUnknownError()):
         with pytest.raises(LearnerSaveUnknownError):
             workflow.answer({101: "o2"})
     assert (workflow.status()["status"], workflow.status()["operation"]) == ("uncertain", "answer")
-    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.save_learner_answers") as save, \
-            patch(f"{SESSION}.advance_learner") as advance, patch(f"{SESSION}.submit_learner") as submit:
-        for action in (workflow.next, workflow.submit, workflow.images, lambda: workflow.answer({101: "o2"})):
-            with pytest.raises(LearnerWorkflowError, match="Run attempt page"):
-                action()
-    for write in (read, save, advance, submit):
-        write.assert_not_called()
+    assert_refused(workflow, "Run attempt page", ("next", "submit", "images", "answer"))
     with patch(f"{SESSION}.read_learner_page", return_value=open_page(content=ANSWERED)) as read:
         result = workflow.page()
     assert read.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1}
@@ -319,27 +311,19 @@ def test_an_unverified_save_is_settled_by_reading_the_page(remote):
     assert workflow.status()["status"] == "active"
 
 
-def test_an_unknown_next_needs_starting_again(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_an_unknown_next_needs_starting_again(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page(content=ANSWERED + NEXT)), \
             patch(f"{SESSION}.advance_learner", side_effect=LearnerAdvanceUnknownError()):
         with pytest.raises(LearnerAdvanceUnknownError):
             workflow.next()
     assert (workflow.status()["status"], workflow.status()["operation"]) == ("uncertain", "next")
-    with patch(f"{SESSION}.read_learner_page") as read:
-        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-            workflow.page()
-    read.assert_not_called()
+    assert_refused(workflow, "Run attempt start", ("page",))
     start(workflow, open_page(2), resumed=True)
-    assert workflow.status() == {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 2, "operation": None, "timer": None}
+    assert workflow.status() == {**ACTIVE, "page": 2}
 
 
 @pytest.mark.parametrize("failure", [PreviewRefusedError(REFUSE_LEARNER_NOT_ON_PAGE), NetworkError("no")])
-def test_a_write_that_failed_before_sending_keeps_the_cursor(remote, failure):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_write_that_failed_before_sending_keeps_the_cursor(workflow, failure):
     before = saved(workflow)
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
             patch(f"{SESSION}.save_learner_answers", side_effect=failure):
@@ -348,27 +332,18 @@ def test_a_write_that_failed_before_sending_keeps_the_cursor(remote, failure):
     assert saved(workflow) == before
 
 
-def test_another_account_cannot_use_the_cursor(remote):
+def test_another_account_cannot_use_the_cursor(remote, workflow):
     _, state, _ = remote
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
     state["actor"] = 8
-    with patch(f"{SESSION}.read_learner_page") as read:
-        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
-            workflow.page()
-        # Also when the cursor would otherwise ask for a restart.
-        workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
-        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
-            workflow.page()
-    read.assert_not_called()
+    assert_refused(workflow, "different signed-in account", ("page",))
+    # Also when the cursor would otherwise ask for a restart.
+    workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
+    assert_refused(workflow, "different signed-in account", ("page",))
 
 
 def test_nothing_runs_without_a_started_attempt(remote):
     workflow = LearnerWorkflow(10, 20)
-    with patch(f"{SESSION}.read_learner_page") as read:
-        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-            workflow.page()
-    read.assert_not_called()
+    assert_refused(workflow, "Run attempt start", ("page",))
     assert workflow.status() == {"mode": "learner", "status": "absent", "course_id": 10, "quiz_id": 20}
 
 
@@ -384,25 +359,19 @@ TIMER_STATE = {"limit_seconds": 240, "ends_at": 1.0, "clock_offset": 0.0, "auto_
         {"limit_seconds": 0}, {"ends_at": "soon"}, {"auto_submit": 1}, {"ends_at": 1e18}, {"ends_at": 10**400},
         {"ends_at": -1.0}, {"ends_at": 0}, {"clock_offset": 1e18}, {"clock_offset": None}, {"grace_seconds": 60})),
 ])
-def test_a_tampered_cursor_is_rejected(remote, change):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_tampered_cursor_is_rejected(workflow, change):
     workflow._save({**saved(workflow), **change})
     with pytest.raises(LearnerWorkflowError, match="invalid"):
         workflow.status()
 
 
-def test_start_replaces_an_invalid_cursor(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_start_replaces_an_invalid_cursor(workflow):
     workflow._save({**saved(workflow), "page": 0})
     start(workflow, open_page(2), resumed=True)
     assert workflow.status()["page"] == 2
 
 
-def test_an_unreadable_cursor_is_invalid_and_replaced_by_start(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_an_unreadable_cursor_is_invalid_and_replaced_by_start(workflow):
     workflow.path.write_text("not a sealed checkpoint")
     with pytest.raises(LearnerWorkflowError, match=r"invalid\. Run attempt start"):
         workflow.status()
@@ -410,9 +379,7 @@ def test_an_unreadable_cursor_is_invalid_and_replaced_by_start(remote):
     assert workflow.status()["page"] == 2
 
 
-def test_forget_drops_only_the_local_record(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_forget_drops_only_the_local_record(workflow):
     workflow.path.write_text("not a sealed checkpoint")
     with patch(f"{SESSION}.LighthouseClient") as client:
         assert workflow.forget() == {"mode": "learner", "course_id": 10, "quiz_id": 20, "forgotten": True}
@@ -439,9 +406,7 @@ RECEIPT = {"mode": "learner", "course_id": 10, "quiz_id": 20, "attempt_id": 30, 
            "attempt_number": 1, "score": 3.0, "out_of": 4.0}
 
 
-def test_submit_records_its_intent_then_closes_the_attempt(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_submit_records_its_intent_then_closes_the_attempt(workflow):
     last = open_page(next_control=False)
     seen = {}
 
@@ -454,24 +419,15 @@ def test_submit_records_its_intent_then_closes_the_attempt(remote):
     assert (seen["status"], seen["operation"]) == ("uncertain", "submit")
     assert submit.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1,
                                        "allow_unanswered": True, "current": last}
-    assert workflow.status() == {"mode": "learner", "status": "submitted", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 1, "operation": None, "timer": None}
-    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit:
-        for action in (workflow.page, workflow.next, workflow.submit, workflow.images,
-                       lambda: workflow.answer({101: "o1"})):
-            with pytest.raises(LearnerWorkflowError, match="has been submitted"):
-                action()
-    read.assert_not_called()
-    submit.assert_not_called()
+    assert workflow.status() == {**ACTIVE, "status": "submitted"}
+    assert_refused(workflow, "has been submitted")
 
 
 @pytest.mark.parametrize("failure", [
     LearnerUnansweredError([{"page": 1, "question_id": 101, "number": 1}]),
     PreviewRefusedError(REFUSE_LEARNER_NOT_LAST_PAGE), NetworkError("no"),
 ])
-def test_a_submission_stopped_before_its_final_request_keeps_the_attempt_open(remote, failure):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_submission_stopped_before_its_final_request_keeps_the_attempt_open(workflow, failure):
     before = saved(workflow)
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
             patch(f"{SESSION}.submit_learner", side_effect=failure):
@@ -480,21 +436,13 @@ def test_a_submission_stopped_before_its_final_request_keeps_the_attempt_open(re
     assert saved(workflow) == before
 
 
-def test_an_unverified_submission_is_settled_only_by_its_receipt(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_an_unverified_submission_is_settled_only_by_its_receipt(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page(next_control=False)), \
             patch(f"{SESSION}.submit_learner", side_effect=LearnerSubmitUnknownError()):
         with pytest.raises(LearnerSubmitUnknownError):
             workflow.submit()
     assert (workflow.status()["status"], workflow.status()["operation"]) == ("uncertain", "submit")
-    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit:
-        for action in (workflow.page, workflow.next, workflow.submit, workflow.images,
-                       lambda: workflow.answer({101: "o1"})):
-            with pytest.raises(LearnerWorkflowError, match="Run attempt verify"):
-                action()
-    read.assert_not_called()
-    submit.assert_not_called()
+    assert_refused(workflow, "Run attempt verify")
     for failure in (LearnerSubmitUnknownError(), LearnerNotSubmittedError()):
         with patch(f"{SESSION}.verify_learner_submission", side_effect=failure):
             with pytest.raises(type(failure)):
@@ -509,10 +457,8 @@ def test_an_unverified_submission_is_settled_only_by_its_receipt(remote):
 @pytest.mark.parametrize(("change", "actor"), [
     ({"status": "submitted"}, 7), ({"status": "submitted"}, 8), ({}, 8),
 ])
-def test_other_cursors_never_restrict_a_new_attempt(remote, change, actor):
+def test_other_cursors_never_restrict_a_new_attempt(remote, workflow, change, actor):
     _, state, _ = remote
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
     workflow._save({**saved(workflow), **change})
     state["actor"] = actor
     with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
@@ -524,19 +470,14 @@ def test_other_cursors_never_restrict_a_new_attempt(remote, change, actor):
 def test_verify_reads_only_this_accounts_started_attempt(remote):
     _, state, _ = remote
     workflow = LearnerWorkflow(10, 20)
-    with patch(f"{SESSION}.verify_learner_submission") as verify:
-        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-            workflow.verify()
-        with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
-            with pytest.raises(LearnerStartUnknownError):
-                workflow.start()
-        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-            workflow.verify()
-        start(workflow)
-        state["actor"] = 8
-        with pytest.raises(LearnerWorkflowError, match="different signed-in account"):
-            workflow.verify()
-    verify.assert_not_called()
+    assert_refused(workflow, "Run attempt start", ("verify",))
+    with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+    assert_refused(workflow, "Run attempt start", ("verify",))
+    start(workflow)
+    state["actor"] = 8
+    assert_refused(workflow, "different signed-in account", ("verify",))
     state["actor"] = 7
     # An attempt submitted elsewhere, e.g. in the browser, closes the cursor too.
     with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT):
@@ -553,21 +494,15 @@ def test_a_recovery_start_that_fails_midway_still_names_the_clis_attempt(remote)
             patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
         with pytest.raises(LearnerStartUnknownError):
             workflow.start()
-    assert workflow.status() == {"mode": "learner", "status": "uncertain", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 2, "operation": "start", "timer": None}
+    assert workflow.status() == {**ACTIVE, "status": "uncertain", "page": 2, "operation": "start"}
     # Once the attempt ends, start still only continues it, and verify reads it.
-    with patch(f"{SESSION}.start_learner") as started:
-        with pytest.raises(LearnerWorkflowError, match="no new attempt was started"):
-            workflow.start()
-    started.assert_not_called()
+    assert_refused(workflow, "no new attempt was started", ("start",))
     with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
         workflow.verify()
     assert verify.call_args.kwargs["attempt_id"] == 30
 
 
-def test_another_attempt_in_progress_is_not_taken_over(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_another_attempt_in_progress_is_not_taken_over(workflow):
     workflow._save({**saved(workflow), "status": "uncertain", "operation": "submit"})
     other = dataclasses.replace(open_page(), attempt_id=31)
 
@@ -579,10 +514,7 @@ def test_another_attempt_in_progress_is_not_taken_over(remote):
         with pytest.raises(LearnerWorkflowError, match="different attempt in progress"):
             workflow.start()
     assert (workflow.status()["status"], workflow.status()["attempt_id"]) == ("uncertain", 30)
-    with patch(f"{SESSION}.read_learner_page") as read:
-        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-            workflow.page()
-    read.assert_not_called()
+    assert_refused(workflow, "Run attempt start", ("page",))
     # Once the CLI's record is dropped, start continues the attempt in progress.
     workflow.forget()
     start(workflow, other, resumed=True)
@@ -607,6 +539,13 @@ def start_timed(workflow, timer):
 def time_up(workflow):
     state = saved(workflow)
     workflow._save({**state, "timer": {**state["timer"], "ends_at": time.time() - 1}})
+
+
+def assert_waiting_for_brightspace(workflow):
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
+            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
+        with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
+            workflow.verify()
 
 
 def test_a_timed_start_keeps_its_limit_and_every_page_reports_the_time_left(remote):
@@ -647,23 +586,11 @@ def test_once_time_is_up_nothing_is_sent_and_verify_waits_for_brightspace(remote
     assert workflow.status()["timer"]["seconds_left"] == 0
     summary.reset_mock()
     client.get_json.reset_mock()
-    with patch(f"{SESSION}.read_learner_page") as read, patch(f"{SESSION}.submit_learner") as submit, \
-            patch(f"{SESSION}.start_learner") as started:
-        for action in (workflow.page, workflow.next, workflow.submit, workflow.images,
-                       lambda: workflow.answer({101: "o1"})):
-            with pytest.raises(LearnerWorkflowError, match=TIME_UP):
-                action()
-        client.get_json.assert_not_called()  # not even the account check
-        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
-            workflow.start()
-    read.assert_not_called()
-    submit.assert_not_called()
-    started.assert_not_called()
+    assert_refused(workflow, TIME_UP)
+    client.get_json.assert_not_called()  # not even the account check
+    assert_refused(workflow, TIME_UP, ("start",))
     summary.assert_not_called()
-    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
-            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
-        with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
-            workflow.verify()
+    assert_waiting_for_brightspace(workflow)
     assert workflow.status()["status"] == "active"
     with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT):
         assert workflow.verify() == RECEIPT
@@ -678,9 +605,7 @@ def test_once_time_is_up_an_unsettled_write_also_points_to_verify(remote, operat
     start_timed(workflow, timed(200))
     time_up(workflow)
     workflow._save({**saved(workflow), "status": "uncertain", "operation": operation})
-    for action in (workflow.page, lambda: workflow.answer({101: "o1"})):
-        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
-            action()
+    assert_refused(workflow, TIME_UP, ("page", "answer"))
 
 
 def test_time_that_runs_out_during_a_command_stops_its_next_write(remote):
@@ -760,20 +685,12 @@ def test_without_auto_submit_the_attempt_stays_open_past_its_limit(remote):
 ])
 def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote, failure, raised):
     workflow = LearnerWorkflow(10, 20)
-
-    def started(client, *, on_identity, **kwargs):
-        on_identity(30, 1)
-        return open_page()
-    with patch(f"{SESSION}.start_learner", side_effect=started), \
+    with patch(f"{SESSION}.start_learner", side_effect=seal_and_open), \
             patch(f"{SESSION}.read_learner_timer", side_effect=failure):
         with pytest.raises(raised, match="time limit could not be read" if raised is LearnerWorkflowError else None):
             workflow.start()
-    assert workflow.status() == {"mode": "learner", "status": "uncertain", "course_id": 10, "quiz_id": 20,
-                                 "attempt_id": 30, "page": 1, "operation": "start", "timer": None}
-    with patch(f"{SESSION}.read_learner_page") as read:
-        with pytest.raises(LearnerWorkflowError, match="Run attempt start"):
-            workflow.page()
-    read.assert_not_called()
+    assert workflow.status() == {**ACTIVE, "status": "uncertain", "operation": "start"}
+    assert_refused(workflow, "Run attempt start", ("page",))
     # Starting again only continues that attempt and reads its limit again.
     with patch(f"{SESSION}.read_learner_summary", return_value=Mock(can_continue=True)), \
             patch(f"{SESSION}.start_learner", return_value=open_page()) as again, \
@@ -784,11 +701,7 @@ def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote, fail
 
 def test_a_recovery_start_that_finds_the_time_up_refuses_the_attempt(remote):
     workflow = LearnerWorkflow(10, 20)
-
-    def started(client, *, on_identity, **kwargs):
-        on_identity(30, 1)
-        return open_page()
-    with patch(f"{SESSION}.start_learner", side_effect=started), \
+    with patch(f"{SESSION}.start_learner", side_effect=seal_and_open), \
             patch(f"{SESSION}.read_learner_timer", side_effect=NetworkError("no")):
         with pytest.raises(LearnerWorkflowError, match="time limit could not be read"):
             workflow.start()
@@ -798,10 +711,7 @@ def test_a_recovery_start_that_finds_the_time_up_refuses_the_attempt(remote):
         with pytest.raises(LearnerWorkflowError, match=TIME_UP):
             workflow.start()
     assert (saved(workflow)["status"], saved(workflow)["timer"]["limit_seconds"]) == ("active", 240)
-    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
-            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
-        with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
-            workflow.verify()
+    assert_waiting_for_brightspace(workflow)
 
 
 def test_a_recovery_start_keeps_the_attempts_limit(remote):
@@ -815,15 +725,10 @@ def test_a_recovery_start_keeps_the_attempts_limit(remote):
             workflow.start()
     assert (saved(workflow)["operation"], saved(workflow)["timer"]) == ("start", timer)
     time_up(workflow)
-    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()), \
-            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
-        with pytest.raises(LearnerWorkflowError, match="has not submitted this attempt yet"):
-            workflow.verify()
+    assert_waiting_for_brightspace(workflow)
 
 
-def test_a_cursor_from_before_timed_quizzes_reads_as_untimed(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_cursor_from_before_timed_quizzes_reads_as_untimed(workflow):
     state = saved(workflow)
     del state["timer"]
     workflow._save(state)
@@ -845,9 +750,7 @@ def image_page():
     ))
 
 
-def test_images_are_saved_privately_with_failures_reported_per_image(remote, tmp_path):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_images_are_saved_privately_with_failures_reported_per_image(workflow, tmp_path):
 
     def fetch(client, src):
         if src is None:
@@ -871,9 +774,7 @@ def test_images_are_saved_privately_with_failures_reported_per_image(remote, tmp
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
 
 
-def test_one_questions_images_go_to_a_new_private_directory(remote):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_one_questions_images_go_to_a_new_private_directory(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=image_page()), \
             patch(f"{SESSION}.read_quiz_image", return_value=(PNG, "image/png")) as fetch:
         result = workflow.images(question_id=102)
@@ -888,9 +789,7 @@ def test_one_questions_images_go_to_a_new_private_directory(remote):
         os.rmdir(directory)
 
 
-def test_images_of_a_question_elsewhere_or_an_expired_session_stop(remote, tmp_path):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_images_of_a_question_elsewhere_or_an_expired_session_stop(workflow, tmp_path):
     with patch(f"{SESSION}.read_learner_page", return_value=image_page()), \
             patch(f"{SESSION}.read_quiz_image") as fetch:
         with pytest.raises(PreviewRefusedError, match="not on the current page"):
@@ -900,9 +799,7 @@ def test_images_of_a_question_elsewhere_or_an_expired_session_stop(remote, tmp_p
             workflow.images(directory=tmp_path)
 
 
-def test_a_symlinked_image_file_is_never_followed(remote, tmp_path):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_symlinked_image_file_is_never_followed(workflow, tmp_path):
     outside = tmp_path / "outside"
     outside.write_bytes(b"keep")
     (tmp_path / "question-1-image-1.png").symlink_to(outside)
@@ -917,9 +814,7 @@ def test_a_symlinked_image_file_is_never_followed(remote, tmp_path):
         str(tmp_path / "question-1-image-2.png"), str(tmp_path / "question-2-image-1.png")]
 
 
-def test_an_image_name_taken_by_a_fifo_fails_without_blocking(remote, tmp_path):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_an_image_name_taken_by_a_fifo_fails_without_blocking(workflow, tmp_path):
     os.mkfifo(tmp_path / "question-2-image-1.png")
     with patch(f"{SESSION}.read_learner_page", return_value=image_page()), \
             patch(f"{SESSION}.read_quiz_image", return_value=(PNG, "image/png")):
@@ -927,9 +822,7 @@ def test_an_image_name_taken_by_a_fifo_fails_without_blocking(remote, tmp_path):
     assert result["images"] == [{"question_id": 102, "image": 1, "alt": "", "error": "The image could not be saved."}]
 
 
-def test_a_replaced_image_file_is_made_private(remote, tmp_path):
-    workflow = LearnerWorkflow(10, 20)
-    start(workflow)
+def test_a_replaced_image_file_is_made_private(workflow, tmp_path):
     path = tmp_path / "question-2-image-1.png"
     path.write_bytes(b"old")
     path.chmod(0o644)

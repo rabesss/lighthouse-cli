@@ -17,13 +17,13 @@ from lighthouse_cli.quiz_preview_finish import (
 from tests.test_quiz_attempt_page import bootstrap, html, question
 
 
-def client_for_submit(*, rpc_result: str | None = None, secure_browser: str = "0"):
+def client_for_submit(*, rpc_result: str | None = None, secure_browser: str = "0", last_page: bytes | None = None):
     client = LighthouseClient(read_only_auth=True)
     confirmation = f'''<form><input type="hidden" name="d2l_referrer" value="SESSION_SENTINEL">
     <input type="hidden" name="HDN_isRldbUse" value="False">
     <input type="hidden" name="HDN_isUsingRldb" value="{secure_browser}">
     <input type="checkbox" name="attemptCanBeGraded"><button>Submit Quiz</button></form>'''.encode()
-    client.get_raw = Mock(side_effect=[(html(question(1)), {}), (bootstrap(), {}), (confirmation, {}),
+    client.get_raw = Mock(side_effect=[(last_page or html(question(1)), {}), (bootstrap(), {}), (confirmation, {}),
                                       (b'<h2>Your work has been saved and submitted</h2>', {})])
     client.get_json = Mock(return_value={"AttemptId": 30, "QuizId": 20, "UserId": 7, "Completed": "2026-09-17T15:00:00Z", "Score": 1})
     reply = {"ResponseType": 0, "IsResultMin": False, "Result": rpc_result or "parent.QuizDone(20,30,'1','0', '0', 'gotoSv', '')", "RedirectUrl": "", "MessageArea": {}}
@@ -49,9 +49,7 @@ def test_submit_is_preview_only_and_verifies_independent_receipt():
 
 
 def test_submit_rpc_context_names_the_current_page():
-    client, _, _ = client_for_submit()
-    responses = list(client.get_raw.side_effect)
-    client.get_raw.side_effect = [(html(question(2, page=2), page=2), {}), *responses[1:]]
+    client, _, _ = client_for_submit(last_page=html(question(2, page=2), page=2))
     submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=2)
     url = client._request.call_args_list[1].args[1]
     assert "quiz_attempt_iframe_auto.d2lfile?" in url
@@ -112,8 +110,8 @@ def test_receipt_session_expiry_is_not_masked_as_unknown_submission():
 
 def test_submit_receipt_auth_expiry_is_unknown_after_write_dispatch():
     client, _, _ = client_for_submit()
-    calls = list(client.get_raw.side_effect)
-    client.get_raw = Mock(side_effect=[calls[0], calls[1], calls[2], SessionExpiredError("session expired")])
+    reads = list(client.get_raw.side_effect)
+    client.get_raw.side_effect = [*reads[:3], SessionExpiredError("session expired")]
     with pytest.raises(PreviewSubmitUnknownError):
         submit_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
 

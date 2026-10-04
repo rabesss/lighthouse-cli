@@ -369,13 +369,15 @@ def image_client(content: bytes = PNG, headers: dict[str, str] | None = None) ->
     return client
 
 
-def test_a_root_relative_image_is_read_from_the_lms():
+@pytest.mark.parametrize(("src", "path"), [
+    (ATTACHED_SRC, ATTACHED_SRC),
+    ("{base}/content/enforced/10/sq.png", "/content/enforced/10/sq.png"),
+    ("/content/enforced/10/sq.png#zoom", "/content/enforced/10/sq.png"),  # the fragment is not sent
+], ids=["root-relative", "absolute", "fragment"])
+def test_an_lms_image_is_read_from_the_lms(src, path):
     client = image_client()
-    assert read_quiz_image(client, ATTACHED_SRC) == (PNG, "image/png")
-    client.get_raw.assert_called_once_with(client.base_url + ATTACHED_SRC, max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
-    client = image_client()
-    read_quiz_image(client, client.base_url + "/content/enforced/10/sq.png")
-    client.get_raw.assert_called_once_with(client.base_url + "/content/enforced/10/sq.png", max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
+    assert read_quiz_image(client, src.format(base=client.base_url)) == (PNG, "image/png")
+    client.get_raw.assert_called_once_with(client.base_url + path, max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
 
 
 @pytest.mark.parametrize("src", [
@@ -402,26 +404,13 @@ def test_an_image_address_that_is_a_brightspace_action_is_never_requested(src):
     client.get_raw.assert_not_called()
 
 
-def test_an_image_fragment_is_not_sent():
-    client = image_client()
-    read_quiz_image(client, "/content/enforced/10/sq.png#zoom")
-    client.get_raw.assert_called_once_with(client.base_url + "/content/enforced/10/sq.png", max_bytes=MAX_IMAGE_BYTES, _replay_safe=False)
-
-
 @pytest.mark.parametrize("address", ["https://user:pass@{host}/tri.png", "https://user@{host}/tri.png",  # pragma: allowlist secret
-                                     "https://{host}:8443/tri.png", "https://{host}:bad/tri.png"])
-def test_an_lms_address_with_credentials_or_another_port_is_refused(address):
+                                     "https://{host}:8443/tri.png", "https://{host}:bad/tri.png", "http://{host}/content/tri.png"])
+def test_an_lms_address_with_credentials_another_port_or_no_tls_is_refused(address):
     client = image_client()
     host = client.base_url.removeprefix("https://")
     with pytest.raises(PreviewRefusedError, match=REFUSE_IMAGE_SOURCE):
         read_quiz_image(client, address.format(host=host))
-    client.get_raw.assert_not_called()
-
-
-def test_an_insecure_lms_address_is_refused():
-    client = image_client()
-    with pytest.raises(PreviewRefusedError):
-        read_quiz_image(client, client.base_url.replace("https://", "http://") + "/content/tri.png")
     client.get_raw.assert_not_called()
 
 
