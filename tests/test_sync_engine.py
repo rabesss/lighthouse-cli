@@ -123,10 +123,10 @@ def test_benign_keyword_output_root_is_allowed(
         "flowToken FLOW_SECRET",
         "oPostParams FLOW_SECRET",
         "path\u0085label",
-        "path label",
-        "path label",
-        "path​label",
-        "path﻿label",
+        "path\u2028label",
+        "path\u2029label",
+        "path\u200blabel",
+        "path\ufefflabel",
     ],
 )
 def test_output_root_rejects_bare_or_plain_session_secrets(
