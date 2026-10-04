@@ -135,14 +135,10 @@ def test_id_less_radio_outside_a_row_fails_closed():
         parse(html(body))
 
 
-@pytest.mark.parametrize("saved", ["False", "unknown", ""])
-def test_selected_choice_without_saved_confirmation_is_not_success(saved):
-    page = parse(html(question(1, saved=saved)))
-    assert not page.confirms_answer(101, 401)
-
-
-def test_saved_flag_without_selected_choice_is_not_success():
-    assert not parse(html(question(1, selected=False))).confirms_answer(101, 401)
+@pytest.mark.parametrize("state", [{"saved": "False"}, {"saved": "unknown"}, {"saved": ""}, {"selected": False}],
+                         ids=["unsaved", "unknown-saved-flag", "empty-saved-flag", "saved-but-unselected"])
+def test_choice_needs_both_selection_and_saved_confirmation(state):
+    assert not parse(html(question(1, **state))).confirms_answer(101, 401)
 
 
 @pytest.mark.parametrize("field", ["ou", "qi", "ai", "pg", "isprv"])
@@ -166,6 +162,8 @@ def test_media_is_explicitly_unsupported_instead_of_silently_lost():
     page = parse(html(q))
     assert page.questions[0]["kind"] == "unsupported"
     assert not page.confirms_answer(101, 401)
+    with pytest.raises(PreviewRefusedError, match="does not support"):
+        page.answer_fields(101, 401, FormProtection("SESSION_SENTINEL", "123"))
 
 
 def test_server_html_block_attribute_supplies_question_text():
@@ -175,13 +173,13 @@ def test_server_html_block_attribute_supplies_question_text():
     assert page.questions[0]["supported"]
 
 
-def test_media_inside_html_attribute_is_not_silently_ignored():
-    q = question(1).replace("Question 1: choose true.", '<d2l-html-block html="&lt;p&gt;Identify:&lt;img src=&quot;diagram.png&quot;&gt;&lt;/p&gt;"></d2l-html-block>')
-    assert not parse(html(q)).questions[0]["supported"]
-
-
-def test_unhydrated_empty_prompt_is_not_actionable():
-    q = question(1).replace("Question 1: choose true.", '<d2l-html-block></d2l-html-block>')
+@pytest.mark.parametrize("prompt", [
+    pytest.param('<d2l-html-block html="&lt;p&gt;Identify:&lt;img src=&quot;diagram.png&quot;&gt;&lt;/p&gt;"></d2l-html-block>',
+                 id="media-inside-html-attribute"),
+    pytest.param('<d2l-html-block></d2l-html-block>', id="unhydrated-empty-prompt"),
+])
+def test_prompt_that_cannot_be_fully_read_is_not_actionable(prompt):
+    q = question(1).replace("Question 1: choose true.", prompt)
     assert not parse(html(q)).questions[0]["supported"]
 
 
@@ -207,12 +205,6 @@ def test_answer_form_rejects_stale_session_or_unknown_choice():
         page.answer_fields(999, 401, FormProtection("SESSION_SENTINEL", "123"))
     with pytest.raises(PreviewPageError):
         page.answer_fields(101, 401, FormProtection("DIFFERENT_SESSION", "123"))
-
-
-def test_answer_refusal_for_an_unsupported_question_type():
-    q = question(1).replace("Question 1: choose true.", 'Question 1: <img alt="diagram">')
-    with pytest.raises(PreviewRefusedError, match="does not support"):
-        parse(html(q)).answer_fields(101, 401, FormProtection("SESSION_SENTINEL", "123"))
 
 
 def test_advance_refusals_are_specific():
@@ -524,75 +516,66 @@ def test_save_transport_requires_persisted_readback_and_posts_once():
     response.close.assert_called_once()
 
 
-def test_http_200_without_persisted_answer_is_unknown_not_success():
+def save_answer(client):
+    return save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
+
+
+def advance_page(client):
+    return advance_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
+
+
+UNSAVED = html(question(1, selected=False, saved="False"))
+WITH_NEXT = html(question(1), extra="<button>Next Page</button>")
+
+
+@pytest.mark.parametrize(("write", "unknown", "page", "readback", "post_error"), [
+    pytest.param(save_answer, PreviewSaveUnknownError, UNSAVED, [(UNSAVED, {})], None, id="save-http-200-not-persisted"),
+    pytest.param(save_answer, PreviewSaveUnknownError, html(question(1)), [SessionExpiredError("session expired")], None,
+                 id="save-readback-auth-expiry"),
+    pytest.param(save_answer, PreviewSaveUnknownError, html(question(1)), [], SessionExpiredError("session expired"),
+                 id="save-post-auth-expiry"),
+    pytest.param(save_answer, PreviewSaveUnknownError, html(question(1)), [], RuntimeError("cookie=SESSION_SENTINEL"),
+                 id="save-post-error-not-echoed"),
+    pytest.param(advance_page, PreviewAdvanceUnknownError, WITH_NEXT, [SessionExpiredError("session expired")], None,
+                 id="advance-readback-auth-expiry"),
+    pytest.param(advance_page, PreviewAdvanceUnknownError, WITH_NEXT, [], SessionExpiredError("session expired"),
+                 id="advance-post-auth-expiry"),
+])
+def test_uncertain_post_is_unknown_not_replayed_or_echoed(write, unknown, page, readback, post_error):
     client = LighthouseClient(read_only_auth=True)
-    unchanged = html(question(1, selected=False, saved="False"))
-    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (unchanged, {}), (unchanged, {})])
-    client._request = Mock(return_value=Mock(status_code=200))
-    with pytest.raises(PreviewSaveUnknownError):
-        save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
-    client._request.assert_called_once()
-
-
-def test_save_readback_auth_expiry_is_unknown_after_post_dispatch():
-    client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {}), SessionExpiredError("session expired")])
-    client._request = Mock(return_value=Mock(status_code=200))
-    with pytest.raises(PreviewSaveUnknownError):
-        save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
-    client._request.assert_called_once()
-
-
-def test_save_post_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {})])
-    client._request = Mock(side_effect=SessionExpiredError("session expired"))
-    with pytest.raises(PreviewSaveUnknownError):
-        save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
-    client._request.assert_called_once()
-
-
-def test_advance_readback_auth_expiry_is_unknown_after_post_dispatch():
-    client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {}), SessionExpiredError("session expired")])
-    client._request = Mock(return_value=Mock(status_code=200))
-    with pytest.raises(PreviewAdvanceUnknownError):
-        advance_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
-    client._request.assert_called_once()
-
-
-def test_advance_post_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1), extra="<button>Next Page</button>"), {})])
-    client._request = Mock(side_effect=SessionExpiredError("session expired"))
-    with pytest.raises(PreviewAdvanceUnknownError):
-        advance_current_preview(client, course_id=10, quiz_id=20, attempt_id=30, page=1)
-    client._request.assert_called_once()
-
-
-def test_uncertain_post_is_not_replayed_or_echoed():
-    client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (html(question(1)), {})])
-    client._request = Mock(side_effect=RuntimeError("cookie=SESSION_SENTINEL"))
-    with pytest.raises(PreviewSaveUnknownError) as exc:
-        save_current_preview_answer(client, course_id=10, quiz_id=20, attempt_id=30, page=1, question_id=101, choice_id=401)
+    client.get_raw = Mock(side_effect=[(bootstrap(), {}), (page, {}), *readback])
+    if post_error is None:
+        client._request = Mock(return_value=Mock(status_code=200))
+    else:
+        client._request = Mock(side_effect=post_error)
+    with pytest.raises(unknown) as exc:
+        write(client)
     assert "SESSION_SENTINEL" not in str(exc.value)
     client._request.assert_called_once()
 
 
-def test_start_follows_typed_callback_without_executing_scripts():
+START_PROCESS = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
+CALLBACK = (b'<script>parent.GoToAttemptQuizAuto( 30,1,0 );</script>', {})
+
+
+def start_client(*replies):
+    """The summary POST redirects into the start frames; the hidden frame's reply and
+    the page readback come from ``replies``."""
     client = LighthouseClient(read_only_auth=True)
-    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
-    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
-    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
+    root = START_PROCESS.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
+    inner = START_PROCESS.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
     client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
     client.get_raw = Mock(side_effect=[
         (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
         (f'<iframe src="{inner}"></iframe>'.encode(), {}),
-        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
-        (b'<script>\nparent.GoToAttemptQuizAuto( 30,1,0 );\n</script>', {}),
-        (html(question(1)), {}),
+        (f'<iframe name="hiddenFrame" src="{START_PROCESS}"></iframe>'.encode(), {}),
+        *replies,
     ])
+    return client
+
+
+def test_start_follows_typed_callback_without_executing_scripts():
+    client = start_client((b'<script>\nparent.GoToAttemptQuizAuto( 30,1,0 );\n</script>', {}), (html(question(1)), {}))
     page = start_preview(client, course_id=10, quiz_id=20)
     assert page.attempt_id == 30
     assert page.page == 1
@@ -611,25 +594,9 @@ def test_start_rejects_missing_button_without_creating_attempt():
     client._request.assert_not_called()
 
 
-def start_client(readback):
-    client = LighthouseClient(read_only_auth=True)
-    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
-    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
-    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
-    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
-    client.get_raw = Mock(side_effect=[
-        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
-        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
-        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
-        (b'<script>parent.GoToAttemptQuizAuto( 30,1,0 );</script>', {}),
-        readback,
-    ])
-    return client
-
-
 def test_start_reports_identity_before_the_page_readback():
     calls = []
-    client = start_client(PreviewPageError())
+    client = start_client(CALLBACK, PreviewPageError())
     def on_identity(attempt_id, page):
         calls.append((attempt_id, page, client.get_raw.call_count))
     with pytest.raises(PreviewStartUnknownError) as exc_info:
@@ -640,7 +607,7 @@ def test_start_reports_identity_before_the_page_readback():
 
 
 def test_start_identity_callback_failure_is_unknown_with_identity():
-    client = start_client((html(question(1)), {}))
+    client = start_client(CALLBACK, (html(question(1)), {}))
     with pytest.raises(PreviewStartUnknownError) as exc_info:
         start_preview(client, course_id=10, quiz_id=20, on_identity=Mock(side_effect=OSError("disk full")))
     assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
@@ -669,18 +636,7 @@ def test_server_current_page_rejects_another_attempt_or_a_learner_page(field, va
 
 
 def test_start_readback_auth_expiry_is_unknown_after_state_creation():
-    client = LighthouseClient(read_only_auth=True)
-    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
-    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
-    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
-    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
-    client.get_raw = Mock(side_effect=[
-        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
-        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
-        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
-        (b'<script>parent.GoToAttemptQuizAuto( 30,1,0 );</script>', {}),
-        SessionExpiredError("session expired"),
-    ])
+    client = start_client(CALLBACK, SessionExpiredError("session expired"))
     with pytest.raises(PreviewStartUnknownError) as exc_info:
         start_preview(client, course_id=10, quiz_id=20)
     assert exc_info.value.attempt_id == 30
@@ -689,17 +645,7 @@ def test_start_readback_auth_expiry_is_unknown_after_state_creation():
 
 
 def test_start_process_auth_expiry_is_unknown_after_dispatch():
-    client = LighthouseClient(read_only_auth=True)
-    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
-    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
-    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
-    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
-    client.get_raw = Mock(side_effect=[
-        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
-        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
-        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
-        SessionExpiredError("session expired"),
-    ])
+    client = start_client(SessionExpiredError("session expired"))
     with pytest.raises(PreviewStartUnknownError):
         start_preview(client, course_id=10, quiz_id=20)
     assert client._request.call_count == 1
@@ -713,18 +659,10 @@ def test_start_summary_post_auth_expiry_is_unknown_after_dispatch():
         start_preview(client, course_id=10, quiz_id=20)
     client.get_raw.assert_called_once()
     client._request.assert_called_once()
+
+
 def test_ambiguous_start_does_not_retry_or_trust_script_strings():
-    client = LighthouseClient(read_only_auth=True)
-    process = '/d2l/lms/quizzing/user/attempt/quiz_start_process_auto.d2l?ou=10&qi=20&isprv=1&fromQB=0&inProgress=0'
-    root = process.replace('quiz_start_process_auto', 'quiz_start_frame_auto')
-    inner = process.replace('quiz_start_process_auto', 'quiz_start_iframe_2_auto')
-    client._request = Mock(return_value=Mock(status_code=302, headers={"Location": root}))
-    client.get_raw = Mock(side_effect=[
-        (html('', extra='<button>Start Quiz!</button>') + bootstrap(), {}),
-        (f'<iframe src="{inner}"></iframe>'.encode(), {}),
-        (f'<iframe name="hiddenFrame" src="{process}"></iframe>'.encode(), {}),
-        (b'<script>const text="parent.GoToAttemptQuizAuto(30,1,0)";</script>', {}),
-    ])
+    client = start_client((b'<script>const text="parent.GoToAttemptQuizAuto(30,1,0)";</script>', {}))
     with pytest.raises(PreviewStartUnknownError):
         start_preview(client, course_id=10, quiz_id=20)
     assert client.get_raw.call_count == 4

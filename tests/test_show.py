@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from threading import Lock, get_ident
 from unittest.mock import Mock, patch
 
@@ -14,6 +15,47 @@ from lighthouse_cli import show
 from lighthouse_cli.api import LighthouseClient, SessionExpiredError, resolve_course_id
 from lighthouse_cli.cli import cli
 from lighthouse_cli.utils import get_course_name
+
+SESSION_EXPIRED = "Session expired. Run: lighthouse auth login"
+
+
+def _courses(count: int) -> list[dict[str, object]]:
+    return [
+        {"OrgUnitId": course_id, "Name": f"Course {course_id}"}
+        for course_id in range(1, count + 1)
+    ]
+
+
+def _patch_counting_client(monkeypatch, courses) -> list[object]:
+    """Serve ``courses`` as the catalog and return every client show constructs."""
+    clients = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            clients.append(self)
+
+    monkeypatch.setattr(show, "LighthouseClient", FakeClient)
+    monkeypatch.setattr(show, "get_enrolled_course_catalog", lambda _client: courses)
+    return clients
+
+
+def _dropbox_client(folders, detail=None) -> Mock:
+    client = Mock(spec=LighthouseClient)
+    client.get_dropbox_folders.return_value = folders
+    if detail is not None:
+        client.get_dropbox_folder_detail.return_value = detail
+    return client
+
+
+def _folder(folder_id, name="Assignment", **fields) -> dict[str, object]:
+    return {"Id": folder_id, "Name": name, "Attachments": [], **fields}
+
+
+def _render_json_and_human(capsys, view, client):
+    """Render one course as JSON, then as human output (which must succeed)."""
+    structured = view(client, 44347, True)
+    assert view(client, 44347, False) == 0
+    return structured, capsys.readouterr()
 
 
 def test_grades_json_endpoint_failure_is_a_single_json_document() -> None:
@@ -30,74 +72,55 @@ def test_grades_json_endpoint_failure_is_a_single_json_document() -> None:
     assert "schema down" in result.stderr
 
 
-def test_show_with_error_handling_generic_failure_returns_json_payload(capsys) -> None:
+@pytest.mark.parametrize(
+    ("error", "json_output", "expected", "stderr"),
+    [
+        pytest.param(
+            RuntimeError("fetch failed"),
+            True,
+            {"course_id": 42, "items": [], "error": "fetch failed"},
+            "Warning: failed to fetch items: fetch failed",
+            id="generic-json",
+        ),
+        pytest.param(
+            SessionExpiredError("session expired"),
+            True,
+            {"course_id": 42, "items": [], "error": SESSION_EXPIRED},
+            f"Error: {SESSION_EXPIRED}",
+            id="session-expiry-json",
+        ),
+        pytest.param(
+            RuntimeError("fetch failed"),
+            False,
+            1,
+            "Warning: failed to fetch items: fetch failed",
+            id="generic-human",
+        ),
+    ],
+)
+def test_show_with_error_handling_failure(capsys, error, json_output, expected, stderr) -> None:
     def fetch(_org_id: int) -> list[dict[str, int]]:
-        raise RuntimeError("fetch failed")
+        raise error
 
-    payload = show._show_with_error_handling(
+    result = show._show_with_error_handling(
         42,
         fetch,
         "items",
-        True,
+        json_output,
         lambda _data, _title: None,
     )
 
-    assert payload == {"course_id": 42, "items": [], "error": "fetch failed"}
-    assert "Warning: failed to fetch items: fetch failed" in capsys.readouterr().err
+    assert result == expected
+    assert stderr in capsys.readouterr().err
 
 
-def test_show_with_error_handling_session_expiry_returns_json_payload(capsys) -> None:
-    def fetch(_org_id: int) -> list[dict[str, int]]:
-        raise SessionExpiredError("session expired")
-
-    payload = show._show_with_error_handling(
-        42,
-        fetch,
-        "items",
-        True,
-        lambda _data, _title: None,
-    )
-
-    assert payload == {
-        "course_id": 42,
-        "items": [],
-        "error": "Session expired. Run: lighthouse auth login",
-    }
-    assert "Error: Session expired. Run: lighthouse auth login" in capsys.readouterr().err
-
-
-def test_show_with_error_handling_human_failure_returns_error(capsys) -> None:
-    def fetch(_org_id: int) -> list[dict[str, int]]:
-        raise RuntimeError("fetch failed")
-
-    rc = show._show_with_error_handling(
-        42,
-        fetch,
-        "items",
-        False,
-        lambda _data, _title: None,
-    )
-
-    assert rc == 1
-    assert "Warning: failed to fetch items: fetch failed" in capsys.readouterr().err
-
-
-def test_fetch_error_preserves_permission_category_in_json(capsys) -> None:
+def test_permission_error_category_is_preserved_in_json_and_human_modes(capsys) -> None:
     payload = show._fetch_error_result(42, "items", True, PermissionError("private"))
 
     assert payload == {"course_id": 42, "items": [], "error": "Permission denied."}
     assert "Permission denied." in capsys.readouterr().err
 
-
-def test_command_error_preserves_permission_category_in_human_mode(capsys) -> None:
-    rc = show._emit_command_error(
-        42,
-        "items",
-        False,
-        PermissionError("private"),
-    )
-
-    assert rc == 1
+    assert show._emit_command_error(42, "items", False, PermissionError("private")) == 1
     assert "Permission denied." in capsys.readouterr().err
 
 
@@ -154,12 +177,8 @@ def test_all_course_json_failures_are_retained_and_fail_command(monkeypatch, cap
     assert rc == 1
     assert [item["course_id"] for item in payload] == [3, 20]
     assert payload[0]["items"] == [{"value": 3}]
-    assert payload[1] == {
-        "course_id": 20,
-        "items": [],
-        "error": "Session expired. Run: lighthouse auth login",
-    }
-    assert "Session expired. Run: lighthouse auth login" in captured.err
+    assert payload[1] == {"course_id": 20, "items": [], "error": SESSION_EXPIRED}
+    assert SESSION_EXPIRED in captured.err
 
 
 def test_all_course_json_success_is_sorted_deterministically(monkeypatch, capsys) -> None:
@@ -185,6 +204,7 @@ def test_all_course_json_success_is_sorted_deterministically(monkeypatch, capsys
 def test_all_course_fanout_supports_a_35_course_roster(monkeypatch, capsys) -> None:
     """The bounded fan-out still handles the verified 35-course catalog."""
     clients = []
+    courses = _courses(35)
 
     class FakeClient:
         def __init__(self) -> None:
@@ -201,10 +221,6 @@ def test_all_course_fanout_supports_a_35_course_roster(monkeypatch, capsys) -> N
             ]
 
     monkeypatch.setattr(show, "LighthouseClient", FakeClient)
-    courses = [
-        {"OrgUnitId": course_id, "Name": f"Course {course_id}"}
-        for course_id in range(1, 36)
-    ]
     endpoint_calls = []
 
     def single(client, org_id: int, _json_output: bool, title: str | None = None):
@@ -227,19 +243,8 @@ def test_all_course_budget_rejects_before_per_course_requests(
     json_output: bool,
 ) -> None:
     """An over-budget catalog emits one stable error and no course requests."""
-    clients = []
-
-    class FakeClient:
-        def __init__(self) -> None:
-            clients.append(self)
-
-    monkeypatch.setattr(show, "LighthouseClient", FakeClient)
     course_count = show.MAX_ALL_COURSES + 1
-    courses = [
-        {"OrgUnitId": course_id, "Name": f"Course {course_id}"}
-        for course_id in range(1, course_count + 1)
-    ]
-    monkeypatch.setattr(show, "get_enrolled_course_catalog", lambda _client: courses)
+    clients = _patch_counting_client(monkeypatch, _courses(course_count))
     endpoint_calls = []
 
     def single(_client, org_id: int, _json_output: bool, title: str | None = None):
@@ -268,18 +273,7 @@ def test_all_course_budget_rejects_before_per_course_requests(
 
 def test_all_course_workers_reuse_one_client_per_thread(monkeypatch, capsys) -> None:
     """Worker sessions are thread-local and construction stays bounded."""
-    clients = []
-
-    class FakeClient:
-        def __init__(self) -> None:
-            clients.append(self)
-
-    monkeypatch.setattr(show, "LighthouseClient", FakeClient)
-    courses = [
-        {"OrgUnitId": course_id, "Name": f"Course {course_id}"}
-        for course_id in range(1, 36)
-    ]
-    monkeypatch.setattr(show, "get_enrolled_course_catalog", lambda _client: courses)
+    clients = _patch_counting_client(monkeypatch, _courses(35))
     thread_clients = {}
     lock = Lock()
 
@@ -350,10 +344,8 @@ def test_all_course_titles_use_safe_bounded_labels(
     output = captured.out + captured.err
     assert sentinel not in output
     assert "\x1b" not in output
-    assert "Course-101" in captured.out
-    assert "Course-102" in captured.out
-    assert "Course-103" in captured.out
-    assert "Valid Course" in captured.out
+    for label in ("Course-101", "Course-102", "Course-103", "Valid Course"):
+        assert label in captured.out
 
 
 def test_json_course_label_projection_is_safe_and_bounded() -> None:
@@ -400,37 +392,39 @@ def test_grades_all_course_failure_sets_aggregate_exit_code() -> None:
 
 
 def test_assignments_json_fetches_detail_when_list_omits_attachments() -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [{"Id": 101, "Name": "Assignment"}]
-    client.get_dropbox_folder_detail.return_value = {
-        "Id": 101,
-        "Name": "Assignment",
-        "CustomInstructions": {
-            "Text": "Read the brief.",
-            "Html": "<p>Read the <b>brief</b>.</p>",
+    client = _dropbox_client(
+        [{"Id": 101, "Name": "Assignment"}],
+        detail={
+            "Id": 101,
+            "Name": "Assignment",
+            "CustomInstructions": {
+                "Text": "Read the brief.",
+                "Html": "<p>Read the <b>brief</b>.</p>",
+            },
+            "Attachments": [
+                {"Id": 7, "FileName": "brief.pdf", "Size": 42, "Type": "File"}
+            ],
         },
-        "Attachments": [
-            {"Id": 7, "FileName": "brief.pdf", "Size": 42, "Type": "File"}
-        ],
-    }
+    )
 
-    payload = show._show_course_assignments(client, 44347, True)
+    assignment = show._show_course_assignments(client, 44347, True)["assignments"][0]
 
-    assert payload["assignments"][0]["attachment_count"] == 1
-    assert payload["assignments"][0]["attachments"][0]["file_id"] == 7
-    assert payload["assignments"][0]["custom_instructions"] == "<p>Read the <b>brief</b>.</p>"
-    assert payload["assignments"][0]["custom_instructions_preview"] == "Read the brief."
+    assert assignment["attachment_count"] == 1
+    assert assignment["attachments"][0]["file_id"] == 7
+    assert assignment["custom_instructions"] == "<p>Read the <b>brief</b>.</p>"
+    assert assignment["custom_instructions_preview"] == "Read the brief."
     client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
 
 
 def test_assignments_rejects_mismatched_detail_id_without_exposing_it(capsys) -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [{"Id": 101, "Name": "Assignment"}]
-    client.get_dropbox_folder_detail.return_value = {
-        "Id": 202,
-        "Name": "Wrong assignment",
-        "Attachments": [{"Id": 7, "FileName": "wrong.pdf", "Size": 42, "Type": "File"}],
-    }
+    client = _dropbox_client(
+        [{"Id": 101, "Name": "Assignment"}],
+        detail={
+            "Id": 202,
+            "Name": "Wrong assignment",
+            "Attachments": [{"Id": 7, "FileName": "wrong.pdf", "Size": 42, "Type": "File"}],
+        },
+    )
 
     payload = show._show_course_assignments(client, 44347, True)
     captured = capsys.readouterr()
@@ -442,34 +436,32 @@ def test_assignments_rejects_mismatched_detail_id_without_exposing_it(capsys) ->
 
 
 def test_assignments_deduplicates_folder_ids_first_record_wins() -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
-        {"Id": 101, "Name": "First assignment"},
-        {
+    client = _dropbox_client(
+        [
+            {"Id": 101, "Name": "First assignment"},
+            {
+                "Id": 101,
+                "Name": "Conflicting duplicate",
+                "Attachments": [{"Id": 8, "FileName": "second.pdf", "Size": 8, "Type": "File"}],
+            },
+        ],
+        detail={
             "Id": 101,
-            "Name": "Conflicting duplicate",
-            "Attachments": [{"Id": 8, "FileName": "second.pdf", "Size": 8, "Type": "File"}],
+            "Name": "First assignment detail",
+            "Attachments": [{"Id": 7, "FileName": "first.pdf", "Size": 7, "Type": "File"}],
         },
-    ]
-    client.get_dropbox_folder_detail.return_value = {
-        "Id": 101,
-        "Name": "First assignment detail",
-        "Attachments": [{"Id": 7, "FileName": "first.pdf", "Size": 7, "Type": "File"}],
-    }
+    )
 
-    payload = show._show_course_assignments(client, 44347, True)
+    assignments = show._show_course_assignments(client, 44347, True)["assignments"]
 
-    assert [assignment["folder_id"] for assignment in payload["assignments"]] == [101]
-    assert payload["assignments"][0]["name"] == "First assignment detail"
-    assert [attachment["file_id"] for attachment in payload["assignments"][0]["attachments"]] == [7]
+    assert [assignment["folder_id"] for assignment in assignments] == [101]
+    assert assignments[0]["name"] == "First assignment detail"
+    assert [attachment["file_id"] for attachment in assignments[0]["attachments"]] == [7]
     client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
 
 
 def test_assignment_detail_failure_returns_non_success_payload(capsys) -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
-        {"Id": 101, "Name": "Assignment"},
-    ]
+    client = _dropbox_client([{"Id": 101, "Name": "Assignment"}])
     client.get_dropbox_folder_detail.side_effect = RuntimeError("detail failed")
 
     payload = show._show_course_assignments(client, 44347, True)
@@ -483,40 +475,35 @@ def test_assignment_detail_failure_returns_non_success_payload(capsys) -> None:
 
 
 def test_assignments_allows_valid_duplicate_after_malformed_first_record(capsys) -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
-        {"Id": 101, "Name": "Malformed first"},
-        {
-            "Id": 101,
-            "Name": "Valid second",
-            "Attachments": [{"Id": 8, "FileName": "second.pdf", "Size": 8, "Type": "File"}],
-        },
-    ]
-    client.get_dropbox_folder_detail.return_value = {
-        "Id": 101,
-        "Name": "Malformed detail",
-        "Attachments": None,
-    }
+    client = _dropbox_client(
+        [
+            {"Id": 101, "Name": "Malformed first"},
+            {
+                "Id": 101,
+                "Name": "Valid second",
+                "Attachments": [{"Id": 8, "FileName": "second.pdf", "Size": 8, "Type": "File"}],
+            },
+        ],
+        detail={"Id": 101, "Name": "Malformed detail", "Attachments": None},
+    )
 
-    payload = show._show_course_assignments(client, 44347, True)
-    captured = capsys.readouterr()
+    assignments = show._show_course_assignments(client, 44347, True)["assignments"]
 
-    assert [assignment["folder_id"] for assignment in payload["assignments"]] == [101]
-    assert payload["assignments"][0]["name"] == "Valid second"
-    assert [attachment["file_id"] for attachment in payload["assignments"][0]["attachments"]] == [8]
-    assert "Warning: skipped malformed assignment folder." in captured.err
+    assert [assignment["folder_id"] for assignment in assignments] == [101]
+    assert assignments[0]["name"] == "Valid second"
+    assert [attachment["file_id"] for attachment in assignments[0]["attachments"]] == [8]
+    assert "Warning: skipped malformed assignment folder." in capsys.readouterr().err
     client.get_dropbox_folder_detail.assert_called_once_with(44347, 101)
 
 
 def test_assignments_json_redacts_secret_shaped_filename() -> None:
     sentinel = "ATTACHMENT_SECRET_SENTINEL"
     folder_sentinel = "FOLDER_SECRET_SENTINEL"
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [{
+    client = _dropbox_client([{
         "Id": 101,
         "Name": f"password={folder_sentinel}",
         "Attachments": [{"Id": 7, "FileName": f"password={sentinel}.pdf", "Size": 42, "Type": "File"}],
-    }]
+    }])
 
     payload = show._show_course_assignments(client, 44347, True)
 
@@ -549,18 +536,9 @@ def test_assignments_json_redacts_secret_shaped_filename() -> None:
 def test_custom_instructions_rich_text_is_string_and_preview_is_safe(
     instructions, expected, preview
 ) -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
-        {
-            "Id": 101,
-            "Name": "Assignment",
-            "Attachments": [],
-            "CustomInstructions": instructions,
-        }
-    ]
+    client = _dropbox_client([_folder(101, CustomInstructions=instructions)])
 
-    payload = show._show_course_assignments(client, 44347, True)
-    assignment = payload["assignments"][0]
+    assignment = show._show_course_assignments(client, 44347, True)["assignments"][0]
 
     assert assignment["custom_instructions"] == expected
     assert assignment["custom_instructions_preview"] == preview
@@ -593,8 +571,7 @@ def test_strip_html_normalizes_literal_multiline_whitespace() -> None:
 
 
 def test_assignment_view_skips_malformed_attachment_and_keeps_valid_siblings() -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
+    client = _dropbox_client([
         {
             "Id": 101,
             "Name": "Assignment",
@@ -602,6 +579,7 @@ def test_assignment_view_skips_malformed_attachment_and_keeps_valid_siblings() -
                 None,
                 "not-an-attachment",
                 {"Id": 7, "FileName": "brief.pdf", "Size": 42, "Type": "File"},
+                {"Id": 8, "FileName": "notes.txt", "Size": "bad", "Type": None},
             ],
             "Availability": "malformed",
             "CustomInstructions": {"Unexpected": ["shape"]},
@@ -613,87 +591,47 @@ def test_assignment_view_skips_malformed_attachment_and_keeps_valid_siblings() -
             "Attachments": [{"Id": 8, "FileName": "sibling.pdf", "Size": 10}],
             "Availability": {"StartDate": {"unexpected": True}, "EndDate": None},
         },
-    ]
+    ])
 
-    payload = show._show_course_assignments(client, 44347, True)
+    first, sibling = show._show_course_assignments(client, 44347, True)["assignments"]
 
-    assert [assignment["folder_id"] for assignment in payload["assignments"]] == [101, 102]
-    assert payload["assignments"][0]["attachment_count"] == 1
-    assert payload["assignments"][0]["attachments"][0]["file_id"] == 7
-    assert payload["assignments"][0]["availability"] is None
-    assert payload["assignments"][0]["custom_instructions"] is None
-    assert payload["assignments"][1]["attachment_count"] == 1
-    assert payload["assignments"][1]["availability"] is None
+    assert [first["folder_id"], sibling["folder_id"]] == [101, 102]
+    assert first["attachment_count"] == 2
+    assert [attachment["file_id"] for attachment in first["attachments"]] == [7, 8]
+    # A malformed size or type is normalised rather than dropping the file.
+    assert first["attachments"][1]["size"] == 0
+    assert first["attachments"][1]["attachment_type"] == "File"
+    assert first["availability"] is None
+    assert first["custom_instructions"] is None
+    assert sibling["attachment_count"] == 1
+    assert sibling["availability"] is None
 
 
 def test_assignment_view_bounds_deep_and_cyclic_rich_text_and_keeps_siblings() -> None:
     """Malformed RichText cannot abort the course or hide valid folders."""
-    client = Mock(spec=LighthouseClient)
-
     deep: dict[str, object] = {"Text": "too deep"}
     for _ in range(show._RICH_TEXT_MAX_DEPTH + 100):
         deep = {"Text": deep}
     cyclic: dict[str, object] = {}
     cyclic["Html"] = cyclic
-    client.get_dropbox_folders.return_value = [
-        {
-            "Id": 101,
-            "Name": "Deep instructions",
-            "Attachments": [],
-            "CustomInstructions": deep,
-        },
-        {
-            "Id": 102,
-            "Name": "Cyclic instructions",
-            "Attachments": [],
-            "CustomInstructions": cyclic,
-        },
-        {
-            "Id": 103,
-            "Name": "Valid sibling",
-            "Attachments": [],
-            "CustomInstructions": {
-                "Html": {"Text": "<p>Still valid.</p>"},
-            },
-        },
-    ]
+    client = _dropbox_client([
+        _folder(101, "Deep instructions", CustomInstructions=deep),
+        _folder(102, "Cyclic instructions", CustomInstructions=cyclic),
+        _folder(
+            103,
+            "Valid sibling",
+            CustomInstructions={"Html": {"Text": "<p>Still valid.</p>"}},
+        ),
+    ])
 
-    payload = show._show_course_assignments(client, 44347, True)
+    assignments = show._show_course_assignments(client, 44347, True)["assignments"]
 
-    assert [assignment["folder_id"] for assignment in payload["assignments"]] == [
-        101,
-        102,
-        103,
-    ]
-    assert payload["assignments"][0]["custom_instructions"] is None
-    assert payload["assignments"][0]["custom_instructions_preview"] is None
-    assert payload["assignments"][1]["custom_instructions"] is None
-    assert payload["assignments"][1]["custom_instructions_preview"] is None
-    assert payload["assignments"][2]["custom_instructions"] == "<p>Still valid.</p>"
-    assert payload["assignments"][2]["custom_instructions_preview"] == "Still valid."
-
-
-def test_assignment_view_skips_malformed_attachment_elements() -> None:
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
-        {
-            "Id": 101,
-            "Name": "Assignment",
-            "Attachments": [
-                None,
-                "not-an-attachment",
-                {"Id": 7, "FileName": "brief.pdf", "Size": 42, "Type": "File"},
-                {"Id": 8, "FileName": "notes.txt", "Size": "bad", "Type": None},
-            ],
-        }
-    ]
-
-    payload = show._show_course_assignments(client, 44347, True)
-
-    assert payload["assignments"][0]["attachment_count"] == 2
-    assert [a["file_id"] for a in payload["assignments"][0]["attachments"]] == [7, 8]
-    assert payload["assignments"][0]["attachments"][1]["size"] == 0
-    assert payload["assignments"][0]["attachments"][1]["attachment_type"] == "File"
+    assert [assignment["folder_id"] for assignment in assignments] == [101, 102, 103]
+    for malformed in assignments[:2]:
+        assert malformed["custom_instructions"] is None
+        assert malformed["custom_instructions_preview"] is None
+    assert assignments[2]["custom_instructions"] == "<p>Still valid.</p>"
+    assert assignments[2]["custom_instructions_preview"] == "Still valid."
 
 
 @pytest.mark.parametrize("json_output", [True, False])
@@ -703,17 +641,13 @@ def test_assignment_view_rejects_malformed_ids_without_echoing_them(
 ) -> None:
     """Folder/file IDs are strict while valid siblings remain visible."""
     sentinel = "d2lSecureSessionVal=ID_SENTINEL"
-    client = Mock(spec=LighthouseClient)
-    malformed_folders = [
-        {"Id": True, "Name": "bool", "Attachments": []},
-        {"Id": 1.5, "Name": "float", "Attachments": []},
-        {"Id": 0, "Name": "zero", "Attachments": []},
-        {"Id": -1, "Name": "negative", "Attachments": []},
-        {"Id": "../evil", "Name": "traversal", "Attachments": []},
-        {"Id": sentinel, "Name": "secret", "Attachments": []},
-    ]
-    client.get_dropbox_folders.return_value = [
-        *malformed_folders,
+    client = _dropbox_client([
+        _folder(True, "bool"),
+        _folder(1.5, "float"),
+        _folder(0, "zero"),
+        _folder(-1, "negative"),
+        _folder("../evil", "traversal"),
+        _folder(sentinel, "secret"),
         {
             "Id": "101",
             "Name": "Valid folder",
@@ -727,12 +661,8 @@ def test_assignment_view_rejects_malformed_ids_without_echoing_them(
                 {"Id": 8, "FileName": "integer.txt"},
             ],
         },
-        {
-            "Id": 102,
-            "Name": "Valid sibling",
-            "Attachments": [],
-        },
-    ]
+        _folder(102, "Valid sibling"),
+    ])
 
     result = show._show_course_assignments(client, 44347, json_output)
     captured = capsys.readouterr()
@@ -740,14 +670,9 @@ def test_assignment_view_rejects_malformed_ids_without_echoing_them(
     assert client.get_dropbox_folder_detail.call_count == 0
     assert sentinel not in captured.out + captured.err
     if json_output:
-        assert [assignment["folder_id"] for assignment in result["assignments"]] == [
-            101,
-            102,
-        ]
-        assert [
-            attachment["file_id"]
-            for attachment in result["assignments"][0]["attachments"]
-        ] == [7, 8]
+        assignments = result["assignments"]
+        assert [assignment["folder_id"] for assignment in assignments] == [101, 102]
+        assert [attachment["file_id"] for attachment in assignments[0]["attachments"]] == [7, 8]
     else:
         assert result == 0
         assert "101" in captured.out
@@ -759,8 +684,7 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
     sentinel = "SECRET"
     oversized_label = "L" * (show._MAX_DISPLAY_TEXT_LENGTH + 1)
     oversized_body = "B" * (show._MAX_RICH_TEXT_LENGTH + 1)
-    client = Mock(spec=LighthouseClient)
-    client.get_dropbox_folders.return_value = [
+    client = _dropbox_client([
         {
             "Id": 101,
             "Name": {"password": sentinel},
@@ -794,13 +718,10 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
             "CustomInstructions": "<p>Bring notes.</p>",
             "Attachments": [],
         },
-    ]
+    ])
 
-    structured = show._show_course_assignments(client, 44347, True)
-    human_rc = show._show_course_assignments(client, 44347, False)
-    captured = capsys.readouterr()
+    structured, captured = _render_json_and_human(capsys, show._show_course_assignments, client)
 
-    assert human_rc == 0
     assert structured["assignments"][0] == {
         "folder_id": 101,
         "name": "",
@@ -829,10 +750,9 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
 
 def test_enrollment_only_name_resolution_and_folder_lookup() -> None:
     client = Mock(spec=LighthouseClient)
-    enrolled = [
+    client.get_enrolled_courses.return_value = [
         {"OrgUnitId": 7001, "Name": "Enrollment-only Course", "Code": "E"}
     ]
-    client.get_enrolled_courses.return_value = enrolled
     client.get_courses.side_effect = AssertionError("legacy catalog should not be used")
 
     assert resolve_course_id(client, "enrollment-only") == 7001
@@ -840,33 +760,21 @@ def test_enrollment_only_name_resolution_and_folder_lookup() -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "patches", "json_key", "message"),
+    ("command", "methods", "json_key", "message"),
     [
-        (
-            "announcements",
-            [("get_announcements",)],
-            "announcements",
-            "No announcements found",
-        ),
-        (
-            "calendar",
-            [("get_calendar",)],
-            "events",
-            "No calendar events found",
-        ),
-        ("quizzes", [("get_quizzes",)], "quizzes", "No quizzes found"),
-        (
-            "assignments",
-            [("get_dropbox_folders",)],
-            "assignments",
-            "No assignments found",
-        ),
+        ("announcements", ["get_announcements"], "announcements", "No announcements found"),
+        ("calendar", ["get_calendar"], "events", "No calendar events found"),
+        ("quizzes", ["get_quizzes"], "quizzes", "No quizzes found"),
+        ("assignments", ["get_dropbox_folders"], "assignments", "No assignments found"),
+        ("grades", ["get_grade_schema", "get_my_grades"], "grades", "No grades found"),
     ],
 )
 def test_single_course_empty_read_views_have_human_and_json_paths(
-    command, patches, json_key, message
+    command, methods, json_key, message
 ) -> None:
-    with patch.object(LighthouseClient, patches[0][0], return_value=[]):
+    with ExitStack() as stack:
+        for method in methods:
+            stack.enter_context(patch.object(LighthouseClient, method, return_value=[]))
         human = CliRunner().invoke(cli, [command, "123"])
         structured = CliRunner().invoke(cli, [command, "123", "--json"])
 
@@ -877,39 +785,12 @@ def test_single_course_empty_read_views_have_human_and_json_paths(
     assert message not in structured.stdout
 
 
-def test_single_course_empty_grades_have_human_and_json_paths() -> None:
-    with patch.object(LighthouseClient, "get_grade_schema", return_value=[]), \
-        patch.object(LighthouseClient, "get_my_grades", return_value=[]):
-        human = CliRunner().invoke(cli, ["grades", "123"])
-        structured = CliRunner().invoke(cli, ["grades", "123", "--json"])
-
-    assert human.exit_code == 0
-    assert "No grades found" in human.stdout
-    assert structured.exit_code == 0
-    assert json.loads(structured.stdout) == {"course_id": 123, "grades": []}
-
-
 @pytest.mark.parametrize(
     ("command", "method", "collection_key", "record"),
     [
-        (
-            "announcements",
-            "get_announcements",
-            "announcements",
-            {"Title": "Keep announcement"},
-        ),
-        (
-            "calendar",
-            "get_calendar",
-            "events",
-            {"Title": "Keep event"},
-        ),
-        (
-            "quizzes",
-            "get_quizzes",
-            "quizzes",
-            {"Name": "Keep quiz"},
-        ),
+        ("announcements", "get_announcements", "announcements", {"Title": "Keep announcement"}),
+        ("calendar", "get_calendar", "events", {"Title": "Keep event"}),
+        ("quizzes", "get_quizzes", "quizzes", {"Name": "Keep quiz"}),
     ],
 )
 def test_read_views_skip_non_dict_siblings(
@@ -925,8 +806,7 @@ def test_read_views_skip_non_dict_siblings(
 
     assert human.exit_code == 0
     assert structured.exit_code == 0
-    payload = json.loads(structured.stdout)
-    assert payload == {"course_id": 123, collection_key: [record]}
+    assert json.loads(structured.stdout) == {"course_id": 123, collection_key: [record]}
     assert "Keep" in human.stdout
 
 
@@ -959,11 +839,8 @@ def test_announcements_project_untrusted_fields_without_secret_leak(capsys) -> N
         },
     ]
 
-    structured = show._show_announcements(client, 44347, True)
-    human_rc = show._show_announcements(client, 44347, False)
-    captured = capsys.readouterr()
+    structured, captured = _render_json_and_human(capsys, show._show_announcements, client)
 
-    assert human_rc == 0
     assert structured["announcements"][0]["Title"] == ""
     assert structured["announcements"][0]["Body"] == ""
     assert structured["announcements"][0]["Attachments"] == [{
@@ -1006,11 +883,8 @@ def test_calendar_projection_drops_nested_fields_without_secret_leak(capsys) -> 
         },
     ]
 
-    structured = show._show_calendar(client, 44347, True)
-    human_rc = show._show_calendar(client, 44347, False)
-    captured = capsys.readouterr()
+    structured, captured = _render_json_and_human(capsys, show._show_calendar, client)
 
-    assert human_rc == 0
     assert structured["events"][0] == {
         "Title": "",
         "OrgUnitName": "",
@@ -1051,11 +925,8 @@ def test_quiz_projection_drops_nested_fields_without_secret_leak(capsys) -> None
         },
     ]
 
-    structured = show._show_course_quizzes(client, 44347, True)
-    human_rc = show._show_course_quizzes(client, 44347, False)
-    captured = capsys.readouterr()
+    structured, captured = _render_json_and_human(capsys, show._show_course_quizzes, client)
 
-    assert human_rc == 0
     assert structured["quizzes"][0] == {
         "Name": "",
         "StartDate": "",
@@ -1110,11 +981,8 @@ def test_grades_projection_drops_malformed_records_and_fields(capsys) -> None:
         },
     ]
 
-    structured = show._show_course_grades(client, 44347, True)
-    human_rc = show._show_course_grades(client, 44347, False)
-    captured = capsys.readouterr()
+    structured, captured = _render_json_and_human(capsys, show._show_course_grades, client)
 
-    assert human_rc == 0
     assert structured == {
         "course_id": 44347,
         "grades": [

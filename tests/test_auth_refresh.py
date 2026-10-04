@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli import auth
@@ -24,10 +25,11 @@ def test_auth_refresh_cli_forwards_cdp_port_and_json() -> None:
     command.assert_called_once_with(cdp_port="9222", json_output=True)
 
 
-def test_auth_refresh_rejects_invalid_cdp_port_before_command() -> None:
+@pytest.mark.parametrize("port", ["70000", "not-a-port"], ids=["out-of-range", "non-numeric"])
+def test_auth_refresh_rejects_invalid_cdp_port_before_command(port: str) -> None:
     result = CliRunner().invoke(
         cli,
-        ["auth", "refresh", "--cdp-port", "70000", "--json"],
+        ["auth", "refresh", "--cdp-port", port, "--json"],
     )
 
     assert result.exit_code == 1
@@ -37,23 +39,23 @@ def test_auth_refresh_rejects_invalid_cdp_port_before_command() -> None:
     }
 
 
-def test_auth_refresh_rejects_non_numeric_cdp_port_as_command_error() -> None:
-    result = CliRunner().invoke(
-        cli,
-        ["auth", "refresh", "--cdp-port", "not-a-port", "--json"],
-    )
-
-    assert result.exit_code == 1
-    assert json.loads(result.stdout)["success"] is False
-
-
-def test_auth_refresh_preflights_extracts_and_persists(monkeypatch) -> None:
+@pytest.fixture
+def preflight_calls(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Skip config-dir creation and record each credential-store preflight."""
     calls: list[object] = []
-    cookies = {name: f"value-{index}" for index, name in enumerate(COOKIE_NAMES)}
 
     class FakeStore:
         def preflight(self) -> None:
             calls.append("preflight")
+
+    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
+    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
+    return calls
+
+
+def test_auth_refresh_preflights_extracts_and_persists(monkeypatch, preflight_calls) -> None:
+    calls = preflight_calls
+    cookies = {name: f"value-{index}" for index, name in enumerate(COOKIE_NAMES)}
 
     def fake_extract(port: int | None) -> dict[str, str]:
         calls.append(("extract", port))
@@ -63,8 +65,6 @@ def test_auth_refresh_preflights_extracts_and_persists(monkeypatch) -> None:
         calls.append(("persist", received, kwargs))
         return 0
 
-    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
-    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
     monkeypatch.setattr(auth, "refresh_auth_from_browser", fake_extract)
     monkeypatch.setattr(auth, "_persist_check_report", fake_persist)
     monkeypatch.setattr(auth, "clear_mfa_pending", lambda: calls.append("clear"))
@@ -76,16 +76,10 @@ def test_auth_refresh_preflights_extracts_and_persists(monkeypatch) -> None:
     assert calls[3] == "clear"
 
 
+@pytest.mark.usefixtures("preflight_calls")
 def test_failed_auth_refresh_preserves_pending_checkpoint(monkeypatch) -> None:
     cookies = dict.fromkeys(COOKIE_NAMES, "value")
-
-    class FakeStore:
-        def preflight(self) -> None:
-            return None
-
     clear = MagicMock()
-    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
-    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
     monkeypatch.setattr(auth, "refresh_auth_from_browser", lambda _port: cookies)
     monkeypatch.setattr(auth, "_persist_check_report", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(auth, "clear_mfa_pending", clear)
@@ -94,22 +88,16 @@ def test_failed_auth_refresh_preserves_pending_checkpoint(monkeypatch) -> None:
     clear.assert_not_called()
 
 
+@pytest.mark.usefixtures("preflight_calls")
 def test_auth_refresh_missing_cookies_returns_json_without_persisting(
     monkeypatch, capsys
 ) -> None:
-    class FakeStore:
-        def preflight(self) -> None:
-            return None
-
-    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
-    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
     monkeypatch.setattr(
         auth,
         "refresh_auth_from_browser",
         lambda _port: {"d2lSessionVal": "present"},
     )
-    persist = patch("lighthouse_cli.auth._persist_check_report")
-    with persist as persist_mock:
+    with patch("lighthouse_cli.auth._persist_check_report") as persist_mock:
         rc = auth.cmd_auth_refresh(9222, json_output=True)
 
     assert rc == 1
@@ -120,18 +108,13 @@ def test_auth_refresh_missing_cookies_returns_json_without_persisting(
     persist_mock.assert_not_called()
 
 
+@pytest.mark.usefixtures("preflight_calls")
 def test_auth_refresh_preserves_safe_network_error_in_json(
     monkeypatch, capsys
 ) -> None:
-    class FakeStore:
-        def preflight(self) -> None:
-            return None
-
     def fail_refresh(_port: int) -> dict[str, str]:
         raise NetworkError("The local browser cookie helper failed.")
 
-    monkeypatch.setattr(auth, "ensure_config_dir", lambda: None)
-    monkeypatch.setattr(auth, "CredentialStore", FakeStore)
     monkeypatch.setattr(auth, "refresh_auth_from_browser", fail_refresh)
 
     rc = auth.cmd_auth_refresh(9222, json_output=True)

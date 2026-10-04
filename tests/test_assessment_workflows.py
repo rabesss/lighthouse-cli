@@ -58,6 +58,12 @@ def sandbox(tmp_path, monkeypatch):
     return override
 
 
+def http_error(status, *args):
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(*args, response=response)
+
+
 def test_lighthouse_is_the_only_built_in_connection():
     assert active_connection() == LIGHTHOUSE
     assert LIGHTHOUSE.origin == "https://lighthouse.manipal.edu"
@@ -181,10 +187,7 @@ def test_projection_has_resource_limits():
 
 
 def test_session_import_is_sealed_and_origin_bound():
-    document = {
-        "origin": "https://lighthouse.manipal.edu",
-        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
-    }
+    document = {"origin": "https://lighthouse.manipal.edu", "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION")}
     result = CliRunner().invoke(cli, ["auth", "import-session", "--json"], input=json.dumps(document))
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"imported": True, "verified": False}
@@ -210,14 +213,10 @@ def test_session_import_no_longer_accepts_a_site_option():
 
 def test_foreign_origin_artifact_cannot_be_used_from_the_lighthouse_cookie_path():
     store = CredentialStore()
-    store.write_artifact(
-        store.cookie_file,
-        metadata={},
-        secret={
-            "origin": SANDBOX_ORIGIN,
-            "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
-        },
-    )
+    store.write_artifact(store.cookie_file, metadata={}, secret={
+        "origin": SANDBOX_ORIGIN,
+        "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION"),
+    })
     assert LighthouseClient(read_only_auth=True).cookies == {}
 
 
@@ -247,14 +246,10 @@ def test_bad_create_input_has_json_error_and_no_side_effects():
     client.assert_not_called()
 
 
-def test_role_group_usage_errors_preserve_json_contract():
-    result = CliRunner().invoke(cli, ["instructor", "--bogus", "quizzes", "12", "--json"])
-    assert result.exit_code == 1
-    assert json.loads(result.stdout)["error"]
-
-
-def test_role_group_unknown_command_preserves_json_contract():
-    result = CliRunner().invoke(cli, ["instructor", "unknown", "--json"])
+@pytest.mark.parametrize("args", [["--bogus", "quizzes", "12", "--json"], ["unknown", "--json"]],
+                         ids=["unknown-option", "unknown-command"])
+def test_role_group_usage_errors_preserve_json_contract(args):
+    result = CliRunner().invoke(cli, ["instructor", *args])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]
 
@@ -291,10 +286,12 @@ def test_quiz_create_204_is_an_unknown_write_outcome():
     response.close.assert_called_once()
 
 
-def test_assessment_session_expiry_during_write_is_an_unknown_write_outcome():
+@pytest.mark.parametrize("error", [SessionExpiredError("session expired"), http_error(429), http_error(502)],
+                         ids=["session-expiry", "429", "502"])
+def test_write_failure_after_dispatch_is_an_unknown_write_outcome(error):
     client = LighthouseClient()
     client._csrf_token = "synthetic-csrf"
-    client._request = Mock(side_effect=SessionExpiredError("session expired"))
+    client._request = Mock(side_effect=error)
     with pytest.raises(AssessmentWriteUnknownError, match="outcome unknown"):
         AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
 
@@ -308,17 +305,6 @@ def test_assessment_csrf_bootstrap_failure_is_retryable_before_write():
     client._request.assert_not_called()
 
 
-@pytest.mark.parametrize("status", [429, 502])
-def test_ambiguous_http_write_status_is_unknown(status):
-    client = LighthouseClient()
-    client._csrf_token = "synthetic-csrf"
-    response = requests.Response()
-    response.status_code = status
-    client._request = Mock(side_effect=requests.HTTPError(response=response))
-    with pytest.raises(AssessmentWriteUnknownError, match="outcome unknown"):
-        AssessmentAPI(client, 12).write("POST", "quiz", quiz_payload("Test", "all", 1))
-
-
 def test_classlist_uses_the_le_route():
     with patch("lighthouse_cli.api.LighthouseClient") as client:
         client.return_value.get_json.return_value = []
@@ -329,9 +315,7 @@ def test_classlist_uses_the_le_route():
 
 def test_pagination_preserves_forbidden_status_without_raw_error():
     client = LighthouseClient()
-    response = requests.Response()
-    response.status_code = 403
-    client.get_json = Mock(side_effect=requests.HTTPError("cookie=NEVER_PRINT", response=response))
+    client.get_json = Mock(side_effect=http_error(403, "cookie=NEVER_PRINT"))
     with pytest.raises(requests.HTTPError) as error:
         client._paginate_list("/12/surveys/")
     assert error.value.response.status_code == 403

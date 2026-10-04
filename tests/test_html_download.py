@@ -10,6 +10,7 @@ The key fix verified here: `api.py:get_topic_html` now calls `_sanitize_filename
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -18,181 +19,104 @@ from click.testing import CliRunner
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.manifest import MANIFEST_FILENAME
+from lighthouse_cli.utils import _sanitize_filename
 
 
-@pytest.fixture
-def cli_runner() -> CliRunner:
-    return CliRunner()
+def _download_html(tmp_path: Path, *, course, module, topic_id, title, body, cookies) -> Path:
+    """Run ``download --types html`` for one HTML topic; return the course directory.
+
+    Only the HTTP layer (get_raw) is mocked, never get_topic_html itself, so the
+    real code path runs, including _sanitize_filename.
+    """
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    toc = {
+        "Modules": [{
+            "ModuleId": 1, "Title": module, "Modules": [], "Topics": [
+                {"TopicId": topic_id, "Title": title, "TypeIdentifier": "HTML",
+                 "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
+            ]
+        }]
+    }
+
+    def fake_get_raw(path, **_kwargs):
+        if f"/content/topics/{topic_id}" in str(path):
+            topic = {"Title": title, "Body": {"Text": body}, "Html": ""}
+            return json.dumps(topic).encode("utf-8"), {}
+        raise AssertionError(f"Unexpected get_raw call: {path}")
+
+    with patch.object(LighthouseClient, "get_courses", return_value=[
+        {"OrgUnitId": 44347, "Name": course, "Code": "X"}
+    ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
+         patch.object(LighthouseClient, "get_raw", side_effect=fake_get_raw), \
+         patch.object(LighthouseClient, "cookies", property(lambda self: cookies)):
+
+        result = CliRunner().invoke(
+            cli,
+            ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
+        )
+
+    # If _sanitize_api_filename were still referenced, this would be a NameError.
+    assert result.exit_code == 0, f"exit={result.exit_code}, output={result.output}"
+    return output_dir / f"{course}-44347"
 
 
 class TestHtmlDownloadEndToEnd:
-    """Verify HTML download works with real (non-mocked) get_topic_html implementation."""
+    def test_html_download_uses_real_get_topic_html_not_mocked(self, tmp_path):
+        course_dir = _download_html(
+            tmp_path,
+            course="Test Course",
+            module="Module 1",
+            topic_id=500,
+            title="Lecture Notes",
+            body="<html><body><h1>Hello World</h1></body></html>",
+            cookies={"d2lSecureSessionVal": "test", "d2lSessionVal": "test"},
+        )
 
-    def test_html_download_uses_real_get_topic_html_not_mocked(self, cli_runner, tmp_path):
-        """HTML download pipeline uses real api.py get_topic_html — no mock on that method.
+        html_file = course_dir / "Module 1" / "Lecture Notes.html"
+        assert html_file.exists(), f"HTML file not found at {html_file}"
+        assert b"<h1>Hello World</h1>" in html_file.read_bytes()
 
-        This test verifies that the actual API call path is exercised for HTML topics.
-        Only the HTTP response is mocked (to avoid real network), but get_topic_html
-        itself is NOT mocked — it runs the real logic including _sanitize_filename.
-        """
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        manifest_path = course_dir / MANIFEST_FILENAME
+        assert manifest_path.exists()
+        manifest_data = json.loads(manifest_path.read_text())
+        assert "500" in manifest_data, f"Topic ID 500 not in manifest: {manifest_data}"
+        assert manifest_data["500"]["filename"] == "Lecture Notes.html"
 
-        toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Module 1", "Modules": [], "Topics": [
-                    {"TopicId": 500, "Title": "Lecture Notes", "TypeIdentifier": "HTML",
-                     "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
-                ]
-            }]
-        }
+    @pytest.mark.parametrize(
+        ("topic_id", "title", "expected_filename"),
+        [
+            (600, "Unit 1: Intro <Test>", "Unit 1_ Intro _Test_.html"),
+            (700, "Overview", "Overview.html"),
+        ],
+        ids=["special-chars-replaced", "html-extension-appended"],
+    )
+    def test_html_download_filename(self, tmp_path, topic_id, title, expected_filename):
+        course_dir = _download_html(
+            tmp_path,
+            course="Course",
+            module="Mod",
+            topic_id=topic_id,
+            title=title,
+            body="<p>Content</p>",
+            cookies={},
+        )
 
-        # Mock HTTP layer — but NOT get_topic_html itself.
-        # The real get_topic_html() will be called and must not raise NameError.
-        def mock_get_raw(path, **_kwargs):
-            if "/content/topics/500" in str(path):
-                return (
-                    json.dumps({
-                        "Title": "Lecture Notes",
-                        "Body": {"Text": "<html><body><h1>Hello World</h1></body></html>"},
-                        "Html": "",
-                    }).encode("utf-8"),
-                    {},
-                )
-            raise AssertionError(f"Unexpected get_raw call: {path}")
-
-        def mock_cookies():
-            return {"d2lSecureSessionVal": "test", "d2lSessionVal": "test"}
-
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Test Course", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "get_raw", side_effect=mock_get_raw), \
-             patch.object(LighthouseClient, "cookies", property(lambda self: mock_cookies())):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
-            )
-
-            # MUST succeed — if _sanitize_api_filename was still referenced,
-            # we'd get NameError: name '_sanitize_api_filename' is not defined
-            assert result.exit_code == 0, f"exit={result.exit_code}, output={result.output}"
-
-            # Verify the HTML file was created
-            course_dir = output_dir / "Test Course-44347"
-            html_file = course_dir / "Module 1" / "Lecture Notes.html"
-            assert html_file.exists(), f"HTML file not found at {html_file}"
-            content = html_file.read_bytes()
-            assert b"<h1>Hello World</h1>" in content
-
-            # Verify manifest entry exists
-            manifest_path = course_dir / MANIFEST_FILENAME
-            assert manifest_path.exists()
-            manifest_data = json.loads(manifest_path.read_text())
-            assert "500" in manifest_data, f"Topic ID 500 not in manifest: {manifest_data}"
-            assert manifest_data["500"]["filename"] == "Lecture Notes.html"
-
-    def test_html_download_sanitizes_filename_with_special_chars(self, cli_runner, tmp_path):
-        """HTML topic title with special characters is sanitized via _sanitize_filename."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-
-        toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 600, "Title": "Unit 1: Intro <Test>", "TypeIdentifier": "HTML",
-                     "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
-                ]
-            }]
-        }
-
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Course", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(
-                 LighthouseClient,
-                 "get_raw",
-                 return_value=(json.dumps({
-                     "Title": "Unit 1: Intro <Test>",
-                     "Body": {"Text": "<p>Content</p>"},
-                     "Html": "",
-                 }).encode("utf-8"), {}),
-             ), \
-             patch.object(LighthouseClient, "cookies", property(lambda self: {})):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code}, output={result.output}"
-
-            course_dir = output_dir / "Course-44347"
-            # Filename should have <> colons replaced with _
-            html_file = course_dir / "Mod" / "Unit 1_ Intro _Test_.html"
-            assert html_file.exists(), f"Expected sanitized filename, file not found at {html_file}"
-
-    def test_html_download_appends_html_extension(self, cli_runner, tmp_path):
-        """HTML topic title without .html extension gets .html appended."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-
-        toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 700, "Title": "Overview", "TypeIdentifier": "HTML",
-                     "Url": "", "LastModifiedDate": "2026-04-01T00:00:00Z"},
-                ]
-            }]
-        }
-
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Course", "Code": "X"}
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(
-                 LighthouseClient,
-                 "get_raw",
-                 return_value=(json.dumps({
-                     "Title": "Overview",
-                     "Body": {"Text": "<p>Overview content</p>"},
-                     "Html": "",
-                 }).encode("utf-8"), {}),
-             ), \
-             patch.object(LighthouseClient, "cookies", property(lambda self: {})):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "44347", "-o", str(output_dir), "--types", "html", "--json"],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code}, output={result.output}"
-
-            course_dir = output_dir / "Course-44347"
-            html_file = course_dir / "Mod" / "Overview.html"
-            assert html_file.exists(), f"HTML file not found at {html_file}"
+        html_file = course_dir / "Mod" / expected_filename
+        assert html_file.exists(), f"Expected {expected_filename}, file not found at {html_file}"
 
 
 class TestSanitizeFilenameShared:
-    """Verify _sanitize_filename is available from utils and used correctly."""
-
     def test_sanitize_filename_from_utils(self):
-        """_sanitize_filename from utils.py handles forbidden chars."""
-        from lighthouse_cli.utils import _sanitize_filename
         result = _sanitize_filename("file:name<>test.pdf")
         assert "<" not in result
         assert ">" not in result
         assert ":" not in result
 
-    def test_sanitize_filename_url_decodes(self):
-        """_sanitize_filename URL-decodes before sanitizing."""
-        from lighthouse_cli.utils import _sanitize_filename
-        result = _sanitize_filename("Lecture%201.pdf")
-        assert result == "Lecture 1.pdf"
-        assert "%20" not in result
-
-    def test_sanitize_filename_strips_leading_trailing_spaces_dots(self):
-        """_sanitize_filename strips leading/trailing dots and spaces."""
-        from lighthouse_cli.utils import _sanitize_filename
-        result = _sanitize_filename("  ..Lecture 1.pdf..  ")
-        assert result == "Lecture 1.pdf"
+    @pytest.mark.parametrize(
+        "raw",
+        ["Lecture%201.pdf", "  ..Lecture 1.pdf..  "],
+        ids=["url-decodes", "strips-leading-trailing-spaces-dots"],
+    )
+    def test_sanitize_filename_normalizes(self, raw):
+        assert _sanitize_filename(raw) == "Lecture 1.pdf"

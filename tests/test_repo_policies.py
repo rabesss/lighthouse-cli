@@ -246,14 +246,7 @@ class TestDependencyPolicies:
 class TestCIPolicies:
     def test_ci_workflow_gates_exist(self) -> None:
         ci = (WORKFLOWS / "ci.yml").read_text()
-        for gate in (
-            "ruff check",
-            "mypy",
-            "lint-imports",
-            "deptry",
-            "xenon",
-            "pytest",
-        ):
+        for gate in ("ruff check", "mypy", "lint-imports", "deptry", "xenon", "pytest"):
             assert gate in ci, f"CI is missing the '{gate}' gate"
 
     def test_ci_scans_for_secrets_with_a_rejecting_gate(self) -> None:

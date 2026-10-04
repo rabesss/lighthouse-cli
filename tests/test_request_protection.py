@@ -30,39 +30,38 @@ def test_bootstrap_cached_for_same_client():
     client.get_raw.assert_called_once_with("/d2l/home", max_bytes=2 * 1024 * 1024)
 
 
-def test_missing_bootstrap_does_not_block_submission_body():
-    client = LighthouseClient()
+def _submit(client: LighthouseClient) -> Mock:
     response = Mock(status_code=200)
     response.json.return_value = {}
     client._request = Mock(return_value=response)
     client.submit_file(12, 34, b"file body", "test.txt")
-    assert "X-Csrf-Token" not in client._request.call_args.kwargs["headers"]
+    return client._request
+
+
+def test_missing_bootstrap_does_not_block_submission_body():
+    request = _submit(LighthouseClient())
+    assert "X-Csrf-Token" not in request.call_args.kwargs["headers"]
 
 
 def test_submission_carries_csrf_and_does_not_print_it():
     client = LighthouseClient()
     client._csrf_token = "synthetic-csrf"
-    response = Mock(status_code=200)
-    response.json.return_value = {}
-    client._request = Mock(return_value=response)
-    client.submit_file(12, 34, b"file body", "test.txt")
-    assert client._request.call_args.kwargs["headers"]["X-Csrf-Token"] == "synthetic-csrf"
-    assert client._request.call_count == 1
-
-
-def test_declarative_form_bootstrap_is_parsed_without_executing_code():
-    record = json.dumps({"_type": "func", "N": "D2L.LP.Web.Authentication.Xsrf.Init", "P": ["d2l_referrer", "SYNTHETIC_TOKEN", 1234567890]})
-    body = ('<script>const graph={"1":'+json.dumps(record)+'};</script>').encode()
-    protection = form_protection_from_homepage(body)
-    assert protection.csrf_token == "SYNTHETIC_TOKEN"
-    assert protection.hit_code_seed == "1234567890"
-    assert "SYNTHETIC_TOKEN" not in repr(protection)
-    assert len({protection.next_hit_code() for _ in range(100)}) == 100
+    request = _submit(client)
+    assert request.call_args.kwargs["headers"]["X-Csrf-Token"] == "synthetic-csrf"
+    assert request.call_count == 1
 
 
 def xsrf_init(seed: object) -> bytes:
     record = json.dumps({"_type": "func", "N": "D2L.LP.Web.Authentication.Xsrf.Init", "P": ["d2l_referrer", "SYNTHETIC_TOKEN", seed]})
     return ('<script>const graph={"1":'+json.dumps(record)+'};</script>').encode()
+
+
+def test_declarative_form_bootstrap_is_parsed_without_executing_code():
+    protection = form_protection_from_homepage(xsrf_init(1234567890))
+    assert protection.csrf_token == "SYNTHETIC_TOKEN"
+    assert protection.hit_code_seed == "1234567890"
+    assert "SYNTHETIC_TOKEN" not in repr(protection)
+    assert len({protection.next_hit_code() for _ in range(100)}) == 100
 
 
 @pytest.mark.parametrize("seed", [1234567890, -1234567890, 0, 2**53 - 1, -(2**53) + 1])

@@ -12,11 +12,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 
 import lighthouse_cli.config as config_mod
 from lighthouse_cli.auth import CredentialStore, CredentialStoreError
+from lighthouse_cli.cli import cli
 from lighthouse_cli.config import (
     clear_mfa_pending,
     load_cookies,
@@ -26,10 +29,6 @@ from lighthouse_cli.config import (
     update_mfa_pending,
 )
 from lighthouse_cli.credential_store import FORMAT_VERSION, is_sealed_document
-
-# ---------------------------------------------------------------------------
-# Fixtures / helpers
-# ---------------------------------------------------------------------------
 
 PASSPHRASE_A = "matrix-passphrase-alpha"
 PASSPHRASE_B = "matrix-passphrase-beta"
@@ -95,8 +94,6 @@ class TestKeySourceMatrix:
     ) -> None:
         """The pre-existing ('lighthouse-cli', 'credential-key') entry is reused,
         never replaced with a parallel entry or a raw-bytes format."""
-        from cryptography.fernet import Fernet
-
         existing_key = Fernet.generate_key().decode()
         fake_keyring.backend.set_password("lighthouse-cli", "credential-key", existing_key)
 
@@ -117,8 +114,6 @@ class TestKeySourceMatrix:
     ) -> None:
         """Data sealed under the keyring opens via the keyring even after a
         passphrase appears (and vice versa) — selection is never re-run."""
-        from cryptography.fernet import Fernet
-
         fake_keyring.backend.set_password(
             "lighthouse-cli", "credential-key", Fernet.generate_key().decode()
         )
@@ -153,8 +148,6 @@ class TestKeySourceMatrix:
         cli_runner: Any,
     ) -> None:
         """auth login fails BEFORE any auth side effect (no SSO call, no writes)."""
-        from unittest.mock import MagicMock, patch
-
         monkeypatch.delenv("LIGHTHOUSE_SECRETS_PASSPHRASE", raising=False)
         monkeypatch.setitem(sys.modules, "keyring", None)
         monkeypatch.setenv("LIGHTHOUSE_USERNAME", "user@manipal.edu")
@@ -166,11 +159,7 @@ class TestKeySourceMatrix:
             patch("lighthouse_cli.auth.LighthouseClient") as client_cls,
         ):
             client_cls.return_value.check_auth.return_value = True
-            result = cli_runner.invoke(
-                __import__("lighthouse_cli.cli", fromlist=["cli"]).cli,
-                ["auth", "login", "--json"],
-                catch_exceptions=False,
-            )
+            result = cli_runner.invoke(cli, ["auth", "login", "--json"], catch_exceptions=False)
 
         assert result.exit_code == 1
         payload = json.loads(result.stdout)
@@ -244,9 +233,7 @@ class TestSealedCookies:
         save_cookies({"d2lSecureSessionVal": "sec-sentinel"})
         monkeypatch.setenv("LIGHTHOUSE_SECRETS_PASSPHRASE", PASSPHRASE_B)
 
-        loaded = load_cookies()
-
-        assert loaded == {}
+        assert load_cookies() == {}
         err = capsys.readouterr().err
         assert "could not be unlocked" in err
         assert "sec-sentinel" not in err
@@ -390,10 +377,7 @@ class TestMfaPendingCompatibility:
         assert "\\x1b" not in warning
         assert "\x1b" not in warning
 
-    def test_overflowing_float_pending_document_is_cleared(
-        self,
-        store_dir: Path,
-    ) -> None:
+    def test_overflowing_float_pending_document_is_cleared(self, store_dir: Path) -> None:
         pending_path(store_dir).write_text('{"version": 2, "value": 1e999}')
 
         assert load_mfa_pending() is None
@@ -416,14 +400,10 @@ class TestMfaPendingCompatibility:
         assert "mfa_method" not in loaded
         assert "METHOD_SENTINEL" not in json.dumps(loaded)
 
-    def test_legacy_v1_discard_json_purity(
-        self, store_dir: Path, cli_runner: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_legacy_v1_discard_json_purity(self, store_dir: Path, cli_runner: Any) -> None:
         """Under --json the discard warning goes to stderr; stdout stays pure JSON."""
-        from lighthouse_cli.cli import cli as root_cli
-
         pending_path(store_dir).write_text(json.dumps(LEGACY_V1_PENDING))
-        result = cli_runner.invoke(root_cli, ["auth", "verify", "123456", "--json"], catch_exceptions=False)
+        result = cli_runner.invoke(cli, ["auth", "verify", "123456", "--json"], catch_exceptions=False)
 
         assert result.exit_code == 1
         payload = json.loads(result.stdout)  # raises if anything polluted stdout

@@ -83,32 +83,16 @@ def test_read_only_client_legacy_cookies_fail_closed_without_request(
     session.request.assert_not_called()
 
 
-def test_read_only_client_does_not_refresh_or_save_after_get_401() -> None:
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_read_only_client_does_not_refresh_or_save_after_401(method: str) -> None:
     save_cookies(_cookies())
     client, session = _authenticated_client()
-    response = MagicMock(status_code=401, headers={})
-    session.request.return_value = response
+    session.request.return_value = MagicMock(status_code=401, headers={})
 
     with patch.object(api, "refresh_auth_from_browser") as refresh, \
             patch.object(api, "save_cookies") as save:
         with pytest.raises(SessionExpiredError):
-            client._request("GET", f"{BASE_URL}/d2l/api/versions/")
-
-    session.request.assert_called_once()
-    refresh.assert_not_called()
-    save.assert_not_called()
-
-
-def test_read_only_client_does_not_refresh_or_save_after_head_401() -> None:
-    save_cookies(_cookies())
-    client, session = _authenticated_client()
-    response = MagicMock(status_code=401, headers={})
-    session.request.return_value = response
-
-    with patch.object(api, "refresh_auth_from_browser") as refresh, \
-            patch.object(api, "save_cookies") as save:
-        with pytest.raises(SessionExpiredError):
-            client._request("HEAD", f"{BASE_URL}/d2l/api/versions/")
+            client._request(method, f"{BASE_URL}/d2l/api/versions/")
 
     session.request.assert_called_once()
     refresh.assert_not_called()

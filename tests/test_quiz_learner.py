@@ -435,10 +435,12 @@ def test_start_posts_the_summary_action_once_and_reads_the_first_page():
     assert "isprv=&" in client.get_raw.call_args_list[4].args[0]
 
 
-def test_continue_reopens_the_attempt_in_progress():
-    client = start_client(summary(**IN_PROGRESS), resume=True)
-    page = start_learner(client, course_id=10, quiz_id=20, continue_only=True)
-    assert page.attempt_id == 30
+@pytest.mark.parametrize("page", [1, 3])
+def test_continue_reopens_the_attempt_in_progress_on_the_page_the_server_names(page):
+    client = start_client(summary(**IN_PROGRESS), resume=True, script=f"<script>\nparent.GoToAttemptQuizAuto( 30,{page},0 );\n</script>".encode(),
+                          readback=(body(questions(page=page), page=page), {}))
+    opened = start_learner(client, course_id=10, quiz_id=20, continue_only=True)
+    assert (opened.attempt_id, opened.page) == (30, page)
     assert client._request.call_args.args[1].endswith("&inProgress=true")
 
 
@@ -471,9 +473,7 @@ def test_a_summary_just_read_is_not_requested_again():
     (summary(fields={"d2l_referrer": "OTHER_SESSION"}), {}, REFUSE_START_PROTECTION),
 ])
 def test_start_refusals_send_nothing(page, kwargs, message):
-    client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(return_value=(page, {}))
-    client._request = Mock()
+    client, _ = write_client(page)
     with pytest.raises(PreviewRefusedError, match=re.escape(message)):
         start_learner(client, course_id=10, quiz_id=20, **kwargs)
     client._request.assert_not_called()
@@ -491,34 +491,18 @@ def test_unexpected_start_chain_is_unknown_and_not_retried(change):
     client._request.assert_called_once()
 
 
-def test_a_new_attempt_must_open_on_its_first_page():
-    client = start_client(summary(), script=b"<script>\nparent.GoToAttemptQuizAuto( 30,2,0 );\n</script>")
+@pytest.mark.parametrize("built, called, page, reads", [
+    # A new attempt must open on its first page: page 2 is never requested.
+    ({"script": b"<script>\nparent.GoToAttemptQuizAuto( 30,2,0 );\n</script>"}, {}, None, 4),
+    ({"readback": SessionExpiredError("session expired")}, {}, 1, 5),
+    ({}, {"on_identity": Mock(side_effect=OSError("disk full"))}, 1, 4),  # no readback after a failed seal
+], ids=["new-attempt-on-page-2", "readback-auth-expiry", "identity-callback-fails"])
+def test_start_failure_after_the_post_is_unknown_with_the_attempt_identity(built, called, page, reads):
+    client = start_client(summary(), **built)
     with pytest.raises(LearnerStartUnknownError) as exc_info:
-        start_learner(client, course_id=10, quiz_id=20)
-    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, None)
-    assert client.get_raw.call_count == 4  # page 2 is never requested
-
-
-def test_continue_opens_the_page_the_server_names():
-    client = start_client(summary(**IN_PROGRESS), resume=True, script=b"<script>\nparent.GoToAttemptQuizAuto( 30,3,0 );\n</script>",
-                          readback=(body(questions(page=3), page=3), {}))
-    assert start_learner(client, course_id=10, quiz_id=20, continue_only=True).page == 3
-
-
-def test_start_readback_failure_is_unknown_with_the_attempt_identity():
-    client = start_client(summary(), readback=SessionExpiredError("session expired"))
-    with pytest.raises(LearnerStartUnknownError) as exc_info:
-        start_learner(client, course_id=10, quiz_id=20)
-    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
-    client._request.assert_called_once()
-
-
-def test_start_identity_callback_failure_is_unknown_with_identity():
-    client = start_client(summary())
-    with pytest.raises(LearnerStartUnknownError) as exc_info:
-        start_learner(client, course_id=10, quiz_id=20, on_identity=Mock(side_effect=OSError("disk full")))
-    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, 1)
-    assert client.get_raw.call_count == 4  # no readback after a failed seal
+        start_learner(client, course_id=10, quiz_id=20, **called)
+    assert (exc_info.value.attempt_id, exc_info.value.page) == (30, page)
+    assert client.get_raw.call_count == reads
     client._request.assert_called_once()
 
 
@@ -534,19 +518,16 @@ def test_start_chain_network_failure_is_unknown_and_not_retried(failing):
     assert client.get_raw.call_count == failing + 1
 
 
-def test_start_post_auth_expiry_is_unknown_after_dispatch():
+@pytest.mark.parametrize("post", [
+    pytest.param(SessionExpiredError("session expired"), id="auth-expiry-after-dispatch"),
+    pytest.param(Mock(status_code=200, headers={}), id="no-redirect"),
+])
+def test_start_post_without_its_redirect_is_unknown(post):
     client = start_client(summary())
-    client._request = Mock(side_effect=SessionExpiredError("session expired"))
+    client._request = Mock(side_effect=[post])
     with pytest.raises(LearnerStartUnknownError):
         start_learner(client, course_id=10, quiz_id=20)
     client._request.assert_called_once()
-
-
-def test_start_without_a_redirect_is_unknown():
-    client = start_client(summary())
-    client._request = Mock(return_value=Mock(status_code=200, headers={}))
-    with pytest.raises(LearnerStartUnknownError):
-        start_learner(client, course_id=10, quiz_id=20)
     client.get_raw.assert_called_once()
 
 

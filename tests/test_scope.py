@@ -7,37 +7,68 @@ from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
 
 from lighthouse_cli.api import CourseNotFoundError, LighthouseClient
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _resolve_also_course, _resolve_course_scope
 
+SEM_I = {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"}
+SEM_II = {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"}
+AB_SEMESTERS = [
+    {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
+    {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2024-2025"},
+]
+AB_COURSES = [
+    (111, "Course A", "009_CourseA_0902_I_2024-2025"),
+    (222, "Course B", "009_CourseB_0902_II_2024-2025"),
+]
+AB_TRACKED = {111: "Sem I", 222: "Sem II"}
 
-@pytest.fixture
-def cli_runner() -> CliRunner:
-    return CliRunner()
+
+def _one_file_toc(cid):
+    return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
+        {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
+         "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
+    ]}]}
 
 
-def _config_for(semesters, enrollments):
-    """Build a course-config.json dict mapping course IDs to semester labels.
+def _no_modules(cid):
+    return {"Modules": []}
 
-    Uses the semester name as the label for each enrollment (matched by code prefix).
+
+def _run(cli_runner, tmp_path, args, courses, semesters=(), tracked=None, toc=_one_file_toc):
+    """Invoke ``lighthouse ARGS -o DIR`` against a patched client.
+
+    ``courses`` holds (OrgUnitId, Name, Code) rows served as both the enrollments
+    and the course catalog; ``tracked`` maps an OrgUnitId to its semester label in
+    course-config.json. Returns the result, the course folder names written, and
+    the OrgUnitIds passed to download_topic_file in call order.
     """
-    tracked = {}
-    for e in enrollments:
-        oid = str(e["OrgUnit"]["Id"])
-        name = e["OrgUnit"]["Name"]
-        _code = e["OrgUnit"].get("Code", "")  # present in real payloads; unused here
-        # Assign semester label based on which semester's code prefix matches
-        sem_label = ""
-        for s in semesters:
-            sname = s.get("Name", "")
-            if sname:
-                sem_label = sname
-                break
-        tracked[oid] = {"name": name, "semester": sem_label}
-    return {"tracked_courses": tracked}
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    cfg_path = tmp_path / "course-config.json"
+    names = {oid: name for oid, name, _code in courses}
+    cfg_path.write_text(json.dumps({"tracked_courses": {
+        str(oid): {"name": names[oid], "semester": label} for oid, label in (tracked or {}).items()
+    }}))
+    download_calls = []
+
+    def download_topic_file(cid, tid):
+        download_calls.append(cid)
+        return f"content{cid}".encode(), "f.pdf"
+
+    enrollments = [
+        {"OrgUnit": {"Id": oid, "Name": name, "Code": code}} for oid, name, code in courses
+    ]
+    catalog = [{"OrgUnitId": oid, "Name": name, "Code": code} for oid, name, code in courses]
+    with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
+         patch.object(LighthouseClient, "get_semesters", return_value=list(semesters)), \
+         patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
+         patch.object(LighthouseClient, "get_courses", return_value=catalog), \
+         patch.object(LighthouseClient, "get_content_toc", side_effect=toc), \
+         patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
+        result = cli_runner.invoke(cli, [*args, "-o", str(output_dir)])
+    return result, {d.name for d in output_dir.iterdir()}, download_calls
 
 
 def test_blank_also_selector_never_matches_every_course() -> None:
@@ -96,130 +127,51 @@ def test_course_scope_order_is_deterministic_and_does_not_mutate_inputs() -> Non
 # ---------------------------------------------------------------------------
 
 class TestLatestSemesterResolution:
-    """Test that default (no args) downloads all courses from latest semester."""
 
     def test_default_downloads_all_courses_from_latest_semester_by_highest_orgunitid(self, cli_runner, tmp_path):
         """VAL-SYNC-011 & VAL-SYNC-032: Latest semester = highest OrgUnitId, not by date or name."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
-
         semesters = [
             {"OrgUnitId": 100, "Name": "Old Sem", "Code": "OLD"},
             {"OrgUnitId": 200, "Name": "Newer Sem", "Code": "NEW"},
             {"OrgUnitId": 300, "Name": "Newest Sem", "Code": "NEWEST"},
         ]
-        enrollments = [
-            {"OrgUnit": {"Id": 101, "Name": "Old Course", "Code": "OLD"}},
-            {"OrgUnit": {"Id": 201, "Name": "Newer Course", "Code": "NEW"}},
-            {"OrgUnit": {"Id": 202, "Name": "Newer Course 2", "Code": "NEW"}},
-            {"OrgUnit": {"Id": 301, "Name": "Newest Course", "Code": "NEWEST"}},
-            {"OrgUnit": {"Id": 302, "Name": "Newest Course 2", "Code": "NEWEST"}},
+        courses = [
+            (101, "Old Course", "OLD"),
+            (201, "Newer Course", "NEW"),
+            (202, "Newer Course 2", "NEW"),
+            (301, "Newest Course", "NEWEST"),
+            (302, "Newest Course 2", "NEWEST"),
         ]
+        tracked = {
+            101: "Old Sem", 201: "Newer Sem", 202: "Newer Sem", 301: "Newest Sem", 302: "Newest Sem",
+        }
 
-        # Map courses to their semester names
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "101": {"name": "Old Course", "semester": "Old Sem"},
-                "201": {"name": "Newer Course", "semester": "Newer Sem"},
-                "202": {"name": "Newer Course 2", "semester": "Newer Sem"},
-                "301": {"name": "Newest Course", "semester": "Newest Sem"},
-                "302": {"name": "Newest Course 2", "semester": "Newest Sem"},
-            }
-        }))
+        result, course_names, _ = _run(cli_runner, tmp_path, ["download"], courses, semesters, tracked)
 
-        def get_content_toc(cid):
-            return {
-                "Modules": [{
-                    "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                        {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                         "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                    ]
-                }]
-            }
-
-        def download_topic_file(cid, tid):
-            return f"content for {cid}".encode(), "f.pdf"
-
-        def get_courses():
-            return [
-                {"OrgUnitId": 101, "Name": "Old Course", "Code": "OLD"},
-                {"OrgUnitId": 201, "Name": "Newer Course", "Code": "NEW"},
-                {"OrgUnitId": 202, "Name": "Newer Course 2", "Code": "NEW"},
-                {"OrgUnitId": 301, "Name": "Newest Course", "Code": "NEWEST"},
-                {"OrgUnitId": 302, "Name": "Newest Course 2", "Code": "NEWEST"},
-            ]
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", side_effect=get_courses), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = list(output_dir.iterdir())
-            course_names = {d.name for d in course_dirs}
-            assert "Newest Course-301" in course_names
-            assert "Newest Course 2-302" in course_names
-            assert "Old Course-101" not in course_names
-            assert "Newer Course-201" not in course_names
+        assert result.exit_code == 0, result.output
+        assert "Newest Course-301" in course_names
+        assert "Newest Course 2-302" in course_names
+        assert "Old Course-101" not in course_names
+        assert "Newer Course-201" not in course_names
 
     def test_semester_with_highest_orgunitid_selected_not_by_date(self, cli_runner, tmp_path):
         """VAL-SYNC-032: Sem II (highest OrgUnitId) should be selected even if other has later date."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
-
         semesters = [
             {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2025-2026", "StartDate": "2026-09-01T00:00:00Z"},
             {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2025-2026", "StartDate": "2026-01-01T00:00:00Z"},
         ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2025-2026"}},
+        courses = [
+            (111, "Course A", "009_CourseA_0902_I_2025-2026"),
+            (222, "Course B", "009_CourseB_0902_II_2025-2026"),
         ]
 
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["download"], courses, semesters, AB_TRACKED,
+        )
 
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid, "Title": "f", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2025-2026"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2025-2026"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert "Course B-222" in course_dirs
-            assert "Course A-111" not in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Course B-222" in course_dirs
+        assert "Course A-111" not in course_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -227,114 +179,32 @@ class TestLatestSemesterResolution:
 # ---------------------------------------------------------------------------
 
 class TestSemesterFilter:
-    """Test --semester filter by name substring or exact ID."""
 
     def test_semester_filter_by_name_substring(self, cli_runner, tmp_path):
         """--semester 'Sem III' downloads courses mapped to Sem III."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
+        semesters = [*AB_SEMESTERS, {"OrgUnitId": 300, "Name": "Sem III", "Code": "0902_III_2025-2026"}]
+        courses = [*AB_COURSES, (333, "Course C", "009_CourseC_0902_III_2025-2026")]
+        tracked = {**AB_TRACKED, 333: "Sem III"}
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2024-2025"},
-            {"OrgUnitId": 300, "Name": "Sem III", "Code": "0902_III_2025-2026"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
-            {"OrgUnit": {"Id": 333, "Name": "Course C", "Code": "009_CourseC_0902_III_2025-2026"}},
-        ]
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "Sem III"], courses, semesters, tracked,
+        )
 
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-                "333": {"name": "Course C", "semester": "Sem III"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-                 {"OrgUnitId": 333, "Name": "Course C", "Code": "009_CourseC_0902_III_2025-2026"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "Sem III", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert "Course C-333" in course_dirs
-            assert "Course A-111" not in course_dirs
-            assert "Course B-222" not in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Course C-333" in course_dirs
+        assert "Course A-111" not in course_dirs
+        assert "Course B-222" not in course_dirs
 
     def test_semester_filter_by_exact_orgunitid(self, cli_runner, tmp_path):
         """--semester with numeric ID matches exact semester OrgUnitId, filters courses by config."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "100"],
+            AB_COURSES, AB_SEMESTERS, AB_TRACKED,
+        )
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2024-2025"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
-        ]
-
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "100", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert "Course A-111" in course_dirs
-            assert "Course B-222" not in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Course A-111" in course_dirs
+        assert "Course B-222" not in course_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -342,44 +212,18 @@ class TestSemesterFilter:
 # ---------------------------------------------------------------------------
 
 class TestSemesterNotFound:
-    """Test error when --semester doesn't match any semester."""
 
     def test_semester_not_found_raises_error(self, cli_runner, tmp_path):
         """VAL-SYNC-037: No semester matching 'Sem X' produces clear error with remediation hint."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, _, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "Sem X"],
+            [(111, "Course A", "A")], [SEM_I, SEM_II], {111: "Sem I"},
+        )
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "A"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-            }
-        }))
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "A"},
-             ]):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "Sem X", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 1
-            assert "No matching semester" in result.output
-            assert "Sem X" not in result.output
-            assert "lighthouse semesters" in result.output
+        assert result.exit_code == 1
+        assert "No matching semester" in result.output
+        assert "Sem X" not in result.output
+        assert "lighthouse semesters" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -387,36 +231,15 @@ class TestSemesterNotFound:
 # ---------------------------------------------------------------------------
 
 class TestSingleCourse:
-    """Test single course download by name substring or numeric ID."""
 
     def test_single_course_by_name_substring(self, cli_runner, tmp_path):
         """lighthouse download 'signals' downloads one course by name substring."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["download", "signals"], [(44347, "Signals & Systems", "X")],
+        )
 
-        toc = {
-            "Modules": [{
-                "ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                    {"TopicId": 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                     "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-                ]
-            }]
-        }
-
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-        ]), patch.object(LighthouseClient, "get_content_toc", return_value=toc), \
-             patch.object(LighthouseClient, "download_topic_file", return_value=(b"content", "f.pdf")):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "signals", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert len(course_dirs) == 1
-            assert "Signals & Systems-44347" in course_dirs
+        assert result.exit_code == 0, result.output
+        assert course_dirs == {"Signals & Systems-44347"}
 
 
 # ---------------------------------------------------------------------------
@@ -424,30 +247,21 @@ class TestSingleCourse:
 # ---------------------------------------------------------------------------
 
 class TestAmbiguousCourseName:
-    """Test that ambiguous name matching raises error listing all matches."""
 
     def test_ambiguous_course_name_raises_error_listing_all_matches(self, cli_runner, tmp_path):
         """VAL-SYNC-035: 'math' matches multiple courses → error listing both with OrgUnitIds."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, _, _ = _run(
+            cli_runner, tmp_path, ["download", "math"],
+            [(111, "Mathematics I", "M1"), (222, "Mathematics II", "M2")],
+        )
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
-            {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
-        ]):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "math", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 1
-            assert "Ambiguous course match" in result.output
-            # The candidate IDs came from an untrusted upstream response and
-            # must not be copied into human-facing error output.
-            assert "111" not in result.output
-            assert "222" not in result.output
-            assert "numeric OrgUnitId" in result.output
+        assert result.exit_code == 1
+        assert "Ambiguous course match" in result.output
+        # The candidate IDs came from an untrusted upstream response and
+        # must not be copied into human-facing error output.
+        assert "111" not in result.output
+        assert "222" not in result.output
+        assert "numeric OrgUnitId" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -455,25 +269,16 @@ class TestAmbiguousCourseName:
 # ---------------------------------------------------------------------------
 
 class TestCourseNotFound:
-    """Test non-existent course produces clear error."""
 
     def test_course_not_found_raises_error(self, cli_runner, tmp_path):
         """VAL-SYNC-036: Non-existent course produces clear error with remediation hint."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, _, _ = _run(
+            cli_runner, tmp_path, ["download", "nonexistent"], [(44347, "Signals & Systems", "X")],
+        )
 
-        with patch.object(LighthouseClient, "get_courses", return_value=[
-            {"OrgUnitId": 44347, "Name": "Signals & Systems", "Code": "X"},
-        ]):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "nonexistent", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 1
-            assert "not found" in result.output or "nonexistent" in result.output
-            assert "lighthouse courses" in result.output
+        assert result.exit_code == 1
+        assert "not found" in result.output or "nonexistent" in result.output
+        assert "lighthouse courses" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -481,231 +286,61 @@ class TestCourseNotFound:
 # ---------------------------------------------------------------------------
 
 class TestAlsoFlag:
-    """Test --also flag for ad-hoc courses outside semester scope."""
 
     def test_also_adds_courses_outside_semester_scope(self, cli_runner, tmp_path):
         """VAL-SYNC-013: --also adds ad-hoc courses by name/ID alongside semester scope."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
+        courses = [(111, "Course A", "S1"), (222, "Course B", "S2"), (333, "Signals", "S1")]
+        tracked = {111: "Sem I", 222: "Sem II", 333: "Sem I"}
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "S1"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
-            {"OrgUnit": {"Id": 333, "Name": "Signals", "Code": "S1"}},
-        ]
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "200", "--also", "333"],
+            courses, [SEM_I, SEM_II], tracked,
+        )
 
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-                "333": {"name": "Signals", "semester": "Sem I"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-                 {"OrgUnitId": 333, "Name": "Signals", "Code": "S1"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "333", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            # Sem 200's course (Course B-222) + --also course (Signals-333)
-            assert "Course B-222" in course_dirs
-            assert "Signals-333" in course_dirs
-            # Sem 100 course should NOT be included
-            assert "Course A-111" not in course_dirs
+        assert result.exit_code == 0, result.output
+        # Sem 200's course (Course B-222) + --also course (Signals-333)
+        assert "Course B-222" in course_dirs
+        assert "Signals-333" in course_dirs
+        assert "Course A-111" not in course_dirs
 
     def test_also_with_invalid_course_produces_per_course_error(self, cli_runner, tmp_path):
         """VAL-SYNC-038: --also referencing non-existent course produces error for that course only."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "200", "--also", "99999"],
+            [(111, "Course A", "S1"), (222, "Course B", "S2")], [SEM_I, SEM_II], AB_TRACKED,
+        )
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "S1"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
-        ]
-
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            if cid == 99999:
-                raise CourseNotFoundError("Course 99999 not found")
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "99999", "-o", str(output_dir)],
-            )
-
-            # Invalid --also is scope leniency: warning on stderr, exit unaffected
-            # (uniform exit matrix — also_errors never affect exit codes).
-            assert result.exit_code == 0
-            assert "Course not found. Run: lighthouse courses" in result.output
-            assert "99999" not in result.output
-            # Course B-222 should still be downloaded
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert "Course B-222" in course_dirs
+        # Invalid --also is scope leniency: warning on stderr, exit unaffected
+        # (uniform exit matrix — also_errors never affect exit codes).
+        assert result.exit_code == 0
+        assert "Course not found. Run: lighthouse courses" in result.output
+        assert "99999" not in result.output
+        assert "Course B-222" in course_dirs
 
     def test_multiple_also_flags_accumulate(self, cli_runner, tmp_path):
         """VAL-SYNC-039: Multiple --also flags are additive, not overriding."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        courses = [(111, "Course A", "S1"), (222, "Signals", "S1"), (333, "Physics", "S1")]
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "S1"}},
-            {"OrgUnit": {"Id": 222, "Name": "Signals", "Code": "S1"}},
-            {"OrgUnit": {"Id": 333, "Name": "Physics", "Code": "S1"}},
-        ]
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path,
+            ["download", "--also", "Signals", "--also", "Physics", "--also", "333"],
+            courses, [SEM_I], {111: "Sem I", 222: "Sem I", 333: "Sem I"},
+        )
 
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Signals", "semester": "Sem I"},
-                "333": {"name": "Physics", "semester": "Sem I"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                 {"OrgUnitId": 222, "Name": "Signals", "Code": "S1"},
-                 {"OrgUnitId": 333, "Name": "Physics", "Code": "S1"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--also", "Signals", "--also", "Physics", "--also", "333", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            # All three --also courses should be present
-            assert "Signals-222" in course_dirs
-            assert "Physics-333" in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Signals-222" in course_dirs
+        assert "Physics-333" in course_dirs
 
     def test_also_course_already_in_semester_scope_not_double_downloaded(self, cli_runner, tmp_path):
         """VAL-SYNC-057: --also for course already in semester scope downloads it once."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, _, download_calls = _run(
+            cli_runner, tmp_path, ["download", "--semester", "200", "--also", "Signals"],
+            [(222, "Signals", "S2"), (333, "Physics", "S2")], [SEM_II], {222: "Sem II", 333: "Sem II"},
+        )
 
-        semesters = [
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 222, "Name": "Signals", "Code": "S2"}},
-            {"OrgUnit": {"Id": 333, "Name": "Physics", "Code": "S2"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "222": {"name": "Signals", "semester": "Sem II"},
-                "333": {"name": "Physics", "semester": "Sem II"},
-            }
-        }))
-
-        download_calls = []
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            download_calls.append(cid)
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 222, "Name": "Signals", "Code": "S2"},
-                 {"OrgUnitId": 333, "Name": "Physics", "Code": "S2"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "Signals", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0
-            # Signals (222) is already in Sem II scope, --also should not download it twice
-            signals_downloads = [c for c in download_calls if c == 222]
-            assert len(signals_downloads) == 1, f"Signals should be downloaded once, got {len(signals_downloads)}"
-            # Physics (333) should be downloaded once
-            physics_downloads = [c for c in download_calls if c == 333]
-            assert len(physics_downloads) == 1
+        assert result.exit_code == 0
+        assert download_calls.count(222) == 1, download_calls
+        assert download_calls.count(333) == 1, download_calls
 
 
 # ---------------------------------------------------------------------------
@@ -713,160 +348,35 @@ class TestAlsoFlag:
 # ---------------------------------------------------------------------------
 
 class TestSyncMultiCourseScope:
-    """Test that sync command also supports multi-course scope options."""
 
     def test_sync_without_course_id_syncs_latest_semester(self, cli_runner, tmp_path):
         """Sync without COURSE_ID syncs all courses from latest semester."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["sync"], AB_COURSES, AB_SEMESTERS, AB_TRACKED,
+        )
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2024-2025"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
-        ]
-
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["sync", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            # Only Sem II (200) courses
-            assert "Course B-222" in course_dirs
-            assert "Course A-111" not in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Course B-222" in course_dirs
+        assert "Course A-111" not in course_dirs
 
     def test_sync_with_semester_filter(self, cli_runner, tmp_path):
-        """Sync --semester filters to specified semester."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-        cfg_path = tmp_path / "course-config.json"
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["sync", "--semester", "Sem I"], AB_COURSES, AB_SEMESTERS, AB_TRACKED,
+        )
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "0902_I_2024-2025"},
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "0902_II_2024-2025"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"}},
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"}},
-        ]
-
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "009_CourseA_0902_I_2024-2025"},
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "009_CourseB_0902_II_2024-2025"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["sync", "--semester", "Sem I", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert "Course A-111" in course_dirs
-            assert "Course B-222" not in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Course A-111" in course_dirs
+        assert "Course B-222" not in course_dirs
 
     def test_sync_with_also_flag(self, cli_runner, tmp_path):
-        """Sync --also adds ad-hoc courses."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, course_dirs, _ = _run(
+            cli_runner, tmp_path, ["sync", "--also", "Signals"],
+            [(111, "Course A", "S1"), (222, "Signals", "S1")], [SEM_I], {111: "Sem I", 222: "Sem I"},
+        )
 
-        semesters = [
-            {"OrgUnitId": 100, "Name": "Sem I", "Code": "S1"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Course A", "Code": "S1"}},
-            {"OrgUnit": {"Id": 222, "Name": "Signals", "Code": "S1"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "111": {"name": "Course A", "semester": "Sem I"},
-                "222": {"name": "Signals", "semester": "Sem I"},
-            }
-        }))
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Course A", "Code": "S1"},
-                 {"OrgUnitId": 222, "Name": "Signals", "Code": "S1"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            result = cli_runner.invoke(
-                cli,
-                ["sync", "--also", "Signals", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            course_dirs = {d.name for d in output_dir.iterdir()}
-            assert "Course A-111" in course_dirs
-            assert "Signals-222" in course_dirs
+        assert result.exit_code == 0, result.output
+        assert "Course A-111" in course_dirs
+        assert "Signals-222" in course_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -874,193 +384,43 @@ class TestSyncMultiCourseScope:
 # ---------------------------------------------------------------------------
 
 class TestAlsoAmbiguousMatch:
-    """Test that _resolve_also_course raises CourseNotFoundError for ambiguous matches."""
 
     def test_also_ambiguous_match_raises_error_listing_all_matches(self, cli_runner, tmp_path):
-        """BLOCKING FIX: Ambiguous --also name raises CourseNotFoundError listing both courses."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, _, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "200", "--also", "math"],
+            [(111, "Mathematics I", "M1"), (222, "Mathematics II", "M2")], [SEM_II], {222: "Sem II"},
+            toc=_no_modules,
+        )
 
-        semesters = [
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 111, "Name": "Mathematics I", "Code": "M1"}},
-            {"OrgUnit": {"Id": 222, "Name": "Mathematics II", "Code": "M2"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 111, "Name": "Mathematics I", "Code": "M1"},
-                 {"OrgUnitId": 222, "Name": "Mathematics II", "Code": "M2"},
-             ]), patch.object(
-                 LighthouseClient,
-                 "get_content_toc",
-                 return_value={"Modules": []},
-             ):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "math", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0
-            assert "Ambiguous course match" in result.output
-            assert "111" not in result.output
-            assert "222" not in result.output
-            assert "numeric OrgUnitId" in result.output
+        assert result.exit_code == 0
+        assert "Ambiguous course match" in result.output
+        assert "111" not in result.output
+        assert "222" not in result.output
+        assert "numeric OrgUnitId" in result.output
 
     def test_also_not_found_raises_error_with_remediation_hint(self, cli_runner, tmp_path):
-        """BLOCKING FIX: Invalid --also course raises CourseNotFoundError with hint."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+        result, _, _ = _run(
+            cli_runner, tmp_path, ["download", "--semester", "200", "--also", "nonexistent"],
+            [(222, "Course B", "S2")], [SEM_II], {222: "Sem II"}, toc=_no_modules,
+        )
 
-        semesters = [
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-             ]), patch.object(
-                 LighthouseClient,
-                 "get_content_toc",
-                 return_value={"Modules": []},
-             ):
-
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "nonexistent", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0
-            assert "Course not found. Run: lighthouse courses" in result.output
-            assert "nonexistent" not in result.output
-            assert "lighthouse courses" in result.output
+        assert result.exit_code == 0
+        assert "Course not found. Run: lighthouse courses" in result.output
+        assert "nonexistent" not in result.output
 
 
 class TestAlsoDuplicateDedup:
-    """Test that duplicate --also entries are deduplicated."""
 
-    def test_duplicate_also_entries_deduplicated_no_double_download(self, cli_runner, tmp_path):
-        """BLOCKING FIX: Duplicate --also entries (same course) are deduplicated before download."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
+    @pytest.mark.parametrize("selector", ["Course B", "222"], ids=["name", "numeric-id"])
+    def test_duplicate_also_entries_deduplicated_no_double_download(
+        self, cli_runner, tmp_path, selector,
+    ):
+        """Duplicate --also entries for the same course are deduplicated before download."""
+        result, _, download_calls = _run(
+            cli_runner, tmp_path,
+            ["download", "--semester", "200", "--also", selector, "--also", selector],
+            [(222, "Course B", "S2")], [SEM_II], {222: "Sem II"},
+        )
 
-        semesters = [
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        download_calls = []
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            download_calls.append(cid)
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            # Same course specified twice via --also
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "Course B", "--also", "Course B", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            # Course B should only be downloaded once, not twice
-            course_b_downloads = [c for c in download_calls if c == 222]
-            assert len(course_b_downloads) == 1, f"Course B should be downloaded once, got {len(course_b_downloads)}"
-
-    def test_also_numeric_id_same_course_twice_deduplicated(self, cli_runner, tmp_path):
-        """Duplicate --also with same numeric ID is deduplicated."""
-        output_dir = tmp_path / "downloads"
-        output_dir.mkdir()
-
-        semesters = [
-            {"OrgUnitId": 200, "Name": "Sem II", "Code": "S2"},
-        ]
-        enrollments = [
-            {"OrgUnit": {"Id": 222, "Name": "Course B", "Code": "S2"}},
-        ]
-
-        cfg_path = tmp_path / "course-config.json"
-        cfg_path.write_text(json.dumps({
-            "tracked_courses": {
-                "222": {"name": "Course B", "semester": "Sem II"},
-            }
-        }))
-
-        download_calls = []
-
-        def get_content_toc(cid):
-            return {"Modules": [{"ModuleId": 1, "Title": "Mod", "Modules": [], "Topics": [
-                {"TopicId": cid * 10, "Title": "f.pdf", "TypeIdentifier": "File",
-                 "Url": "", "LastModifiedDate": "2026-01-01T00:00:00Z"},
-            ]}]}
-
-        def download_topic_file(cid, tid):
-            download_calls.append(cid)
-            return f"content{cid}".encode(), "f.pdf"
-
-        with patch("lighthouse_cli.course_config.COURSE_CONFIG_FILE", cfg_path), \
-             patch.object(LighthouseClient, "get_semesters", return_value=semesters), \
-             patch.object(LighthouseClient, "get_course_enrollments", return_value=enrollments), \
-             patch.object(LighthouseClient, "get_courses", return_value=[
-                 {"OrgUnitId": 222, "Name": "Course B", "Code": "S2"},
-             ]), \
-             patch.object(LighthouseClient, "get_content_toc", side_effect=get_content_toc), \
-             patch.object(LighthouseClient, "download_topic_file", side_effect=download_topic_file):
-
-            # Same course by numeric ID specified twice
-            result = cli_runner.invoke(
-                cli,
-                ["download", "--semester", "200", "--also", "222", "--also", "222", "-o", str(output_dir)],
-            )
-
-            assert result.exit_code == 0, f"exit={result.exit_code} output={result.output}"
-            # Course 222 should only be downloaded once
-            course_222_downloads = [c for c in download_calls if c == 222]
-            assert len(course_222_downloads) == 1, f"Course 222 should be downloaded once, got {len(course_222_downloads)}"
+        assert result.exit_code == 0, result.output
+        assert download_calls.count(222) == 1, download_calls

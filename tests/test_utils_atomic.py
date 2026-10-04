@@ -4,27 +4,30 @@ from __future__ import annotations
 
 import os
 import threading
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+import lighthouse_cli.utils as utils_mod
 from lighthouse_cli.utils import atomic_write
 
-# ---------------------------------------------------------------------------
-# Round-trip
-# ---------------------------------------------------------------------------
 
 class TestAtomicWriteRoundTrip:
-    def test_text_round_trip(self, tmp_path: Path) -> None:
-        target = tmp_path / "data.txt"
-        atomic_write(target, "héllo world\nsecond line\n")
-        assert target.read_text(encoding="utf-8") == "héllo world\nsecond line\n"
-
-    def test_bytes_round_trip(self, tmp_path: Path) -> None:
-        target = tmp_path / "data.bin"
-        payload = bytes(range(256))
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ("héllo world\nsecond line\n", "héllo world\nsecond line\n".encode()),
+            (bytes(range(256)), bytes(range(256))),
+        ],
+        ids=["text-utf8", "bytes"],
+    )
+    def test_round_trip(self, tmp_path: Path, payload, expected) -> None:
+        target = tmp_path / "data"
         atomic_write(target, payload)
-        assert target.read_bytes() == payload
+        assert target.read_bytes() == expected
 
     def test_overwrites_existing_target(self, tmp_path: Path) -> None:
         target = tmp_path / "data.txt"
@@ -33,20 +36,13 @@ class TestAtomicWriteRoundTrip:
         assert target.read_text(encoding="utf-8") == "v2"
 
 
-# ---------------------------------------------------------------------------
-# Permissions per mode
-# ---------------------------------------------------------------------------
-
 class TestAtomicWriteModes:
-    def test_explicit_mode_applied(self, tmp_path: Path) -> None:
-        target = tmp_path / "secret.txt"
-        atomic_write(target, "x", mode=0o600)
-        assert target.stat().st_mode & 0o777 == 0o600
-
-    def test_assignments_semantics_stay_private(self, tmp_path: Path) -> None:
-        """Attachment files keep NamedTemporaryFile's 0600 on-disk result."""
-        target = tmp_path / "attachment.bin"
-        atomic_write(target, b"pdf-bytes", mode=0o600)
+    # The bytes case is the assignments path: attachment files keep
+    # NamedTemporaryFile's 0600 on-disk result.
+    @pytest.mark.parametrize("payload", ["x", b"pdf-bytes"], ids=["text", "attachment-bytes"])
+    def test_explicit_mode_applied(self, tmp_path: Path, payload) -> None:
+        target = tmp_path / "secret"
+        atomic_write(target, payload, mode=0o600)
         assert target.stat().st_mode & 0o777 == 0o600
 
     def test_default_mode_follows_umask(self, tmp_path: Path) -> None:
@@ -62,8 +58,6 @@ class TestAtomicWriteModes:
     ) -> None:
         """0600-intended files must never be briefly world-readable: the temp
         is created WITH its final mode — spy on the os.open(..., mode) call."""
-        import lighthouse_cli.utils as utils_mod
-
         observed: list[int] = []
         real_open = os.open
 
@@ -83,37 +77,18 @@ class TestAtomicWriteCollisionRetry:
     ) -> None:
         """An O_EXCL collision retries with a fresh name and never unlinks
         another writer's in-flight temp."""
-        import uuid as uuid_mod
-
-        import lighthouse_cli.utils as utils_mod
-
         colliding = tmp_path / "target.txt.stolen.tmp"
         colliding.write_bytes(b"other writer's payload")
 
-        real_uuid4 = uuid_mod.uuid4
-        counter = {"n": 0}
-
-        class FakeUUID:
-            def __init__(self, hex_value: str) -> None:
-                self.hex = hex_value
-
-        def fake_uuid4() -> FakeUUID:
-            counter["n"] += 1
-            if counter["n"] == 1:
-                return FakeUUID("stolen")
-            return real_uuid4()
-
-        monkeypatch.setattr(utils_mod.uuid, "uuid4", fake_uuid4)
+        # The first temp name collides; the retry must draw a fresh one.
+        uuids = Mock(side_effect=[SimpleNamespace(hex="stolen"), uuid.uuid4()])
+        monkeypatch.setattr(utils_mod.uuid, "uuid4", uuids)
         atomic_write(tmp_path / "target.txt", "mine", mode=0o600)
 
         # The other writer's temp is untouched; our data landed atomically.
         assert colliding.read_bytes() == b"other writer's payload"
         assert (tmp_path / "target.txt").read_text() == "mine"
 
-
-# ---------------------------------------------------------------------------
-# Failure cleanup
-# ---------------------------------------------------------------------------
 
 class TestAtomicWriteFailureCleanup:
     def test_replace_failure_leaves_target_and_no_temp(
@@ -137,10 +112,6 @@ class TestAtomicWriteFailureCleanup:
             atomic_write(target, "x")
         assert not target.exists()
 
-
-# ---------------------------------------------------------------------------
-# Concurrent writers
-# ---------------------------------------------------------------------------
 
 class TestAtomicWriteConcurrency:
     def test_concurrent_writers_never_interleave_or_leave_temps(
