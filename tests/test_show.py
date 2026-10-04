@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import ExitStack
-from threading import Lock, get_ident
+from threading import Barrier, Lock, get_ident
 from unittest.mock import Mock, patch
 
 import pytest
@@ -289,6 +289,31 @@ def test_all_course_workers_reuse_one_client_per_thread(monkeypatch, capsys) -> 
 
     assert len(clients) <= 1 + show.MAX_WORKERS
     assert len(clients) - 1 == len(thread_clients)
+
+
+def test_all_course_human_output_keeps_each_course_together(monkeypatch, capsys) -> None:
+    """Workers print at the same time; each course's lines still come out as one block."""
+    class FakeClient:
+        pass
+
+    monkeypatch.setattr(show, "LighthouseClient", FakeClient)
+    courses = [{"OrgUnitId": course_id, "Name": f"Course {course_id}"} for course_id in (1, 2)]
+    monkeypatch.setattr(show, "get_enrolled_course_catalog", lambda _client: courses)
+    both_printing = Barrier(2, timeout=5)
+
+    def single(_client, _org_id: int, _json_output: bool, title: str | None = None):
+        print(f"{title} first")
+        both_printing.wait()
+        print(f"{title} second")
+        return 0
+
+    assert show._for_course_or_all(None, single, False, "items") == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert sorted([lines[:2], lines[2:]]) == [
+        ["Course 1 first", "Course 1 second"],
+        ["Course 2 first", "Course 2 second"],
+    ]
 
 
 @pytest.mark.parametrize(

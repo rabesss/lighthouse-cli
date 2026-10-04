@@ -8,9 +8,10 @@ import re
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import suppress
+from contextlib import redirect_stdout, suppress
+from io import StringIO
 from threading import Lock, local
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 from .api import LighthouseClient, SessionExpiredError, resolve_course_id
 from .assignments import (
@@ -76,6 +77,39 @@ def _emit_all_course_limit_error(
     return 1
 
 
+class _PerThreadStdout:
+    """Stdout that keeps each worker thread's prints in that thread's buffer.
+
+    All-courses views render from worker threads.  Writing each course's
+    output whole from the main thread keeps courses from interleaving.
+    """
+
+    def __init__(self, stdout: TextIO) -> None:
+        self._stdout = stdout
+        self._buffers = local()
+
+    def __getattr__(self, name: str) -> Any:
+        # isatty, encoding and the rest answer for the real stream.
+        return getattr(self._stdout, name)
+
+    def _target(self) -> TextIO:
+        return cast(TextIO, getattr(self._buffers, "buffer", self._stdout))
+
+    def write(self, text: str) -> int:
+        return self._target().write(text)
+
+    def flush(self) -> None:
+        self._target().flush()
+
+    def captured(self, fn: Callable[..., Any], *args: Any) -> tuple[Any, str]:
+        """Run ``fn`` with this thread's prints buffered; return its result and output."""
+        self._buffers.buffer = buffer = StringIO()
+        try:
+            return fn(*args), buffer.getvalue()
+        finally:
+            del self._buffers.buffer
+
+
 def _for_course_or_all(
     course_id: str | None,
     single_fn: Callable[..., int | dict[str, Any]],
@@ -85,7 +119,8 @@ def _for_course_or_all(
     """Run single_fn for one course or all courses.
 
     In --json mode, collects all results into a single JSON array (fixes
-    concatenated-objects bug). In human mode, prints each result inline.
+    concatenated-objects bug). In human mode, prints each course's output
+    whole as it finishes.
 
     When iterating all courses, uses ThreadPoolExecutor(max_workers=5) for
     parallel API calls (~5x speedup). Each worker gets one HTTP client that is
@@ -172,14 +207,18 @@ def _for_course_or_all(
             title=_safe_course_label(course.get("Name"), org_id),
         )
 
+    output = _PerThreadStdout(sys.stdout)
     try:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(_run_course, course): course for course in courses}
+        with (
+            redirect_stdout(cast(TextIO, output)),
+            ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool,
+        ):
+            futures = {pool.submit(output.captured, _run_course, course): course for course in courses}
             for future in as_completed(futures):
                 course = futures[future]
                 course_id_value = _course_identifier(course.get("OrgUnitId"))
                 try:
-                    result = future.result()
+                    result, printed = future.result()
                 except Exception as e:
                     rc = 1
                     if json_output:
@@ -187,6 +226,7 @@ def _for_course_or_all(
                     _report_course_error(course_id_value, e)
                     continue
 
+                output.write(printed)
                 if json_output:
                     payload, failed = _normalise_json_payload(
                         result,

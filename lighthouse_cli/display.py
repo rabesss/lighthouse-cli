@@ -115,7 +115,8 @@ def _try_rich() -> tuple[Any, Any, Any] | None:
                 _RICH_CACHE = (Table, Text, Console())
             except ImportError:
                 _RICH_CACHE = None
-            _RICH_CHECKED = True
+            finally:  # a broken install fails once, then tables are plain text
+                _RICH_CHECKED = True
     return _RICH_CACHE
 
 
