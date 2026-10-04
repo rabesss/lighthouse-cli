@@ -7,6 +7,8 @@ import json
 import sys
 import types
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +27,18 @@ from lighthouse_cli.api import (
     _extract_filename,
     resolve_course_id,
 )
+
+SYNTHETIC_COOKIES = {
+    "d2lSameSiteCanaryA": "a",
+    "d2lSameSiteCanaryB": "b",
+    "d2lSecureSessionVal": "secure",
+    "d2lSessionVal": "session",
+}
+
+
+def _authenticate(client: LighthouseClient) -> None:
+    client._loaded = True
+    client._cookies = dict(SYNTHETIC_COOKIES)
 
 
 def test_legacy_state_creating_get_is_not_retried_or_refreshed() -> None:
@@ -77,12 +91,17 @@ class FakeSession:
         return next(self.responses)
 
 
-def _client_with_session(responses: list[FakeResponse]) -> tuple[LighthouseClient, FakeSession]:
+def _client_with_session(
+    responses: list[FakeResponse],
+    authenticated: bool = False,
+) -> tuple[LighthouseClient, FakeSession]:
     client = LighthouseClient()
     # Transport tests start after CSRF bootstrap, tested separately.
     client._csrf_token = "synthetic-csrf"
     session = FakeSession(responses)
     client._session = session
+    if authenticated:
+        _authenticate(client)
     return client, session
 
 
@@ -97,10 +116,16 @@ class StreamingResponse(FakeResponse):
         self.iterated = True
         return iter(self.chunks)
 
-def test_get_raw_streams_and_rejects_actual_bytes_above_limit() -> None:
-    response = StreamingResponse([b"abcd", b"efgh"])
+
+def _raw_client(response: FakeResponse | None = None) -> LighthouseClient:
     client = LighthouseClient()
     client.get = MagicMock(return_value=response)
+    return client
+
+
+def test_get_raw_streams_and_rejects_actual_bytes_above_limit() -> None:
+    response = StreamingResponse([b"abcd", b"efgh"])
+    client = _raw_client(response)
 
     with pytest.raises(NetworkError, match="configured size limit"):
         client.get_raw("/file", max_bytes=7)
@@ -114,8 +139,7 @@ def test_get_raw_rejects_oversized_content_length_before_reading() -> None:
         [b"must not be read"],
         headers={"Content-Length": "9"},
     )
-    client = LighthouseClient()
-    client.get = MagicMock(return_value=response)
+    client = _raw_client(response)
 
     with pytest.raises(NetworkError, match="configured size limit"):
         client.get_raw("/file", max_bytes=8)
@@ -126,8 +150,7 @@ def test_get_raw_rejects_oversized_content_length_before_reading() -> None:
 
 def test_get_raw_returns_bounded_streamed_content() -> None:
     response = StreamingResponse([b"ab", b"", b"cd"])
-    client = LighthouseClient()
-    client.get = MagicMock(return_value=response)
+    client = _raw_client(response)
 
     content, headers = client.get_raw("/file", max_bytes=4)
 
@@ -141,8 +164,7 @@ def test_get_raw_rejects_invalid_environment_limits(
     monkeypatch: pytest.MonkeyPatch,
     raw: str,
 ) -> None:
-    client = LighthouseClient()
-    client.get = MagicMock()
+    client = _raw_client()
     monkeypatch.setenv("LIGHTHOUSE_MAX_DOWNLOAD_BYTES", raw)
 
     with pytest.raises(NetworkError, match="size limit is invalid"):
@@ -194,22 +216,20 @@ def test_skip_raise_preserves_non_login_redirect_for_submission_handler() -> Non
     response = FakeResponse(302, headers={"Location": "/d2l/other"})
     client, _session = _client_with_session([response])
 
-    assert client._do_request(
-        "POST",
-        "https://example.test",
-        True,
-        30,
-    ) is response
+    assert client._do_request("POST", "https://example.test", True, 30) is response
     assert response.closed is False
 
 
-def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
+def _paged_client(*pages: object) -> LighthouseClient:
     client = LighthouseClient()
-    client.get_json = MagicMock(
-        side_effect=[
-            {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
-            {"Items": [{"id": 2}], "Next": None},
-        ]
+    client.get_json = MagicMock(side_effect=list(pages))
+    return client
+
+
+def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
+    client = _paged_client(
+        {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
+        {"Items": [{"id": 2}], "Next": None},
     )
 
     assert client.get_enrollments() == [{"id": 1}, {"id": 2}]
@@ -219,34 +239,58 @@ def test_get_enrollments_reuses_paginated_items_endpoint() -> None:
     ]
 
 
-def test_paginated_query_only_next_uses_current_resource_path() -> None:
-    client = LighthouseClient()
-    first_page = f"{BASE_URL}/d2l/api/lp/1.47/enrollments/myenrollments/?page=1"
-    second_page = f"{BASE_URL}/d2l/api/lp/1.47/enrollments/myenrollments/?page=2"
-    client.get_json = MagicMock(
-        side_effect=[
-            {"Items": [{"id": 1}], "Next": "?page=2"},
-            {"Items": [{"id": 2}], "Next": None},
-        ]
-    )
+ENROLLMENTS_PAGE = f"{BASE_URL}/d2l/api/lp/1.47/enrollments/myenrollments/"
 
-    assert client._paginate_list(first_page, "Items") == [
-        {"id": 1},
-        {"id": 2},
-    ]
-    assert client.get_json.call_args_list == [
-        ((first_page,),),
-        ((second_page,),),
-    ]
+
+@pytest.mark.parametrize(
+    ("first_url", "next_link", "second_page", "second_url"),
+    [
+        pytest.param(
+            f"{ENROLLMENTS_PAGE}?page=1",
+            "?page=2",
+            {"Items": [{"id": 2}], "Next": None},
+            f"{ENROLLMENTS_PAGE}?page=2",
+            id="query-only-next-uses-current-resource-path",
+        ),
+        pytest.param(
+            "/enrollments",
+            f"{BASE_URL}/d2l/api/lp/1.47/enrollments?page=2",
+            {"Items": [{"id": 2}], "Next": None},
+            f"{BASE_URL}/d2l/api/lp/1.47/enrollments?page=2",
+            id="https-same-origin",
+        ),
+        pytest.param(
+            "/enrollments",
+            "enrollments?page=2",
+            {"Items": [{"id": 2}], "Next": None},
+            "enrollments?page=2",
+            id="bare-relative-scoped-beneath-api-root",
+        ),
+        pytest.param(
+            "/enrollments",
+            "/enrollments?page=2",
+            [{"id": 2}],
+            "/enrollments?page=2",
+            id="plain-list-tail-keeps-prior-wrapped-items",
+        ),
+    ],
+)
+def test_paginated_next_follows_trusted_links(
+    first_url: str,
+    next_link: str,
+    second_page: object,
+    second_url: str,
+) -> None:
+    client = _paged_client({"Items": [{"id": 1}], "Next": next_link}, second_page)
+
+    assert client._paginate_list(first_url, "Items") == [{"id": 1}, {"id": 2}]
+    assert client.get_json.call_args_list == [((first_url,),), ((second_url,),)]
 
 
 def test_paginated_next_cycle_raises_clean_network_error() -> None:
-    client = LighthouseClient()
-    client.get_json = MagicMock(
-        side_effect=[
-            {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
-            {"Items": [{"id": 2}], "Next": "/enrollments?page=2"},
-        ]
+    client = _paged_client(
+        {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
+        {"Items": [{"id": 2}], "Next": "/enrollments?page=2"},
     )
 
     with pytest.raises(NetworkError, match="Pagination cycle"):
@@ -256,11 +300,8 @@ def test_paginated_next_cycle_raises_clean_network_error() -> None:
 
 
 def test_paginated_request_failures_are_url_free() -> None:
-    client = LighthouseClient()
     url = "https://example.test/page?token=PAGINATION_URL_SENTINEL"
-    client.get_json = MagicMock(
-        side_effect=requests.ConnectionError(f"request failed for {url}")
-    )
+    client = _paged_client(requests.ConnectionError(f"request failed for {url}"))
 
     with pytest.raises(NetworkError) as exc_info:
         client._paginate_list("/enrollments", "Items")
@@ -271,45 +312,42 @@ def test_paginated_request_failures_are_url_free() -> None:
 
 def test_get_enrolled_courses_joins_paginated_course_offerings() -> None:
     """The normalized catalog spans pages and excludes non-course enrollments."""
-    client = LighthouseClient()
-    client.get_json = MagicMock(
-        side_effect=[
-            {
-                "Items": [
-                    {
-                        "OrgUnit": {
-                            "Id": 22,
-                            "Name": "Course B",
-                            "Code": "B",
-                            "Type": {"Code": "Course Offering"},
-                        },
-                        "Access": {"IsActive": False},
+    client = _paged_client(
+        {
+            "Items": [
+                {
+                    "OrgUnit": {
+                        "Id": 22,
+                        "Name": "Course B",
+                        "Code": "B",
+                        "Type": {"Code": "Course Offering"},
                     },
-                    {
-                        "OrgUnit": {
-                            "Id": 77,
-                            "Name": "Aggregate roster",
-                            "Type": {"Code": "Section"},
-                        }
-                    },
-                ],
-                "Next": "/enrollments?page=2",
-            },
-            {
-                "Items": [
-                    {
-                        "OrgUnit": {
-                            "Id": "11",
-                            "Name": "Course A",
-                            "Code": "A",
-                            "Type": {"Code": "Course Offering"},
-                        },
-                        "Access": {"IsActive": True},
+                    "Access": {"IsActive": False},
+                },
+                {
+                    "OrgUnit": {
+                        "Id": 77,
+                        "Name": "Aggregate roster",
+                        "Type": {"Code": "Section"},
                     }
-                ],
-                "Next": None,
-            },
-        ]
+                },
+            ],
+            "Next": "/enrollments?page=2",
+        },
+        {
+            "Items": [
+                {
+                    "OrgUnit": {
+                        "Id": "11",
+                        "Name": "Course A",
+                        "Code": "A",
+                        "Type": {"Code": "Course Offering"},
+                    },
+                    "Access": {"IsActive": True},
+                }
+            ],
+            "Next": None,
+        },
     )
 
     assert client.get_enrolled_courses() == [
@@ -340,49 +378,29 @@ def test_get_enrolled_courses_deduplicates_and_skips_invalid_ids() -> None:
     assert enrollments[3]["OrgUnit"]["Name"] == "First"
 
 
-@pytest.mark.parametrize("retry_after", ["not-a-number", "nan", "inf", "-1"])
-def test_invalid_retry_after_uses_exponential_fallback(retry_after: str) -> None:
-    client, session = _client_with_session(
-        [
-            FakeResponse(429, headers={"Retry-After": retry_after}),
-            FakeResponse(200),
-        ]
-    )
+@pytest.mark.parametrize(
+    ("retry_after", "expected_sleeps"),
+    [
+        pytest.param(["not-a-number"], [2], id="invalid-uses-exponential-fallback-not-a-number"),
+        pytest.param(["nan"], [2], id="invalid-uses-exponential-fallback-nan"),
+        pytest.param(["inf"], [2], id="invalid-uses-exponential-fallback-inf"),
+        pytest.param(["-1"], [2], id="invalid-uses-exponential-fallback-negative"),
+        pytest.param(["4", "4"], [4.0, 4.0], id="valid-not-multiplied-by-attempt-exponent"),
+        pytest.param(
+            ["999999"], [LighthouseClient._MAX_RETRY_AFTER], id="server-delay-is-capped",
+        ),
+    ],
+)
+def test_retry_after_delays(retry_after: list[str], expected_sleeps: list[float]) -> None:
+    limited = [FakeResponse(429, headers={"Retry-After": value}) for value in retry_after]
+    client, session = _client_with_session([*limited, FakeResponse(200)])
 
     with patch.object(api.time, "sleep") as sleep:
         client._do_request("GET", "https://example.test/resource", False, 30)
 
-    sleep.assert_called_once_with(2)
-    assert len(session.calls) == 2
-
-
-def test_valid_retry_after_is_not_multiplied_by_attempt_exponent() -> None:
-    client, _session = _client_with_session(
-        [
-            FakeResponse(429, headers={"Retry-After": "4"}),
-            FakeResponse(429, headers={"Retry-After": "4"}),
-            FakeResponse(200),
-        ]
-    )
-
-    with patch.object(api.time, "sleep") as sleep:
-        client._do_request("GET", "https://example.test/resource", False, 30)
-
-    assert [call.args[0] for call in sleep.call_args_list] == [4.0, 4.0]
-
-
-def test_retry_after_server_delay_is_capped() -> None:
-    client, _session = _client_with_session(
-        [
-            FakeResponse(429, headers={"Retry-After": "999999"}),
-            FakeResponse(200),
-        ]
-    )
-
-    with patch.object(api.time, "sleep") as sleep:
-        client._do_request("GET", "https://example.test/resource", False, 30)
-
-    sleep.assert_called_once_with(client._MAX_RETRY_AFTER)
+    assert [call.args for call in sleep.call_args_list] == [(delay,) for delay in expected_sleeps]
+    assert all(call.kwargs == {} for call in sleep.call_args_list)
+    assert len(session.calls) == len(retry_after) + 1
 
 
 def test_post_rate_limit_is_not_retried() -> None:
@@ -405,14 +423,7 @@ def test_post_rate_limit_is_not_retried() -> None:
 
 
 def test_post_unauthorized_is_not_auto_refreshed_or_replayed() -> None:
-    client, session = _client_with_session([FakeResponse(401)])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    client, session = _client_with_session([FakeResponse(401)], authenticated=True)
 
     with patch.object(api, "refresh_auth_from_browser") as refresh, \
             patch.object(api, "save_cookies") as save:
@@ -425,14 +436,7 @@ def test_post_unauthorized_is_not_auto_refreshed_or_replayed() -> None:
 
 
 def test_post_rate_limit_is_not_auto_refreshed_or_replayed() -> None:
-    client, session = _client_with_session([FakeResponse(429)])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    client, session = _client_with_session([FakeResponse(429)], authenticated=True)
 
     with patch.object(api, "refresh_auth_from_browser") as refresh, \
             patch.object(api, "save_cookies") as save, \
@@ -451,112 +455,56 @@ def test_post_rate_limit_is_not_auto_refreshed_or_replayed() -> None:
 def _authenticated_client_with_session() -> tuple[LighthouseClient, MagicMock]:
     """Return an authenticated client whose session records unexpected calls."""
     client = LighthouseClient()
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    _authenticate(client)
     session = MagicMock()
     client._session = session
     return client, session
 
 
-@pytest.mark.parametrize("invalid_id", ["../../evil", True, 1.5, 0, -1])
-def test_dropbox_folder_detail_rejects_invalid_course_ids_before_request(
+# Stands in for the invalid ID in each argument tuple below.
+INVALID = object()
+
+ID_VALIDATED_CALLS = [
+    pytest.param("get_dropbox_folder_detail", (INVALID, 1), "org_unit_id", id="dropbox-detail-org"),
+    pytest.param("get_dropbox_folder_detail", (1, INVALID), "folder_id", id="dropbox-detail-folder"),
+    pytest.param("download_attachment", (INVALID, 1, 1), "org_unit_id", id="attachment-org"),
+    pytest.param("download_attachment", (1, INVALID, 1), "folder_id", id="attachment-folder"),
+    pytest.param("download_attachment", (1, 1, INVALID), "file_id", id="attachment-file"),
+    pytest.param(
+        "submit_file", (INVALID, 1, b"payload", "test.pdf"), "org_unit_id", id="submit-org",
+    ),
+    pytest.param(
+        "submit_file", (1, INVALID, b"payload", "test.pdf"), "folder_id", id="submit-folder",
+    ),
+    pytest.param("get_content_toc", (INVALID,), "org_unit_id", id="toc-org"),
+    pytest.param("get_announcements", (INVALID,), "org_unit_id", id="announcements-org"),
+    pytest.param("get_grade_schema", (INVALID,), "org_unit_id", id="grade-schema-org"),
+    pytest.param("get_my_grades", (INVALID,), "org_unit_id", id="my-grades-org"),
+    pytest.param("get_quizzes", (INVALID,), "org_unit_id", id="quizzes-org"),
+    pytest.param("get_calendar", (INVALID,), "org_unit_id", id="calendar-org"),
+    pytest.param("get_dropbox_folders", (INVALID,), "org_unit_id", id="dropbox-folders-org"),
+    pytest.param("get_quiz_detail", (INVALID, 1), "org_unit_id", id="quiz-detail-org"),
+    pytest.param("get_quiz_detail", (1, INVALID), "quiz_id", id="quiz-detail-quiz"),
+    pytest.param("download_topic_file", (INVALID, 1), "org_unit_id", id="topic-file-org"),
+    pytest.param("download_topic_file", (1, INVALID), "topic_id", id="topic-file-topic"),
+    pytest.param("get_topic_html", (INVALID, 1), "org_unit_id", id="topic-html-org"),
+    pytest.param("get_topic_html", (1, INVALID), "topic_id", id="topic-html-topic"),
+]
+
+
+@pytest.mark.parametrize("invalid_id", ["../../evil", "../evil", True, 1.5, 0, -1])
+@pytest.mark.parametrize(("method", "args", "field_name"), ID_VALIDATED_CALLS)
+def test_endpoints_reject_invalid_ids_before_request(
+    method: str,
+    args: tuple[object, ...],
+    field_name: str,
     invalid_id: object,
 ) -> None:
     client, session = _authenticated_client_with_session()
+    call_args = [invalid_id if arg is INVALID else arg for arg in args]
 
-    with pytest.raises(ValueError, match="org_unit_id must be a positive integer"):
-        client.get_dropbox_folder_detail(invalid_id, 1)
-
-    session.request.assert_not_called()
-
-
-@pytest.mark.parametrize("invalid_id", ["../../evil", True, 1.5, 0, -1])
-def test_dropbox_folder_detail_rejects_invalid_folder_ids_before_request(
-    invalid_id: object,
-) -> None:
-    client, session = _authenticated_client_with_session()
-
-    with pytest.raises(ValueError, match="folder_id must be a positive integer"):
-        client.get_dropbox_folder_detail(1, invalid_id)
-
-    session.request.assert_not_called()
-
-
-@pytest.mark.parametrize("invalid_id", ["../../evil", True, 1.5, 0, -1])
-def test_download_attachment_rejects_invalid_ids_before_request(
-    invalid_id: object,
-) -> None:
-    client, session = _authenticated_client_with_session()
-
-    for args, field_name in (
-        ((invalid_id, 1, 1), "org_unit_id"),
-        ((1, invalid_id, 1), "folder_id"),
-        ((1, 1, invalid_id), "file_id"),
-    ):
-        with pytest.raises(ValueError, match=f"{field_name} must be a positive integer"):
-            client.download_attachment(*args)
-
-    session.request.assert_not_called()
-
-
-@pytest.mark.parametrize("invalid_id", ["../../evil", True, 1.5, 0, -1])
-def test_submit_file_rejects_invalid_ids_before_request(invalid_id: object) -> None:
-    client, session = _authenticated_client_with_session()
-
-    for args, field_name in (
-        ((invalid_id, 1), "org_unit_id"),
-        ((1, invalid_id), "folder_id"),
-    ):
-        with pytest.raises(ValueError, match=f"{field_name} must be a positive integer"):
-            client.submit_file(*args, file_bytes=b"payload", filename="test.pdf")
-
-    session.request.assert_not_called()
-
-
-@pytest.mark.parametrize("invalid_id", ["../../evil", True, 1.5, 0, -1])
-def test_read_endpoints_reject_invalid_org_ids_before_request(
-    invalid_id: object,
-) -> None:
-    client, session = _authenticated_client_with_session()
-    calls = (
-        (client.get_content_toc, (invalid_id,)),
-        (client.get_announcements, (invalid_id,)),
-        (client.get_grade_schema, (invalid_id,)),
-        (client.get_my_grades, (invalid_id,)),
-        (client.get_quizzes, (invalid_id,)),
-        (client.get_calendar, (invalid_id,)),
-        (client.get_dropbox_folders, (invalid_id,)),
-        (client.get_quiz_detail, (invalid_id, 1)),
-        (client.download_topic_file, (invalid_id, 1)),
-        (client.get_topic_html, (invalid_id, 1)),
-    )
-
-    for call, args in calls:
-        with pytest.raises(ValueError, match="org_unit_id must be a positive integer"):
-            call(*args)
-
-    session.request.assert_not_called()
-
-
-@pytest.mark.parametrize("invalid_id", ["../../evil", True, 1.5, 0, -1])
-def test_quiz_and_topic_endpoints_reject_invalid_resource_ids_before_request(
-    invalid_id: object,
-) -> None:
-    client, session = _authenticated_client_with_session()
-    calls = (
-        (client.get_quiz_detail, (1, invalid_id), "quiz_id"),
-        (client.download_topic_file, (1, invalid_id), "topic_id"),
-        (client.get_topic_html, (1, invalid_id), "topic_id"),
-    )
-
-    for call, args, field_name in calls:
-        with pytest.raises(ValueError, match=f"{field_name} must be a positive integer"):
-            call(*args)
+    with pytest.raises(ValueError, match=f"{field_name} must be a positive integer"):
+        getattr(client, method)(*call_args)
 
     session.request.assert_not_called()
 
@@ -569,6 +517,14 @@ def test_blank_course_selector_never_matches_every_enrollment() -> None:
 
     with pytest.raises(CourseNotFoundError, match="cannot be empty"):
         resolve_course_id(client, "   ")
+
+
+def _topic_client(payload: object) -> LighthouseClient:
+    client = LighthouseClient()
+    client.get_raw = MagicMock(
+        return_value=(json.dumps(payload).encode("utf-8"), {})
+    )
+    return client
 
 
 @pytest.mark.parametrize(
@@ -598,10 +554,7 @@ def test_blank_course_selector_never_matches_every_enrollment() -> None:
 def test_get_topic_html_extracts_bounded_rich_text_as_bytes(
     payload: dict[str, object], expected: bytes
 ) -> None:
-    client = LighthouseClient()
-    client.get_raw = MagicMock(
-        return_value=(json.dumps(payload).encode("utf-8"), {})
-    )
+    client = _topic_client(payload)
 
     content, filename = client.get_topic_html(1, 1)
 
@@ -614,6 +567,13 @@ def test_get_topic_html_extracts_bounded_rich_text_as_bytes(
     )
 
 
+def _deep_rich_text() -> dict[str, object]:
+    value: object = "<p>deep</p>"
+    for _ in range(api._MAX_RICH_TEXT_DEPTH + 1):
+        value = {"Text": value}
+    return {"Body": value}
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -623,30 +583,13 @@ def test_get_topic_html_extracts_bounded_rich_text_as_bytes(
         {"Body": {"Text": ["<p>bad</p>"]}},
         {"Body": {}, "Html": {"unexpected": "object"}},
         {"Body": {"foo": "bad"}, "Html": {"unexpected": "object"}},
+        pytest.param(_deep_rich_text(), id="deep-rich-text-without-recursion"),
     ],
 )
 def test_get_topic_html_rejects_malformed_shapes_with_fixed_error(
     payload: object,
 ) -> None:
-    client = LighthouseClient()
-    client.get_raw = MagicMock(
-        return_value=(json.dumps(payload).encode("utf-8"), {})
-    )
-
-    with pytest.raises(ContentResponseShapeError) as exc_info:
-        client.get_topic_html(1, 1)
-
-    assert str(exc_info.value) == ContentResponseShapeError._MESSAGE
-
-
-def test_get_topic_html_rejects_deep_rich_text_without_recursion() -> None:
-    value: object = "<p>deep</p>"
-    for _ in range(api._MAX_RICH_TEXT_DEPTH + 1):
-        value = {"Text": value}
-    client = LighthouseClient()
-    client.get_raw = MagicMock(
-        return_value=(json.dumps({"Body": value}).encode("utf-8"), {})
-    )
+    client = _topic_client(payload)
 
     with pytest.raises(ContentResponseShapeError) as exc_info:
         client.get_topic_html(1, 1)
@@ -690,12 +633,7 @@ def test_submit_file_rejects_unsafe_filename_before_request(
     client, session = _authenticated_client_with_session()
 
     with pytest.raises(ValueError):
-        client.submit_file(
-            1,
-            1,
-            b"payload",
-            invalid_filename,
-        )
+        client.submit_file(1, 1, b"payload", invalid_filename)
 
     session.request.assert_not_called()
 
@@ -725,34 +663,15 @@ def test_submit_file_rejects_invalid_content_type_before_request(
     client, session = _authenticated_client_with_session()
 
     with pytest.raises(ValueError, match="valid ASCII MIME type"):
-        client.submit_file(
-            1,
-            1,
-            b"payload",
-            "test.pdf",
-            content_type=invalid_content_type,
-        )
+        client.submit_file(1, 1, b"payload", "test.pdf", content_type=invalid_content_type)
 
     session.request.assert_not_called()
 
 
 def test_submit_file_preserves_valid_explicit_content_type() -> None:
-    client, session = _client_with_session([FakeResponse(200, {})])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    client, session = _client_with_session([FakeResponse(200, {})], authenticated=True)
 
-    client.submit_file(
-        1,
-        1,
-        b"payload",
-        "test.pdf",
-        content_type="application/pdf",
-    )
+    client.submit_file(1, 1, b"payload", "test.pdf", content_type="application/pdf")
 
     assert len(session.calls) == 1
     assert b"Content-Type: application/pdf\r\n" in session.calls[0][2]["data"]
@@ -762,14 +681,7 @@ def test_submit_file_preserves_valid_explicit_content_type() -> None:
 def test_submit_file_rejects_non_object_success_response_without_retry(
     response_body: object,
 ) -> None:
-    client, session = _client_with_session([FakeResponse(200, response_body)])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    client, session = _client_with_session([FakeResponse(200, response_body)], authenticated=True)
 
     with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
         client.submit_file(1, 1, b"payload", "result.pdf")
@@ -783,14 +695,7 @@ def test_submit_file_rejects_invalid_json_success_response_without_echoing_body(
         def json(self) -> object:
             raise ValueError("response body contains BODY_SENTINEL")
 
-    client, session = _client_with_session([InvalidJsonResponse(200)])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    client, session = _client_with_session([InvalidJsonResponse(200)], authenticated=True)
 
     with pytest.raises(SubmissionOutcomeUnknownError) as exc_info:
         client.submit_file(1, 1, b"payload", "result.pdf")
@@ -800,18 +705,9 @@ def test_submit_file_rejects_invalid_json_success_response_without_echoing_body(
 
 
 def test_exhausted_get_network_errors_are_url_free_and_bounded() -> None:
-    client = LighthouseClient()
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
-    session = MagicMock()
+    client, session = _authenticated_client_with_session()
     url = "https://example.test/resource?session=NETWORK_URL_SENTINEL"
     session.request.side_effect = requests.ConnectionError(f"failed for {url}")
-    client._session = session
 
     with patch.object(api.time, "sleep") as sleep:
         with pytest.raises(NetworkError) as exc_info:
@@ -824,18 +720,9 @@ def test_exhausted_get_network_errors_are_url_free_and_bounded() -> None:
 
 
 def test_exhausted_post_network_error_is_url_free_and_not_replayed() -> None:
-    client = LighthouseClient()
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
-    session = MagicMock()
+    client, session = _authenticated_client_with_session()
     url = "https://example.test/resource?session=POST_URL_SENTINEL"
     session.request.side_effect = requests.ConnectionError(f"failed for {url}")
-    client._session = session
 
     with pytest.raises(NetworkError) as exc_info:
         client._request("POST", url, data=b"payload")
@@ -864,16 +751,7 @@ def test_exhausted_post_network_error_is_url_free_and_not_replayed() -> None:
     ],
 )
 def test_get_rejects_absolute_urls_outside_lighthouse_origin(path: str) -> None:
-    client = LighthouseClient()
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
-    session = MagicMock()
-    client._session = session
+    client, session = _authenticated_client_with_session()
 
     with pytest.raises(NetworkError, match="Invalid API URL"):
         client.get(path)
@@ -881,24 +759,9 @@ def test_get_rejects_absolute_urls_outside_lighthouse_origin(path: str) -> None:
     session.request.assert_not_called()
 
 
-def test_get_content_toc_rejects_traversal_org_unit_before_request() -> None:
-    client, session = _authenticated_client_with_session()
-
-    with pytest.raises(ValueError, match="org_unit_id must be a positive integer"):
-        client.get_content_toc("../evil")
-
-    session.request.assert_not_called()
-
-
 def test_get_normalizes_same_origin_absolute_https_url() -> None:
     client = LighthouseClient()
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+    _authenticate(client)
     session = FakeSession([FakeResponse(200)])
     client._session = session
 
@@ -925,41 +788,22 @@ def test_final_rate_limit_response_raises_url_free_http_error() -> None:
     assert len(session.calls) == 4
 
 
-def test_submit_file_rate_limit_sends_body_once_and_raises_safe_error() -> None:
-    client, session = _client_with_session([FakeResponse(429)])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
-
-    with pytest.raises(NetworkError, match="no retry"):
-        client.submit_file(
-            org_unit_id=44347,
-            folder_id=789,
-            file_bytes=b"payload",
-            filename="test.pdf",
-        )
-
-    assert len(session.calls) == 1
-    assert session.calls[0][0] == "POST"
-    assert session.calls[0][2]["data"]
-
-
-def test_submit_file_unauthorized_sends_body_once_without_refresh() -> None:
-    client, session = _client_with_session([FakeResponse(401)])
-    client._loaded = True
-    client._cookies = {
-        "d2lSameSiteCanaryA": "a",
-        "d2lSameSiteCanaryB": "b",
-        "d2lSecureSessionVal": "secure",
-        "d2lSessionVal": "session",
-    }
+@pytest.mark.parametrize(
+    ("status_code", "error", "match"),
+    [
+        pytest.param(429, NetworkError, "no retry", id="rate-limit-raises-safe-error"),
+        pytest.param(401, api.SessionExpiredError, None, id="unauthorized-without-refresh"),
+    ],
+)
+def test_submit_file_failure_sends_body_once_without_refresh(
+    status_code: int,
+    error: type[Exception],
+    match: str | None,
+) -> None:
+    client, session = _client_with_session([FakeResponse(status_code)], authenticated=True)
 
     with patch.object(api, "refresh_auth_from_browser") as refresh:
-        with pytest.raises(api.SessionExpiredError):
+        with pytest.raises(error, match=match):
             client.submit_file(
                 org_unit_id=44347,
                 folder_id=789,
@@ -988,10 +832,7 @@ def test_submit_file_unauthorized_sends_body_once_without_refresh() -> None:
 def test_paginated_next_rejects_untrusted_targets_without_echoing_url(
     next_url: str,
 ) -> None:
-    client = LighthouseClient()
-    client.get_json = MagicMock(
-        return_value={"Items": [{"id": 1}], "Next": next_url}
-    )
+    client = _paged_client({"Items": [{"id": 1}], "Next": next_url})
 
     with pytest.raises(NetworkError, match="Invalid pagination link") as exc_info:
         client._paginate_list("/enrollments", "Items")
@@ -1000,65 +841,12 @@ def test_paginated_next_rejects_untrusted_targets_without_echoing_url(
     assert client.get_json.call_count == 1
 
 
-def test_paginated_next_accepts_https_same_origin_and_relative_d2l_paths() -> None:
-    client = LighthouseClient()
-    client.get_json = MagicMock(
-        side_effect=[
-            {
-                "Items": [{"id": 1}],
-                "Next": f"{BASE_URL}/d2l/api/lp/1.47/enrollments?page=2",
-            },
-            {"Items": [{"id": 2}], "Next": None},
-        ]
-    )
-
-    assert client._paginate_list("/enrollments", "Items") == [
-        {"id": 1},
-        {"id": 2},
-    ]
-    assert client.get_json.call_count == 2
-
-
-def test_paginated_plain_list_tail_keeps_items_from_prior_wrapped_page() -> None:
-    client = LighthouseClient()
-    client.get_json = MagicMock(
-        side_effect=[
-            {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
-            [{"id": 2}],
-        ]
-    )
-
-    assert client._paginate_list("/enrollments", "Items") == [
-        {"id": 1},
-        {"id": 2},
-    ]
-
-
-def test_paginated_bare_relative_next_is_scoped_beneath_api_root() -> None:
-    client = LighthouseClient()
-    client.get_json = MagicMock(
-        side_effect=[
-            {"Items": [{"id": 1}], "Next": "enrollments?page=2"},
-            {"Items": [{"id": 2}], "Next": None},
-        ]
-    )
-
-    assert client._paginate_list("/enrollments", "Items") == [
-        {"id": 1},
-        {"id": 2},
-    ]
-    assert client.get_json.call_args_list[1].args == ("enrollments?page=2",)
-
-
 def test_paginated_next_enforces_maximum_page_count() -> None:
-    client = LighthouseClient()
-    client._MAX_PAGINATION_PAGES = 2
-    client.get_json = MagicMock(
-        side_effect=[
-            {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
-            {"Items": [{"id": 2}], "Next": "/enrollments?page=3"},
-        ]
+    client = _paged_client(
+        {"Items": [{"id": 1}], "Next": "/enrollments?page=2"},
+        {"Items": [{"id": 2}], "Next": "/enrollments?page=3"},
     )
+    client._MAX_PAGINATION_PAGES = 2
 
     with pytest.raises(NetworkError, match="maximum page count"):
         client._paginate_list("/enrollments", "Items")
@@ -1110,59 +898,87 @@ class FakeUrlopenResponse:
         return self.final_url
 
 
-def _fake_cdp_opener(response: FakeUrlopenResponse) -> MagicMock:
+def _cdp_version(websocket_url: str, **kwargs: object) -> FakeUrlopenResponse:
+    payload = json.dumps({"webSocketDebuggerUrl": websocket_url}).encode()
+    return FakeUrlopenResponse(payload, **kwargs)
+
+
+@contextmanager
+def _patched_cdp(response: FakeUrlopenResponse, websocket_call: AsyncMock) -> Iterator[MagicMock]:
     opener = MagicMock()
     opener.open.return_value = response
-    return opener
-
-
-def test_cdp_rejects_non_loopback_websocket_before_connecting() -> None:
-    response = FakeUrlopenResponse(
-        json.dumps({"webSocketDebuggerUrl": "ws://attacker.example/devtools/browser/1"}).encode()
-    )
-    websocket_call = AsyncMock()
-    opener = _fake_cdp_opener(response)
-
     with patch.object(urllib.request, "build_opener", return_value=opener), \
             patch.object(api, "_cdp_get_cookies_ws", websocket_call):
-        with pytest.raises(NetworkError, match="non-loopback"):
-            api._refresh_via_cdp_websocket(9222)
-
-    websocket_call.assert_not_awaited()
+        yield opener
 
 
-def test_cdp_rejects_loopback_websocket_on_unexpected_port() -> None:
-    response = FakeUrlopenResponse(
-        json.dumps(
-            {"webSocketDebuggerUrl": "wss://127.0.0.1:9223/devtools/browser/1"}
-        ).encode()
-    )
+@pytest.mark.parametrize(
+    ("response", "match", "leaked"),
+    [
+        pytest.param(
+            _cdp_version("ws://attacker.example/devtools/browser/1"),
+            "non-loopback",
+            [],
+            id="non-loopback-websocket",
+        ),
+        pytest.param(
+            _cdp_version("wss://127.0.0.1:9223/devtools/browser/1"),
+            "unexpected port",
+            [],
+            id="loopback-websocket-on-unexpected-port",
+        ),
+        pytest.param(
+            FakeUrlopenResponse(
+                b"",
+                status=302,
+                final_url="https://attacker.example/cdp?token=REDIRECT_TOKEN_SENTINEL",
+            ),
+            "redirect",
+            ["REDIRECT_TOKEN_SENTINEL", "attacker.example"],
+            id="discovery-redirect-not-followed",
+        ),
+        pytest.param(
+            FakeUrlopenResponse(
+                b"{}",
+                status=200,
+                final_url="http://attacker.example/json/version?token=FINAL_TOKEN_SENTINEL",
+            ),
+            "invalid response",
+            ["FINAL_TOKEN_SENTINEL", "attacker.example"],
+            id="discovery-external-final-url",
+        ),
+    ],
+)
+def test_cdp_rejects_unsafe_discovery_before_websocket_connect(
+    response: FakeUrlopenResponse,
+    match: str,
+    leaked: list[str],
+) -> None:
     websocket_call = AsyncMock()
-    opener = _fake_cdp_opener(response)
 
-    with patch.object(urllib.request, "build_opener", return_value=opener), \
-            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
-        with pytest.raises(NetworkError, match="unexpected port"):
+    with _patched_cdp(response, websocket_call) as opener:
+        with pytest.raises(NetworkError, match=match) as exc_info:
             api._refresh_via_cdp_websocket(9222)
 
+    opener.open.assert_called_once_with(
+        "http://127.0.0.1:9222/json/version", timeout=10
+    )
     websocket_call.assert_not_awaited()
+    for value in leaked:
+        assert value not in str(exc_info.value)
 
 
 def test_cdp_accepts_loopback_wss_on_configured_port() -> None:
-    response = FakeUrlopenResponse(
-        json.dumps(
-            {"webSocketDebuggerUrl": "wss://localhost:9222/devtools/browser/1"}
-        ).encode(),
+    response = _cdp_version(
+        "wss://localhost:9222/devtools/browser/1",
         status=200,
         final_url="http://127.0.0.1:9222/json/version",
     )
     websocket_call = AsyncMock(
         return_value={"d2lSessionVal": "session", "d2lSecureSessionVal": "secure"}
     )
-    opener = _fake_cdp_opener(response)
 
-    with patch.object(urllib.request, "build_opener", return_value=opener), \
-            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
+    with _patched_cdp(response, websocket_call):
         assert api._refresh_via_cdp_websocket(9222) == {
             "d2lSessionVal": "session",
             "d2lSecureSessionVal": "secure",
@@ -1173,57 +989,12 @@ def test_cdp_accepts_loopback_wss_on_configured_port() -> None:
     )
 
 
-def test_cdp_discovery_rejects_redirect_without_following_external_target() -> None:
-    response = FakeUrlopenResponse(
-        b"",
-        status=302,
-        final_url="https://attacker.example/cdp?token=REDIRECT_TOKEN_SENTINEL",
-    )
-    opener = _fake_cdp_opener(response)
-    websocket_call = AsyncMock()
-
-    with patch.object(urllib.request, "build_opener", return_value=opener), \
-            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
-        with pytest.raises(NetworkError, match="redirect") as exc_info:
-            api._refresh_via_cdp_websocket(9222)
-
-    opener.open.assert_called_once_with(
-        "http://127.0.0.1:9222/json/version", timeout=10
-    )
-    websocket_call.assert_not_awaited()
-    assert "REDIRECT_TOKEN_SENTINEL" not in str(exc_info.value)
-    assert "attacker.example" not in str(exc_info.value)
-
-
-def test_cdp_discovery_rejects_external_final_url_without_websocket_connect() -> None:
-    response = FakeUrlopenResponse(
-        b"{}",
-        status=200,
-        final_url="http://attacker.example/json/version?token=FINAL_TOKEN_SENTINEL",
-    )
-    opener = _fake_cdp_opener(response)
-    websocket_call = AsyncMock()
-
-    with patch.object(urllib.request, "build_opener", return_value=opener), \
-            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
-        with pytest.raises(NetworkError, match="invalid response") as exc_info:
-            api._refresh_via_cdp_websocket(9222)
-
-    websocket_call.assert_not_awaited()
-    assert "FINAL_TOKEN_SENTINEL" not in str(exc_info.value)
-    assert "attacker.example" not in str(exc_info.value)
-
-
 def test_cdp_endpoint_failure_is_wrapped_without_url_details() -> None:
     url = "http://127.0.0.1:9222/json/version?token=CDP_URL_SENTINEL"
     opener = MagicMock()
     opener.open.side_effect = OSError(f"connection failed for {url}")
 
-    with patch.object(
-        urllib.request,
-        "build_opener",
-        return_value=opener,
-    ):
+    with patch.object(urllib.request, "build_opener", return_value=opener):
         with pytest.raises(NetworkError) as exc_info:
             api._refresh_via_cdp_websocket(9222)
 
@@ -1232,20 +1003,14 @@ def test_cdp_endpoint_failure_is_wrapped_without_url_details() -> None:
 
 
 def test_cdp_websocket_failure_is_wrapped_without_url_details() -> None:
-    response = FakeUrlopenResponse(
-        json.dumps(
-            {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/1"}
-        ).encode()
-    )
+    response = _cdp_version("ws://127.0.0.1:9222/devtools/browser/1")
     websocket_call = AsyncMock(
         side_effect=RuntimeError(
             "websocket failed at ws://127.0.0.1:9222/?token=WS_URL_SENTINEL"
         )
     )
-    opener = _fake_cdp_opener(response)
 
-    with patch.object(urllib.request, "build_opener", return_value=opener), \
-            patch.object(api, "_cdp_get_cookies_ws", websocket_call):
+    with _patched_cdp(response, websocket_call):
         with pytest.raises(NetworkError) as exc_info:
             api._refresh_via_cdp_websocket(9222)
 

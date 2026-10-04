@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import closing
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,22 +17,27 @@ from lighthouse_cli.ms_auth import (
     MicrosoftSSOError,
     ResponseSnapshot,
     UserProof,
+    _browser_cookies,
     _extract_config_json,
     _extract_error_code_and_msg,
     _parse_user_proofs,
     _select_user_proof,
+    build_end_payload,
     build_sso_error,
     extract_saml_response,
     is_error_page,
     is_mfa_page,
     kmsi_page_detected,
+    safe_upstream_text,
 )
 from lighthouse_cli.ms_errors import (
+    CODELESS_APPROVAL_AUTH_IDS,
     MFA_METHOD_APP,
     MFA_METHOD_CALL,
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    SERVER_SENT_CODE_AUTH_IDS,
 )
 from lighthouse_cli.ms_mfa import _prompt_user_proof_choice
 
@@ -99,6 +106,8 @@ $Config = {
 </script>
 </body></html>"""
 
+SMS_PROOF = UserProof("OneWaySMS", "SMS", "+00 ***", True)
+
 
 def make_mock_response(
     status_code: int = 200,
@@ -115,6 +124,30 @@ def make_mock_response(
     resp.raise_for_status = MagicMock()
     # For cookies, we mock at the session level
     return resp
+
+
+def _json_response(payload: object) -> MagicMock:
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+def _retry_response() -> MagicMock:
+    return _json_response({"Retry": True, "FlowToken": "flow", "Ctx": "ctx"})
+
+
+def _poll_end_auth(
+    client: MicrosoftSSOClient,
+    proof: UserProof = SMS_PROOF,
+    code: str = "123456",
+    polling_interval: int | None = None,
+) -> Any:
+    config: dict[str, Any] = {"urlEndAuth": "/common/SAS/EndAuth"}
+    if polling_interval is not None:
+        config["oPerAuthPollingInterval"] = {proof.auth_method_id: polling_interval}
+    return client._poll_end_auth(
+        MS_SSO_URL, config, proof, {"FlowToken": "flow", "Ctx": "ctx"}, code,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,24 +174,22 @@ $Config = {
 </body></html>"""
 
 
+def _proofs_from(html: str) -> list[UserProof]:
+    return _parse_user_proofs(_extract_config_json(html) or {})
+
+
 class TestMfaMethodSelection:
-    def test_select_sms_when_registered(self) -> None:
-        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
-        selected = _select_user_proof(proofs, MFA_METHOD_SMS)
-        assert selected.auth_method_id == "OneWaySMS"
-
-    def test_select_app_when_requested(self) -> None:
-        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
-        selected = _select_user_proof(proofs, MFA_METHOD_APP)
-        assert selected.auth_method_id == "PhoneAppOTP"
-
-    def test_auto_uses_default(self) -> None:
-        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
-        selected = _select_user_proof(proofs, "auto")
-        assert selected.auth_method_id == "PhoneAppOTP"
+    @pytest.mark.parametrize(
+        ("method", "expected"),
+        [(MFA_METHOD_SMS, "OneWaySMS"), (MFA_METHOD_APP, "PhoneAppOTP"), ("auto", "PhoneAppOTP")],
+        ids=["sms-when-registered", "app-when-requested", "auto-uses-default"],
+    )
+    def test_select_proof(self, method: str, expected: str) -> None:
+        selected = _select_user_proof(_proofs_from(SAMPLE_CONVERGED_TFA_HTML), method)
+        assert selected.auth_method_id == expected
 
     def test_choose_prompts_for_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        proofs = _parse_user_proofs(_extract_config_json(SAMPLE_CONVERGED_TFA_HTML) or {})
+        proofs = _proofs_from(SAMPLE_CONVERGED_TFA_HTML)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("builtins.input", lambda *_: "2")
         selected = _select_user_proof(proofs, MFA_METHOD_CHOOSE)
@@ -207,13 +238,10 @@ class TestMfaMethodSelection:
         _select_user_proof(proofs, MFA_METHOD_CHOOSE)
         selection_output = capsys.readouterr().err
 
-        client = MicrosoftSSOClient()
-        try:
+        with closing(MicrosoftSSOClient()) as client:
             client._print_mfa_phase_banner(
                 proofs, proofs[0], code_sent_on_begin=False
             )
-        finally:
-            client.close()
         banner_output = capsys.readouterr().err
         output = selection_output + banner_output
 
@@ -231,13 +259,10 @@ class TestMfaMethodSelection:
         proof = UserProof("OneWaySMS", "ignored", "REAL_SECRET", True)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
-        client = MicrosoftSSOClient()
-        try:
+        with closing(MicrosoftSSOClient()) as client:
             client._print_mfa_phase_banner(
                 [proof], proof, code_sent_on_begin=True
             )
-        finally:
-            client.close()
         output = capsys.readouterr().err
 
         assert "REAL_SECRET" not in output
@@ -251,13 +276,12 @@ class TestMfaMethodSelection:
 class TestCollectTotpAfterChallenge:
     def test_app_otp_keeps_preprovided_code(self) -> None:
         """PhoneAppOTP is offline TOTP: a pre-provided --totp code must be kept, not discarded."""
-        client = MicrosoftSSOClient()
         selected = UserProof("PhoneAppOTP", "Authenticator app", "", True)
-        code = client._collect_totp_after_challenge(
-            selected, "123456", read_totp_after_challenge=False, code_sent_on_begin=False
-        )
+        with closing(MicrosoftSSOClient()) as client:
+            code = client._collect_totp_after_challenge(
+                selected, "123456", read_totp_after_challenge=False, code_sent_on_begin=False
+            )
         assert code == "123456"
-        client.close()
 
 
 class TestExtractConfigJson:
@@ -268,54 +292,59 @@ class TestExtractConfigJson:
         assert config["urlPost"] == "https://login.microsoftonline.com/common/login"
         assert config["sCtx"] == "rQIIAQs...ctx-token..."
 
-    def test_returns_none_for_no_config(self) -> None:
-        config = _extract_config_json("<html><body>No config here</body></html>")
-        assert config is None
-
-    def test_returns_none_for_malformed_json(self) -> None:
-        html = '<script>$Config = {bad: "json"};</script>'
-        config = _extract_config_json(html)
-        assert config is None
-
-    def test_handles_multiple_scripts(self) -> None:
-        html = '<script>var x=1;</script><script>$Config = {"key": "value"};</script>'
-        config = _extract_config_json(html)
-        assert config == {"key": "value"}
-
-    def test_handles_nested_objects(self) -> None:
-        html = '<script>$Config = {"outer": {"inner": "val"}};</script>'
-        config = _extract_config_json(html)
-        assert config == {"outer": {"inner": "val"}}
+    @pytest.mark.parametrize(
+        ("html", "expected"),
+        [
+            pytest.param("<html><body>No config here</body></html>", None, id="no-config"),
+            pytest.param('<script>$Config = {bad: "json"};</script>', None, id="malformed-json"),
+            # Trailing comma (invalid JSON) should fail gracefully.
+            pytest.param('<script>$Config = {"key": "value",};</script>', None, id="trailing-comma"),
+            pytest.param(
+                '<script>var x=1;</script><script>$Config = {"key": "value"};</script>',
+                {"key": "value"},
+                id="multiple-scripts",
+            ),
+            pytest.param(
+                '<script>$Config = {"outer": {"inner": "val"}};</script>',
+                {"outer": {"inner": "val"}},
+                id="nested-objects",
+            ),
+            pytest.param(
+                '<script>$Config = {"urlPost": "https://example.com/login\\u002fpage"};</script>',
+                {"urlPost": "https://example.com/login/page"},
+                id="escaped-chars",
+            ),
+        ],
+    )
+    def test_edge_cases(self, html: str, expected: dict[str, Any] | None) -> None:
+        assert _extract_config_json(html) == expected
 
 
 # ---------------------------------------------------------------------------
 # _extract_error_code_and_msg tests
 # ---------------------------------------------------------------------------
 
-class TestExtractErrorCode:
-    def test_extracts_both_code_and_msg(self) -> None:
-        code, msg = _extract_error_code_and_msg(SAMPLE_ERROR_HTML)
-        assert code == 50126
-        assert msg == "Invalid username or password."
-
-    def test_returns_none_when_no_error(self) -> None:
-        code, msg = _extract_error_code_and_msg("<html><body>OK</body></html>")
-        assert code is None
-        assert msg is None
-
-    def test_fallback_to_div_error(self) -> None:
-        html = '<div id="loginError">Your account is locked.</div>'
-        _code, msg = _extract_error_code_and_msg(html)
-        assert msg == "Your account is locked."
-
-    def test_504_error_aspx_suppressed_case_insensitive(self) -> None:
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        pytest.param(SAMPLE_ERROR_HTML, (50126, "Invalid username or password."), id="code-and-msg"),
+        pytest.param("<html><body>OK</body></html>", (None, None), id="no-error"),
+        pytest.param(
+            '<div id="loginError">Your account is locked.</div>',
+            (None, "Your account is locked."),
+            id="fallback-to-div-error",
+        ),
         # B8: mixed-case "Error.aspx" on a ConvergedTFA page is a benign 504.
-        html = (
+        pytest.param(
             '<html><script>$Config={"serverError":"504"};</script>'
-            "ConvergedTFA redirect to /common/Error.aspx?err=504</html>"
-        )
-        code, _ = _extract_error_code_and_msg(html)
-        assert code is None
+            "ConvergedTFA redirect to /common/Error.aspx?err=504</html>",
+            (None, None),
+            id="504-error-aspx-suppressed-case-insensitive",
+        ),
+    ],
+)
+def test_extract_error_code_and_msg(html: str, expected: tuple[Any, Any]) -> None:
+    assert _extract_error_code_and_msg(html) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -324,105 +353,81 @@ class TestExtractErrorCode:
 
 class TestMicrosoftSSOClientInit:
     def test_default_init(self) -> None:
-        client = MicrosoftSSOClient()
-        assert client._timeout == 30
-        assert "User-Agent" in client._session.headers
-        client.close()
+        with closing(MicrosoftSSOClient()) as client:
+            assert client._timeout == 30
+            assert "User-Agent" in client._session.headers
 
-    def test_custom_timeout(self) -> None:
-        client = MicrosoftSSOClient(timeout=15)
-        assert client._timeout == 15
-        client.close()
-
-    def test_custom_user_agent(self) -> None:
-        client = MicrosoftSSOClient(user_agent="MyApp/1.0")
-        assert client._session.headers["User-Agent"] == "MyApp/1.0"
-        client.close()
+    def test_custom_timeout_and_user_agent(self) -> None:
+        with closing(MicrosoftSSOClient(timeout=15, user_agent="MyApp/1.0")) as client:
+            assert client._timeout == 15
+            assert client._session.headers["User-Agent"] == "MyApp/1.0"
 
 
-class TestIsErrorPage:
-    def _snap(self, status_code: int = 200, html: str = "") -> ResponseSnapshot:
-        return ResponseSnapshot(url="https://x", status_code=status_code, location="", html=html)
-
-    def test_detects_400_status(self) -> None:
-        assert is_error_page(self._snap(400, "")) is True
-
-    def test_detects_servererror_in_body(self) -> None:
-        assert is_error_page(self._snap(200, "serverError: 50126")) is True
-
-    def test_ok_page_not_error(self) -> None:
-        assert is_error_page(self._snap(200, "<html>Login page</html>")) is False
-
-
-class TestIsMfaPage:
-    def test_detects_converged_tfa(self) -> None:
-        assert is_mfa_page("ConvergedTFA page content") is True
-
-    def test_detects_otc_input(self) -> None:
-        assert is_mfa_page(SAMPLE_MFA_HTML) is True
-
-    def test_enter_code_text(self) -> None:
-        assert is_mfa_page('<div>Enter code</div>') is True
-
-    def test_saml_page_not_mfa(self) -> None:
-        assert is_mfa_page(SAMPLE_SAML_HTML) is False
+@pytest.mark.parametrize(
+    ("status_code", "html", "expected"),
+    [
+        pytest.param(400, "", True, id="400-status"),
+        pytest.param(200, "serverError: 50126", True, id="servererror-in-body"),
+        pytest.param(200, "<html>Login page</html>", False, id="ok-page"),
+    ],
+)
+def test_is_error_page(status_code: int, html: str, expected: bool) -> None:
+    snap = ResponseSnapshot(url="https://x", status_code=status_code, location="", html=html)
+    assert is_error_page(snap) is expected
 
 
-class TestExtractSamlResponse:
-    def test_extracts_from_hidden_input(self) -> None:
-        result = extract_saml_response(SAMPLE_SAML_HTML)
-        assert result == "PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPS...long-base64-string..."
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        pytest.param("ConvergedTFA page content", True, id="converged-tfa"),
+        pytest.param(SAMPLE_MFA_HTML, True, id="otc-input"),
+        pytest.param('<div>Enter code</div>', True, id="enter-code-text"),
+        pytest.param(SAMPLE_SAML_HTML, False, id="saml-page"),
+    ],
+)
+def test_is_mfa_page(html: str, expected: bool) -> None:
+    assert is_mfa_page(html) is expected
 
-    def test_returns_none_when_not_present(self) -> None:
-        assert extract_saml_response("<html>No SAML here</html>") is None
 
-    def test_extracts_from_name_value_pattern(self) -> None:
-        html = '<input name="SAMLResponse" value="BASE64SAMLTOKEN">'
-        assert extract_saml_response(html) == "BASE64SAMLTOKEN"
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        pytest.param(
+            SAMPLE_SAML_HTML,
+            "PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPS...long-base64-string...",
+            id="hidden-input",
+        ),
+        pytest.param("<html>No SAML here</html>", None, id="not-present"),
+        pytest.param(
+            '<input name="SAMLResponse" value="BASE64SAMLTOKEN">', "BASE64SAMLTOKEN",
+            id="name-value-pattern",
+        ),
+    ],
+)
+def test_extract_saml_response(html: str, expected: str | None) -> None:
+    assert extract_saml_response(html) == expected
 
 
 class TestMicrosoftSSOClientExtractD2lCookies:
-    def test_extracts_all_four_cookies(self) -> None:
-        client = MicrosoftSSOClient()
-        client._session.cookies.set(
-            "d2lSecureSessionVal", "sec123", domain="lighthouse.manipal.edu"
-        )
-        client._session.cookies.set(
-            "d2lSessionVal", "ses123", domain="lighthouse.manipal.edu"
-        )
-        client._session.cookies.set(
-            "d2lSameSiteCanaryA", "canaryA", domain="lighthouse.manipal.edu"
-        )
-        client._session.cookies.set(
-            "d2lSameSiteCanaryB", "canaryB", domain="lighthouse.manipal.edu"
-        )
+    def test_extracts_only_the_four_d2l_cookies(self) -> None:
+        d2l = {
+            "d2lSecureSessionVal": "sec123",
+            "d2lSessionVal": "ses123",
+            "d2lSameSiteCanaryA": "canaryA",
+            "d2lSameSiteCanaryB": "canaryB",
+        }
+        with closing(MicrosoftSSOClient()) as client:
+            for name, value in d2l.items():
+                client._session.cookies.set(name, value, domain="lighthouse.manipal.edu")
+            client._session.cookies.set("_ga", "tracking", domain="lighthouse.manipal.edu")
+            client._session.cookies.set("session", "other", domain="example.com")
 
-        cookies = client._extract_d2l_cookies()
-        assert len(cookies) == 4
-        assert cookies["d2lSecureSessionVal"] == "sec123"
-        assert cookies["d2lSessionVal"] == "ses123"
-        client.close()
+            assert client._extract_d2l_cookies() == d2l
 
     def test_raises_on_missing_cookies(self) -> None:
-        client = MicrosoftSSOClient()
-        # No cookies set at all
-        with pytest.raises(MicrosoftSSOError, match="Missing required D2L cookies"):
-            client._extract_d2l_cookies()
-        client.close()
-
-    def test_ignores_non_d2l_cookies(self) -> None:
-        client = MicrosoftSSOClient()
-        client._session.cookies.set("d2lSecureSessionVal", "sec", domain="lighthouse.manipal.edu")
-        client._session.cookies.set("d2lSessionVal", "ses", domain="lighthouse.manipal.edu")
-        client._session.cookies.set("d2lSameSiteCanaryA", "a", domain="lighthouse.manipal.edu")
-        client._session.cookies.set("d2lSameSiteCanaryB", "b", domain="lighthouse.manipal.edu")
-        client._session.cookies.set("_ga", "tracking", domain="lighthouse.manipal.edu")
-        client._session.cookies.set("session", "other", domain="example.com")
-
-        cookies = client._extract_d2l_cookies()
-        assert len(cookies) == 4
-        assert "_ga" not in cookies
-        client.close()
+        with closing(MicrosoftSSOClient()) as client:
+            with pytest.raises(MicrosoftSSOError, match="Missing required D2L cookies"):
+                client._extract_d2l_cookies()
 
 
 # ---------------------------------------------------------------------------
@@ -430,8 +435,7 @@ class TestMicrosoftSSOClientExtractD2lCookies:
 # ---------------------------------------------------------------------------
 
 def test_fresh_login_clears_stale_pending_checkpoint_before_network() -> None:
-    client = MicrosoftSSOClient()
-    try:
+    with closing(MicrosoftSSOClient()) as client:
         with patch("lighthouse_cli.config.clear_mfa_pending") as clear_pending, \
                 patch.object(
                     client,
@@ -440,234 +444,110 @@ def test_fresh_login_clears_stale_pending_checkpoint_before_network() -> None:
                 ):
             with pytest.raises(MicrosoftSSOError, match="stopped"):
                 client.login("user@example.invalid", "not-a-real-password")
-    finally:
-        client.close()
 
     clear_pending.assert_called_once_with()
+
+
+def _mock_session(
+    get_responses: list[MagicMock],
+    post_responses: list[MagicMock],
+    cookie_prefix: str | None = None,
+) -> MagicMock:
+    """A requests.Session stand-in for the fresh session login() creates.
+
+    The first two GETs are always the SAML init (302 to Microsoft) and the
+    Microsoft login page carrying ``$Config``.
+    """
+    session = MagicMock()
+    session.headers = {}
+    session.cookies = requests.cookies.RequestsCookieJar()
+    if cookie_prefix is not None:
+        for name in COOKIE_NAMES:
+            session.cookies.set(name, f"{cookie_prefix}{name}", domain="lighthouse.manipal.edu")
+    session.get = MagicMock(side_effect=[
+        make_mock_response(302, headers={"Location": MS_SSO_URL}),
+        make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL),
+        *get_responses,
+    ])
+    session.post = MagicMock(side_effect=post_responses)
+    return session
+
+
+def _login(session: MagicMock, *args: Any, **kwargs: Any) -> dict[str, str]:
+    with closing(MicrosoftSSOClient()) as client:
+        with patch("requests.Session", return_value=session):
+            return client.login(*args, **kwargs)
 
 
 class TestFullLoginFlow:
     """Test the complete login flow using mocked requests.Session."""
 
-    def _setup_login_mocks(self, client: MicrosoftSSOClient) -> list[MagicMock]:
-        """Set up a sequence of mock responses for the full login flow."""
-        responses = []
-
-        # Step 1: D2L SAML init → 302 to Microsoft
-        resp_saml_init = make_mock_response(
-            302,
-            headers={"Location": MS_SSO_URL},
-        )
-        responses.append(resp_saml_init)
-
-        # Step 2: GET Microsoft login page → config HTML
-        resp_ms_config = make_mock_response(
-            200,
-            text=SAMPLE_CONFIG_HTML,
-            url=MS_SSO_URL,
-        )
-        responses.append(resp_ms_config)
-
-        # Step 3: POST credentials → MFA page (with 2FA)
-        resp_post_creds = make_mock_response(
-            200,
-            text=SAMPLE_MFA_HTML,
-            url="https://login.microsoftonline.com/common/SAS/ProcessAuth",
-        )
-        responses.append(resp_post_creds)
-
-        # Step 4a: POST TOTP → redirect to SAML
-        resp_post_totp = make_mock_response(
-            302,
-            headers={"Location": "https://lighthouse.manipal.edu/d2l/lp/auth/saml/consume?SAMLResponse=..."},
-            url="https://login.microsoftonline.com/common/SAS/ProcessAuth",
-        )
-        responses.append(resp_post_totp)
-
-        # Step 4b: follow redirect → SAML HTML
-        resp_saml = make_mock_response(
-            200,
-            text=SAMPLE_SAML_HTML,
-            url="https://lighthouse.manipal.edu/d2l/lp/auth/saml/consume",
-        )
-        responses.append(resp_saml)
-
-        # Step 5: POST SAML to D2L ACS → 302 to D2L home
-        resp_acs = make_mock_response(
-            302,
-            headers={"Location": f"{BASE_URL}/d2l/home"},
-        )
-        responses.append(resp_acs)
-
-        # Step 5b: follow redirect → home page (with cookies)
-        resp_home = make_mock_response(
-            200,
-            text="<html>D2L Home</html>",
-            url=f"{BASE_URL}/d2l/home",
-        )
-        responses.append(resp_home)
-
-        client._session.get = MagicMock(side_effect=responses)
-        client._session.post = MagicMock(side_effect=[
-            responses[2],  # POST credentials
-            responses[3],  # POST TOTP
-            responses[5],  # POST SAML
-        ])
-
-        return responses
-
     def test_full_login_flow_with_mfa(self) -> None:
         """Complete login flow: SAML init -> MS config -> POST creds -> MFA -> SAML -> cookies."""
-        client = MicrosoftSSOClient()
-
-        # Build mock session that will be used when login() creates a fresh session.
-        mock_session = MagicMock()
-        mock_session.headers = {}
-        mock_session.cookies = requests.cookies.RequestsCookieJar()
-
-        # Set up cookie jar simulation
-        for name in COOKIE_NAMES:
-            mock_session.cookies.set(
-                name, f"test-{name}",
-                domain="lighthouse.manipal.edu",
-            )
-
-        # Set up GET mocks
-        resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
-        resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
-        resp_mfa = make_mock_response(200, text=SAMPLE_MFA_HTML)
-        resp_post_totp_redirect = make_mock_response(
-            302,
-            headers={"Location": f"{BASE_URL}/d2l/lp/auth/saml/consume"},
-        )
-        resp_saml = make_mock_response(200, text=SAMPLE_SAML_HTML)
-        resp_acs = make_mock_response(
-            302,
-            headers={"Location": f"{BASE_URL}/d2l/home"},
+        resp_acs = make_mock_response(302, headers={"Location": f"{BASE_URL}/d2l/home"})
+        session = _mock_session(
+            [
+                make_mock_response(200, text=SAMPLE_SAML_HTML),  # follow TOTP redirect -> SAML page
+                resp_acs,  # follow ACS redirect
+            ],
+            [
+                make_mock_response(200, text=SAMPLE_MFA_HTML),  # POST credentials -> MFA
+                make_mock_response(  # POST TOTP
+                    302, headers={"Location": f"{BASE_URL}/d2l/lp/auth/saml/consume"},
+                ),
+                resp_acs,  # POST SAML
+            ],
+            cookie_prefix="test-",
         )
 
-        # GET sequence: init, config, follow TOTP redirect, ACS redirect follow
-        get_responses = [
-            resp_saml_init,      # Step 1: GET SAML init
-            resp_ms_config,      # Step 2: GET MS config
-            resp_saml,           # Step 4a: follow redirect from TOTP POST -> SAML page
-            resp_acs,            # Step 5b: follow ACS redirect
-        ]
-        mock_session.get = MagicMock(side_effect=get_responses)
-
-        # POST sequence: credentials, TOTP, SAML
-        post_responses = [
-            resp_mfa,            # Step 3: POST credentials -> MFA
-            resp_post_totp_redirect,  # Step 4: POST TOTP
-            resp_acs,            # Step 5: POST SAML
-        ]
-        mock_session.post = MagicMock(side_effect=post_responses)
-
-        with patch("requests.Session", return_value=mock_session):
-            cookies = client.login(
-                "test@manipal.edu",
-                "password123",
-                "123456",
-                mfa_method=MFA_METHOD_APP,
-            )
+        cookies = _login(
+            session, "test@manipal.edu", "password123", "123456", mfa_method=MFA_METHOD_APP,
+        )
 
         assert len(cookies) == 4
-        for name in COOKIE_NAMES:
-            assert name in cookies
-        client.close()
+        assert set(cookies) == set(COOKIE_NAMES)
 
     def test_login_with_invalid_credentials(self) -> None:
         """Invalid credentials raise MicrosoftSSOError with descriptive message."""
-        client = MicrosoftSSOClient()
+        session = _mock_session([], [make_mock_response(200, text=SAMPLE_ERROR_HTML)])
 
-        mock_session = MagicMock()
-        mock_session.headers = {}
-        mock_session.cookies = requests.cookies.RequestsCookieJar()
-
-        resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
-        resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
-        resp_error = make_mock_response(200, text=SAMPLE_ERROR_HTML)
-
-        mock_session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config])
-        mock_session.post = MagicMock(return_value=resp_error)
-
-        with patch("requests.Session", return_value=mock_session):
-            with pytest.raises(MicrosoftSSOError, match="50126"):
-                client.login("bad@manipal.edu", "wrong_password", "123456")
-        client.close()
+        with pytest.raises(MicrosoftSSOError, match="50126"):
+            _login(session, "bad@manipal.edu", "wrong_password", "123456")
 
     def test_login_mfa_with_wrong_code(self) -> None:
         """Wrong 2FA code raises MicrosoftSSOError."""
-        client = MicrosoftSSOClient()
+        # POST creds -> MFA; POST wrong TOTP -> MFA page again (200, still shows MFA),
+        # which _step_handle_mfa detects and raises on.
+        session = _mock_session(
+            [],
+            [make_mock_response(200, text=SAMPLE_MFA_HTML), make_mock_response(200, text=SAMPLE_MFA_HTML)],
+        )
 
-        mock_session = MagicMock()
-        mock_session.headers = {}
-        mock_session.cookies = requests.cookies.RequestsCookieJar()
-
-        resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
-        resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
-        resp_mfa = make_mock_response(200, text=SAMPLE_MFA_HTML)
-        # Wrong 2FA code -> stay on MFA page (200, still shows MFA)
-        resp_mfa_again = make_mock_response(200, text=SAMPLE_MFA_HTML)
-
-        mock_session.get = MagicMock(side_effect=[
-            resp_saml_init,
-            resp_ms_config,
-        ])
-        # POST creds -> MFA; POST wrong TOTP -> MFA page again
-        mock_session.post = MagicMock(side_effect=[
-            resp_mfa,        # POST creds
-            resp_mfa_again,  # POST wrong TOTP -> MFA page again
-        ])
-
-        # _step_handle_mfa will detect MFA page and raise error
-        with patch("requests.Session", return_value=mock_session):
-            with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
-                client.login(
-                    "test@manipal.edu",
-                    "password123",
-                    "000000",
-                    mfa_method=MFA_METHOD_APP,
-                )
-        client.close()
+        with pytest.raises(MicrosoftSSOError, match="2FA verification failed"):
+            _login(session, "test@manipal.edu", "password123", "000000", mfa_method=MFA_METHOD_APP)
 
     def test_login_without_mfa(self) -> None:
         """Login without MFA (direct SAML after credentials)."""
-        client = MicrosoftSSOClient()
-
-        mock_session = MagicMock()
-        mock_session.headers = {}
-        mock_session.cookies = requests.cookies.RequestsCookieJar()
-
-        for name in COOKIE_NAMES:
-            mock_session.cookies.set(name, f"val-{name}", domain="lighthouse.manipal.edu")
-
-        resp_saml_init = make_mock_response(302, headers={"Location": MS_SSO_URL})
-        resp_ms_config = make_mock_response(200, text=SAMPLE_CONFIG_HTML, url=MS_SSO_URL)
+        resp_acs = make_mock_response(302, headers={"Location": f"{BASE_URL}/d2l/home"})
         # Credentials POST returns SAML directly (no MFA)
-        resp_saml_direct = make_mock_response(200, text=SAMPLE_SAML_HTML)
-        resp_acs = make_mock_response(
-            302, headers={"Location": f"{BASE_URL}/d2l/home"}
+        session = _mock_session(
+            [resp_acs],
+            [make_mock_response(200, text=SAMPLE_SAML_HTML), resp_acs],
+            cookie_prefix="val-",
         )
 
-        mock_session.get = MagicMock(side_effect=[resp_saml_init, resp_ms_config, resp_acs])
-        mock_session.post = MagicMock(side_effect=[resp_saml_direct, resp_acs])
-
-        with patch("requests.Session", return_value=mock_session):
-            cookies = client.login("test@manipal.edu", "password123", None)
+        cookies = _login(session, "test@manipal.edu", "password123", None)
         assert len(cookies) == 4
-        client.close()
 
     def test_saml_init_reaches_microsoft(self) -> None:
         """Step 1: SAML init redirects to Microsoft."""
-        client = MicrosoftSSOClient()
         ms_url = "https://login.microsoftonline.com/common/oauth2/authorize?client_id=..."
-        resp = make_mock_response(302, headers={"Location": ms_url})
-        client._session.get = MagicMock(return_value=resp)
-
-        url = client._step_initiate_saml()
+        with closing(MicrosoftSSOClient()) as client:
+            client._session.get = MagicMock(
+                return_value=make_mock_response(302, headers={"Location": ms_url}),
+            )
+            url = client._step_initiate_saml()
         assert "login.microsoftonline.com" in url
-        client.close()
 
 
 class TestMicrosoftSSOError:
@@ -704,18 +584,23 @@ class TestMSErrorCodes:
 
 
 class TestBuildSsoError:
-    def test_known_error_code(self) -> None:
-        err = build_sso_error(50126, None, "POST credentials")
-        assert "50126" in str(err)
-        assert "Invalid username" in str(err)
-
-    def test_unknown_error_code(self) -> None:
-        err = build_sso_error(99999, "Custom error text", "some step")
-        assert "[99999]" in str(err)
-
-    def test_error_with_msg_fallback(self) -> None:
-        err = build_sso_error(None, "Password is incorrect", "POST credentials")
-        assert "Password is incorrect" in str(err)
+    @pytest.mark.parametrize(
+        ("code", "msg", "step", "needles"),
+        [
+            pytest.param(50126, None, "POST credentials", ["50126", "Invalid username"], id="known-code"),
+            pytest.param(99999, "Custom error text", "some step", ["[99999]"], id="unknown-code"),
+            pytest.param(
+                None, "Password is incorrect", "POST credentials", ["Password is incorrect"],
+                id="msg-fallback",
+            ),
+        ],
+    )
+    def test_rendered_message(
+        self, code: int | None, msg: str | None, step: str, needles: list[str],
+    ) -> None:
+        rendered = str(build_sso_error(code, msg, step))
+        for needle in needles:
+            assert needle in rendered
 
     def test_mfa_required_recovery_does_not_assume_code_channel(self) -> None:
         err = build_sso_error(50076, None, "POST credentials")
@@ -777,137 +662,63 @@ class TestBuildSsoError:
         ],
     )
     def test_sso_error_never_echoes_secret_shaped_upstream_text(self, raw: str) -> None:
-        err = build_sso_error(None, raw, "MFA")
-        rendered = str(err)
+        rendered = str(build_sso_error(None, raw, "MFA"))
 
-        assert "SENTINEL" not in rendered
-        assert "hunter2" not in rendered
-        assert "REAL_PASSWORD" not in rendered
-        assert "REAL_KEY" not in rendered
-        assert "123456" not in rendered
-        assert "abc123" not in rendered
-        assert "APISECRET" not in rendered
-        assert "SECRET" not in rendered
-        assert "REAL" not in rendered
-        assert "PASSWORD_SENTINEL" not in rendered
-        assert "TOKEN_SENTINEL" not in rendered
-        assert "CANARY_SENTINEL" not in rendered
-        assert "OTP_SENTINEL" not in rendered
+        # "SENTINEL", "SECRET" and "REAL" also cover every *_SENTINEL,
+        # APISECRET, REAL_PASSWORD and REAL_KEY value above.
+        for leaked in ("SENTINEL", "hunter2", "123456", "abc123", "SECRET", "REAL"):
+            assert leaked not in rendered
 
 
 def test_endauth_total_deadline_skips_sleep_when_budget_is_exhausted() -> None:
-    client = MicrosoftSSOClient()
-    response = MagicMock()
-    response.json.return_value = {
-        "Retry": True,
-        "FlowToken": "flow",
-        "Ctx": "ctx",
-    }
-    client._post = MagicMock(return_value=response)
-    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
-
-    try:
+    with closing(MicrosoftSSOClient()) as client:
+        client._post = MagicMock(return_value=_retry_response())
         with patch("lighthouse_cli.ms_auth.time.monotonic", side_effect=[0.0, 0.0, 901.0]):
             with patch("lighthouse_cli.ms_auth.time.sleep") as sleep:
                 with pytest.raises(MicrosoftSSOError, match="timed out"):
-                    client._poll_end_auth(
-                        MS_SSO_URL,
-                        {
-                            "urlEndAuth": "/common/SAS/EndAuth",
-                            "oPerAuthPollingInterval": {"OneWaySMS": 999999},
-                        },
-                        proof,
-                        {"FlowToken": "flow", "Ctx": "ctx"},
-                        "123456",
-                    )
-    finally:
-        client.close()
+                    _poll_end_auth(client, polling_interval=999999)
 
     assert client._post.call_count == 1
     sleep.assert_not_called()
 
 
 def test_endauth_approval_can_complete_after_old_120_second_budget() -> None:
-    client = MicrosoftSSOClient()
-    retry = MagicMock()
-    retry.json.return_value = {
-        "Retry": True,
-        "FlowToken": "flow",
-        "Ctx": "ctx",
-    }
-    success = MagicMock()
-    success.json.return_value = {
-        "Success": True,
-        "FlowToken": "done-flow",
-        "Ctx": "done-ctx",
-    }
-    client._post = MagicMock(side_effect=[retry, success])
-    client._checkpoint_mfa_pending = MagicMock()
-    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
-
-    try:
+    success = _json_response({"Success": True, "FlowToken": "done-flow", "Ctx": "done-ctx"})
+    with closing(MicrosoftSSOClient()) as client:
+        client._post = MagicMock(side_effect=[_retry_response(), success])
+        client._checkpoint_mfa_pending = MagicMock()
         with patch(
             "lighthouse_cli.ms_auth.time.monotonic",
             side_effect=[0.0, 0.0, 0.0, 121.0],
         ), patch("lighthouse_cli.ms_auth.time.sleep"):
-            flow, ctx, data = client._poll_end_auth(
-                MS_SSO_URL,
-                {"urlEndAuth": "/common/SAS/EndAuth"},
-                proof,
-                {"FlowToken": "flow", "Ctx": "ctx"},
-                "123456",
-            )
-    finally:
-        client.close()
+            flow, ctx, data = _poll_end_auth(client)
 
     assert (flow, ctx) == ("done-flow", "done-ctx")
     assert data["Success"] is True
 
 
 def test_begin_auth_rejects_non_object_json_response() -> None:
-    client = MicrosoftSSOClient()
-    response = MagicMock()
-    response.json.return_value = []
-    client._post = MagicMock(return_value=response)
     snap = ResponseSnapshot(url=MS_SSO_URL, status_code=200, location="", html="")
-    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
-
-    try:
+    with closing(MicrosoftSSOClient()) as client:
+        client._post = MagicMock(return_value=_json_response([]))
         with pytest.raises(MicrosoftSSOError, match="BeginAuth returned an invalid response"):
             client._step_handle_mfa_converged(
                 snap,
                 {"urlBeginAuth": "/common/SAS/BeginAuth"},
-                [proof],
+                [SMS_PROOF],
                 None,
                 mfa_method="sms",
             )
-    finally:
-        client.close()
 
 
 def test_end_auth_rejects_non_object_json_response() -> None:
-    client = MicrosoftSSOClient()
-    response = MagicMock()
-    response.json.return_value = []
-    client._post = MagicMock(return_value=response)
-    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
-
-    try:
+    with closing(MicrosoftSSOClient()) as client:
+        client._post = MagicMock(return_value=_json_response([]))
         with pytest.raises(MicrosoftSSOError, match="EndAuth returned an invalid response"):
-            client._poll_end_auth(
-                MS_SSO_URL,
-                {"urlEndAuth": "/common/SAS/EndAuth"},
-                proof,
-                {"FlowToken": "flow", "Ctx": "ctx"},
-                "123456",
-            )
-    finally:
-        client.close()
+            _poll_end_auth(client)
 
 
 def test_safe_upstream_text_rejects_prefixed_credential_values() -> None:
-    from lighthouse_cli.ms_auth import safe_upstream_text
-
     for raw in (
         "error: api key: APISECRET",
         "error: apikey: APISECRET",
@@ -940,26 +751,14 @@ def test_invalid_mfa_entropy_uses_fixed_approval_instruction(
     leaked: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    client = MicrosoftSSOClient()
-    retry = MagicMock()
-    retry.json.return_value = {"Retry": True, "Entropy": entropy}
-    success = MagicMock()
-    success.json.return_value = {"Success": True, "FlowToken": "flow", "Ctx": "ctx"}
-    client._post = MagicMock(side_effect=[retry, success])
-    client._checkpoint_mfa_pending = MagicMock()
+    retry = _json_response({"Retry": True, "Entropy": entropy})
+    success = _json_response({"Success": True, "FlowToken": "flow", "Ctx": "ctx"})
     proof = UserProof("PhoneAppNotification", "Authenticator", "", True)
-
-    try:
+    with closing(MicrosoftSSOClient()) as client:
+        client._post = MagicMock(side_effect=[retry, success])
+        client._checkpoint_mfa_pending = MagicMock()
         with patch("lighthouse_cli.ms_auth.time.sleep"):
-            client._poll_end_auth(
-                MS_SSO_URL,
-                {"urlEndAuth": "/common/SAS/EndAuth"},
-                proof,
-                {"FlowToken": "flow", "Ctx": "ctx"},
-                "",
-            )
-    finally:
-        client.close()
+            _poll_end_auth(client, proof, code="")
 
     captured = capsys.readouterr()
     assert leaked not in captured.err
@@ -968,60 +767,14 @@ def test_invalid_mfa_entropy_uses_fixed_approval_instruction(
 
 
 def test_endauth_poll_interval_is_capped_and_final_retry_does_not_sleep() -> None:
-    client = MicrosoftSSOClient()
-    response = MagicMock()
-    response.json.return_value = {
-        "Retry": True,
-        "FlowToken": "flow",
-        "Ctx": "ctx",
-    }
-    client._post = MagicMock(return_value=response)
-    proof = UserProof("OneWaySMS", "SMS", "+00 ***", True)
-
-    try:
+    with closing(MicrosoftSSOClient()) as client:
+        client._post = MagicMock(return_value=_retry_response())
         with patch("lighthouse_cli.ms_auth.time.sleep") as sleep:
             with pytest.raises(MicrosoftSSOError, match="timed out"):
-                client._poll_end_auth(
-                    MS_SSO_URL,
-                    {
-                        "urlEndAuth": "/common/SAS/EndAuth",
-                        "oPerAuthPollingInterval": {"OneWaySMS": 999999},
-                    },
-                    proof,
-                    {"FlowToken": "flow", "Ctx": "ctx"},
-                    "123456",
-                )
-    finally:
-        client.close()
+                _poll_end_auth(client, polling_interval=999999)
 
     assert sleep.call_count == 29
     assert all(call.args == (30.0,) for call in sleep.call_args_list)
-
-
-class TestClose:
-    def test_close_cleans_up(self) -> None:
-        client = MicrosoftSSOClient()
-        client.close()
-        # After close, session should be available but closed
-        # Just verify it doesn't raise
-
-
-# ---------------------------------------------------------------------------
-# Config extraction edge cases
-# ---------------------------------------------------------------------------
-
-class TestConfigExtractionEdgeCases:
-    def test_config_with_escaped_chars(self) -> None:
-        html = '<script>$Config = {"urlPost": "https://example.com/login\\u002fpage"};</script>'
-        config = _extract_config_json(html)
-        assert config is not None
-        assert "urlPost" in config
-
-    def test_config_with_comments(self) -> None:
-        """Config with trailing comma (invalid JSON) should fail gracefully."""
-        html = '<script>$Config = {"key": "value",};</script>'
-        config = _extract_config_json(html)
-        assert config is None  # Invalid JSON
 
 
 class TestStaySignedInDetection:
@@ -1055,55 +808,49 @@ $Config = {
 
 
 class TestVoiceAndPushMethods:
-    def _voice_proofs(self):
-        return _parse_user_proofs(_extract_config_json(VOICE_PROOFS_HTML) or {})
+    @pytest.mark.parametrize(
+        ("method", "expected"),
+        [(MFA_METHOD_CALL, "TwoWayVoiceMobile"), (MFA_METHOD_PUSH, "PhoneAppNotification")],
+        ids=["call-selects-mobile-voice-first", "push-selects-notification-only"],
+    )
+    def test_selects_proof(self, method: str, expected: str) -> None:
+        selected = _select_user_proof(_proofs_from(VOICE_PROOFS_HTML), method)
+        assert selected.auth_method_id == expected
 
-    def test_call_selects_mobile_voice_first(self) -> None:
-        selected = _select_user_proof(self._voice_proofs(), MFA_METHOD_CALL)
-        assert selected.auth_method_id == "TwoWayVoiceMobile"
-
-    def test_call_without_voice_methods_errors_with_options(self) -> None:
-        proofs = [
-            UserProof("PhoneAppOTP", "Authenticator app", "", True),
-        ]
+    @pytest.mark.parametrize(
+        ("proof", "method"),
+        [
+            pytest.param(
+                UserProof("PhoneAppOTP", "Authenticator app", "", True), MFA_METHOD_CALL,
+                id="call-without-voice-methods",
+            ),
+            pytest.param(
+                UserProof("PhoneAppNotification", "Approve", "", True), MFA_METHOD_APP,
+                id="app-does-not-fall-through-to-push",
+            ),
+        ],
+    )
+    def test_unregistered_method_errors_with_options(self, proof: UserProof, method: str) -> None:
         with pytest.raises(MicrosoftSSOError, match="not available"):
-            _select_user_proof(proofs, MFA_METHOD_CALL)
-
-    def test_push_selects_notification_only(self) -> None:
-        selected = _select_user_proof(self._voice_proofs(), MFA_METHOD_PUSH)
-        assert selected.auth_method_id == "PhoneAppNotification"
+            _select_user_proof([proof], method)
 
     def test_call_is_a_valid_method(self) -> None:
         assert MFA_METHOD_CALL in VALID_MFA_METHODS
         assert MFA_METHOD_PUSH in VALID_MFA_METHODS
 
     def test_voice_is_codeless_approval(self) -> None:
-        from lighthouse_cli.ms_errors import (
-            CODELESS_APPROVAL_AUTH_IDS,
-            SERVER_SENT_CODE_AUTH_IDS,
-        )
-
         assert "TwoWayVoiceMobile" in CODELESS_APPROVAL_AUTH_IDS
         assert "TwoWayVoiceMobile" not in SERVER_SENT_CODE_AUTH_IDS
 
-    def test_end_payload_never_carries_code_for_voice(self) -> None:
-        from lighthouse_cli.ms_auth import build_end_payload
-
-        proof = UserProof("TwoWayVoiceOffice", "Call office", "", False)
-        payload = build_end_payload(
-            proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
-        )
-        assert "AdditionalAuthData" not in payload
-
-    def test_app_selector_does_not_fall_through_to_push(self) -> None:
-        proofs = [UserProof("PhoneAppNotification", "Approve", "", True)]
-        with pytest.raises(MicrosoftSSOError, match="not available"):
-            _select_user_proof(proofs, MFA_METHOD_APP)
-
-    def test_end_payload_never_carries_code_for_push(self) -> None:
-        from lighthouse_cli.ms_auth import build_end_payload
-
-        proof = UserProof("PhoneAppNotification", "Approve in app", "", True)
+    @pytest.mark.parametrize(
+        "proof",
+        [
+            UserProof("TwoWayVoiceOffice", "Call office", "", False),
+            UserProof("PhoneAppNotification", "Approve in app", "", True),
+        ],
+        ids=["voice", "push"],
+    )
+    def test_end_payload_never_carries_code(self, proof: UserProof) -> None:
         payload = build_end_payload(
             proof, {"SessionId": "sid"}, "998877", end_flow="f", end_ctx="c"
         )
@@ -1112,8 +859,6 @@ class TestVoiceAndPushMethods:
 
 class TestBrowserCookieExport:
     def test_cookies_are_normalized_for_playwright(self) -> None:
-        from lighthouse_cli.ms_auth import _browser_cookies
-
         session = requests.Session()
         session.cookies.set("esctx", "SYNTHETIC", domain="login.microsoftonline.com", path="/")
         # A value-less cookie (``cookie.value is None``); cookies.set(name, None) would delete it.
