@@ -11,6 +11,7 @@ import math
 import re
 import sys
 from http import HTTPStatus
+from threading import Lock
 from typing import Any
 
 import click
@@ -97,20 +98,25 @@ class JsonOutputGroup(JsonOutputCommand, click.Group):
 # Cache rich imports at module level to avoid re-import per table render.
 _RICH_CACHE: tuple[Any, Any, Any] | None = None
 _RICH_CHECKED: bool = False
+# All-courses views draw tables from worker threads: none may see Rich as
+# checked before the first thread has finished setting it up.
+_RICH_LOCK = Lock()
 
 
 def _try_rich() -> tuple[Any, Any, Any] | None:
     """Import Rich types, returning ``(Table, Text, console)`` when available."""
     global _RICH_CACHE, _RICH_CHECKED
-    if not _RICH_CHECKED:
-        _RICH_CHECKED = True
-        try:
-            from rich.console import Console
-            from rich.table import Table
-            from rich.text import Text
-            _RICH_CACHE = (Table, Text, Console())
-        except ImportError:
-            _RICH_CACHE = None
+    with _RICH_LOCK:
+        if not _RICH_CHECKED:
+            try:
+                from rich.console import Console
+                from rich.table import Table
+                from rich.text import Text
+                _RICH_CACHE = (Table, Text, Console())
+            except ImportError:
+                _RICH_CACHE = None
+            finally:  # a broken install fails once, then tables are plain text
+                _RICH_CHECKED = True
     return _RICH_CACHE
 
 
