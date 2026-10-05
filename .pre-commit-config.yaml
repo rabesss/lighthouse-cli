@@ -13,8 +13,8 @@ repos:
         exclude: ^\.secrets\.baseline$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Keep in sync with the ruff floor in pyproject.toml [project.optional-dependencies].dev
-    rev: v0.16.8
+    # Keep in sync with ruff in requirements-dev.txt (tests/test_repo_policies.py checks it)
+    rev: v0.16.9
     hooks:
       - id: ruff
         args: [--fix]
