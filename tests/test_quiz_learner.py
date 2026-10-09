@@ -945,6 +945,9 @@ def test_submit_auth_expiry_after_the_page_save_is_unknown():
     ("<label>88.89 %</label>", (None, None), 88.89), ("<label>88,89 %</label>", (None, None), 88.89),
     # Hidden or unpublished: a blank cell, no grade cell at all, "Pending Evaluation".
     ("", (None, None), None), (None, (None, None), None), ("<label>Pending Evaluation</label>", (None, None), None),
+    # Extra text after the percentage: the points still parse, the percentage is not guessed.
+    ("<label>6</label><label> / </label><label>25</label><label> - </label><label>24 %</label><label>(rescored)</label>",
+     (6.0, 25.0), None),
     # A signed or stray-dash value is not read as a percentage.
     ("<label> - </label><label>-5 %</label>", (None, None), None), ("<label>-5 %</label>", (None, None), None),
     ("<label>-</label><label>5 %</label>", (None, None), None),
