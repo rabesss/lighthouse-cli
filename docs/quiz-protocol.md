@@ -198,8 +198,10 @@ that public site (four attempts on three untimed one-page quizzes):
   submitted". The submissions list has one row per attempt, linking
   `quiz_submissions_attempt.d2l?...&qi&ai...` as "Attempt N"; an open
   attempt's row read "Attempt 1 (In progress)", and a submitted one showed
-  its grade (e.g. "6 / 25 - 24 %") when the quiz releases it. In the
-  sandbox's "View as Student" role the row showed no score.
+  its grade (e.g. "6 / 25 - 24 %", or "/ - 88.89 %" when the quiz hides the
+  points) when the quiz releases it. A quiz that does not publish results
+  showed "Pending Evaluation", and one that hides the grade had no grade
+  column.
 
 Learner attempts in the sandbox's "View as Student" role (an untimed quiz
 with two true/false questions on one page, and a 4-minute auto-submit quiz

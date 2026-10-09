@@ -106,11 +106,14 @@ def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_
                 or "still in progress" in soup.get_text(" ", strip=True).casefold()):
             raise LearnerSubmitUnknownError()
         grade = row.find("td", class_="d_gn")
-        score = re.match(r"([0-9]{1,9}(?:\.[0-9]{1,4})?) / ([0-9]{1,9}(?:\.[0-9]{1,4})?)(?: |$)",
-                         " ".join(grade.get_text(" ", strip=True).split()) if grade is not None else "")
+        cell = " ".join(grade.get_text(" ", strip=True).split()) if grade is not None else ""
+        score = re.match(r"([0-9]{1,9}(?:\.[0-9]{1,4})?) / ([0-9]{1,9}(?:\.[0-9]{1,4})?)(?: |$)", cell)
+        # "P %" alone or "[N] / [M] - P %" (points hidden or shown); a decimal comma reads as a point.
+        percent = re.fullmatch(r"(?:[0-9.,]{0,15} ?/ ?[0-9.,]{0,15} - )?([0-9]{1,4}(?:[.,][0-9]{1,4})?) %", cell)
         return {"mode": "learner", "course_id": course_id, "quiz_id": quiz_id, "attempt_id": attempt_id,
                 "submitted": True, "attempt_number": int(number[1]),
-                "score": float(score[1]) if score else None, "out_of": float(score[2]) if score else None}
+                "score": float(score[1]) if score else None, "out_of": float(score[2]) if score else None,
+                "percent": float(percent[1].replace(",", ".")) if percent else None}
     except (SessionExpiredError, LearnerNotSubmittedError):
         raise
     except Exception:
