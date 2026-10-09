@@ -940,9 +940,9 @@ def test_submit_auth_expiry_after_the_page_save_is_unknown():
 
 @pytest.mark.parametrize(("grade", "points", "percent"), [
     ("<label>6</label><label> / </label><label>25</label><label> - </label><label>24 %</label>", (6.0, 25.0), 24.0),
-    # Points hidden, percentage shown; a decimal comma.
+    # Points hidden, percentage shown, or the percentage alone; a decimal comma.
     ("<label>/ </label><label> - </label><label>88.89 %</label>", (None, None), 88.89),
-    ("<label>/ </label><label> - </label><label>88,89 %</label>", (None, None), 88.89),
+    ("<label>88.89 %</label>", (None, None), 88.89), ("<label>88,89 %</label>", (None, None), 88.89),
     # Hidden or unpublished: a blank cell, no grade cell at all, "Pending Evaluation".
     ("", (None, None), None), (None, (None, None), None), ("<label>Pending Evaluation</label>", (None, None), None),
     # A signed or stray-dash value is not read as a percentage.

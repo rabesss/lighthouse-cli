@@ -89,8 +89,8 @@ def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_
 
     Raises ``LearnerNotSubmittedError`` when the list shows the attempt in
     progress (its receipt is then not read), and ``LearnerSubmitUnknownError``
-    unless both pages agree it was submitted. The score is reported only
-    when the quiz shows it to learners.
+    unless both pages agree it was submitted. The points and percentage are
+    reported only when the quiz shows them to learners.
     """
     try:
         listing, _ = client.get_raw("/d2l/lms/quizzing/user/quiz_submissions.d2l?" + urlencode({"ou": course_id, "qi": quiz_id}),
