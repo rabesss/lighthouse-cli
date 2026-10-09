@@ -7,6 +7,7 @@ Quiz authoring/inspection APIs do not implement learner attempts.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -26,6 +27,10 @@ class AssessmentWriteUnknownError(NetworkError):
 
 
 _WRITE_UNKNOWN = "Write outcome unknown. Inspect the assessment before retrying."
+
+
+class AssignmentClosedError(ValueError):
+    """Brightspace refused a learner's own submissions after the folder closed; fixed local message only."""
 
 
 def positive_id(value: object) -> int:
@@ -171,7 +176,40 @@ class AssessmentAPI:
 
     def submissions(self, folder_id: int, *, mine: bool) -> Any:
         path = self.path("assignment", folder_id) + "/submissions/"
-        return self.client.get_json(path + "mysubmissions/" if mine else path)
+        if not mine:
+            return self.client.get_json(path)
+        try:
+            return self.client.get_json(path + "mysubmissions/")
+        except requests.HTTPError as e:
+            # Brightspace refuses a learner's own history (403) once an access-restricted folder has closed.
+            closed = self._closed_at(folder_id) if e.response is not None and e.response.status_code == 403 else None
+            if closed is None:
+                raise
+            raise AssignmentClosedError(
+                f"Brightspace refused this (HTTP 403): the assignment closed on {closed:%Y-%m-%d %H:%M} UTC and "
+                "restricts access after that, so its submissions and feedback cannot be read here. "
+                f"Check released grades with: lighthouse grades {self.course_id}") from None
+
+    def _closed_at(self, folder_id: int) -> datetime | None:
+        """When this folder closed, if its end date has passed with access restricted after it."""
+        try:
+            folder = self.read("assignment", folder_id)
+        except Exception:
+            return None
+        availability = folder.get("Availability") if isinstance(folder, dict) else None
+        if not isinstance(availability, dict):
+            return None
+        # EndDateAvailabilityType 0 restricts access after the end date (1 restricts only submission).
+        restriction, end = availability.get("EndDateAvailabilityType"), availability.get("EndDate")
+        if type(restriction) is not int or restriction != 0 or not isinstance(end, str) or len(end) > 40:
+            return None
+        try:
+            closed = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            if closed.tzinfo is None or closed >= datetime.now(timezone.utc):
+                return None
+            return closed.astimezone(timezone.utc)
+        except (ValueError, OverflowError):  # unparseable, or out of range once in UTC
+            return None
 
     def write(self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None) -> Any:
         if method not in {"POST", "PUT"}:
