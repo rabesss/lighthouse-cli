@@ -427,7 +427,7 @@ def test_a_refused_account_check_stops_every_action_and_keeps_the_cursor(remote,
     client.reset_mock()
     client.get_json.side_effect = requests.HTTPError(response=Mock(status_code=403))
     assert_refused(workflow, "could not verify the signed-in account",
-                   ("start", "page", "next", "submit", "images", "answer", "verify"))
+                   ("start", "page", "next", "previous", "submit", "images", "answer", "verify"))
     assert {call[0] for call in client.method_calls} <= {"get_json", "_session.close"}  # whoami only
     assert saved(workflow) == before
     client.get_json.side_effect = requests.HTTPError(response=Mock(status_code=500))

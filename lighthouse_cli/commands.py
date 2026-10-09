@@ -1420,6 +1420,6 @@ def cmd_quiz_detail(course_id: str, quiz_id: int, json_output: bool = False) -> 
     if instr_text:
         print(f"   Instructions: {_short(instr_text, 200)}")
 
-    print(f"\n   Take it: lighthouse student attempt start {org_id} {quiz_id}")
+    print(f"\n   Take it (starts a graded attempt): lighthouse student attempt start {org_id} {quiz_id}")
     print(f"   Past attempts in browser: {BASE_URL}/d2l/lms/quizzing/user/quiz_submissions.d2l?ou={org_id}&qi={quiz_id}")
     return 0

@@ -1212,6 +1212,7 @@ def test_format_user_error_uses_fixed_templates_for_known_local_errors(
 def test_quiz_points_to_the_learner_attempt_commands() -> None:
     with patch.object(LighthouseClient, "get_quiz_detail", return_value={"QuizId": 7, "Name": "Quiz"}):
         human = CliRunner().invoke(cli, ["quiz", "123", "7"])
-    assert "Take it: lighthouse student attempt start 123 7" in human.stdout
+    assert human.exit_code == 0
+    assert "Take it (starts a graded attempt): lighthouse student attempt start 123 7" in human.stdout
     assert "quiz_submissions.d2l?ou=123&qi=7" in human.stdout
-    assert "student attempt start COURSE_ID QUIZ_ID" in " ".join(CliRunner().invoke(cli, ["quiz", "--help"]).stdout.split())
+    assert "student attempt start COURSE_ID QUIZ_ID`. It starts a graded attempt" in " ".join(CliRunner().invoke(cli, ["quiz", "--help"]).stdout.split())
