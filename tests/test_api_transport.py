@@ -1089,3 +1089,13 @@ def test_cdp_cookie_receive_has_an_end_to_end_timeout() -> None:
             )
 
     assert observed["timeout"] == api.CDP_RESPONSE_TIMEOUT_SECONDS
+
+
+def test_a_403_keeps_its_status_for_the_attempt_account_check() -> None:
+    # The learner and preview account checks tell an ended session apart by this status.
+    client, _session = _client_with_session([FakeResponse(403)])
+
+    with pytest.raises(requests.HTTPError) as raised:
+        client._do_request("GET", "https://example.test", False, 30)
+
+    assert raised.value.response.status_code == 403

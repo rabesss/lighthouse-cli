@@ -45,7 +45,7 @@ REFUSE_UNANSWERED = "Answer and save every question on this page first."
 REFUSE_LAST_PAGE = "This is the last page. Use preview submit."
 REFUSE_NOT_LAST_PAGE = "Move to the last page with preview next before submitting."
 REFUSE_LEARNER_UNSUPPORTED = ("This page has a question the CLI cannot answer yet, so its form cannot be sent. "
-                              "Answer and submit this page in Brightspace in a browser.")
+                              "Answer this page and finish the attempt in Brightspace in a browser.")
 REFUSE_LEARNER_NOT_ON_PAGE = "That question is not on the current page."
 REFUSE_ANSWER_SHAPE = ("Answer a single-choice question with one choice id, a multi-select question with "
                        "a list of option ids and a fill-in-the-blank question with one text per blank.")
