@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
+import requests
+
 from .api import LighthouseClient, _require_positive_endpoint_id
 from .connection import active_connection
 from .credential_store import CredentialStore, _validate_credential_path
@@ -31,6 +33,10 @@ from .quiz_preview_transport import (
 
 class PreviewWorkflowError(ValueError):
     """Only fixed local messages may be passed to this exception."""
+
+
+_ACCOUNT_FORBIDDEN = ("Brightspace could not verify the signed-in account (HTTP 403). The session may have ended. "
+                      "Run: lighthouse auth login. If that does not help, the account may not have API access.")
 
 
 _UNCERTAIN = (PreviewStartUnknownError, PreviewSaveUnknownError, PreviewAdvanceUnknownError, PreviewSubmitUnknownError)
@@ -255,7 +261,13 @@ class PreviewWorkflow:
         return {**current.public_data(), "reconciled": True}
 
     def _actor(self, client: LighthouseClient) -> int:
-        who = client.get_json(client.base_url + "/d2l/api/lp/1.47/users/whoami", _replay_safe=False)
+        try:
+            who = client.get_json(client.base_url + "/d2l/api/lp/1.47/users/whoami", _replay_safe=False)
+        except requests.HTTPError as e:
+            # A signed-out session gets 403 here, as does an account without API access.
+            if e.response is not None and e.response.status_code == 403:
+                raise PreviewWorkflowError(_ACCOUNT_FORBIDDEN) from None
+            raise
         if not isinstance(who, dict):
             raise PreviewWorkflowError("The signed-in account could not be verified.")
         return _require_positive_endpoint_id(who.get("Identifier"), "account")

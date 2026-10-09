@@ -6,6 +6,7 @@ import json
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 from click.testing import CliRunner
 
 from lighthouse_cli.api import LighthouseClient, NetworkError
@@ -554,6 +555,21 @@ def test_changed_account_cannot_mutate_saved_attempt(remote):
         with pytest.raises(PreviewWorkflowError, match="different signed-in account"):
             workflow.run("next")
     advance.assert_not_called()
+
+
+@pytest.mark.parametrize(("status", "error", "message"), [
+    (403, PreviewWorkflowError, "could not verify the signed-in account"), (500, requests.HTTPError, None),
+])
+def test_a_refused_account_check_sends_nothing_and_keeps_the_cursor(remote, status, error, message):
+    workflow = PreviewWorkflow(10, 20)
+    start_local(workflow)
+    before = saved(workflow)
+    remote[0].get_json.side_effect = requests.HTTPError(response=Mock(status_code=status))
+    with patch(f"{SESSION}.advance_current_preview") as advance:
+        with pytest.raises(error, match=message):
+            workflow.run("next")
+    advance.assert_not_called()
+    assert saved(workflow) == before
 
 
 def test_uncertain_save_blocks_writes_and_recovers_by_readback(remote):

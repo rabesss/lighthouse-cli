@@ -14,6 +14,7 @@ from functools import partial
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 from click.testing import CliRunner
 
 from lighthouse_cli.api import NetworkError, SessionExpiredError
@@ -418,6 +419,20 @@ def test_another_account_cannot_use_the_cursor(remote, workflow):
     # Also when the cursor would otherwise ask for a restart.
     workflow._save({**saved(workflow), "status": "uncertain", "operation": "next"})
     assert_refused(workflow, "different signed-in account", ("page",))
+
+
+def test_a_refused_account_check_stops_every_action_and_keeps_the_cursor(remote, workflow):
+    client, _, _ = remote
+    before = saved(workflow)
+    client.reset_mock()
+    client.get_json.side_effect = requests.HTTPError(response=Mock(status_code=403))
+    assert_refused(workflow, "could not verify the signed-in account",
+                   ("start", "page", "next", "previous", "submit", "images", "answer", "verify"))
+    assert {call[0] for call in client.method_calls} <= {"get_json", "_session.close"}  # whoami only
+    assert saved(workflow) == before
+    client.get_json.side_effect = requests.HTTPError(response=Mock(status_code=500))
+    with pytest.raises(requests.HTTPError):
+        workflow.page()
 
 
 def test_nothing_runs_without_a_started_attempt(remote):

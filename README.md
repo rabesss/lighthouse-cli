@@ -1182,7 +1182,7 @@ Show detailed info for a specific quiz (settings, time limits, attempt rules, da
 
 **API call:** `GET /d2l/api/le/1.93/{orgId}/quizzes/{quizId}`
 
-Note: quiz questions and past attempts return 403 for learner role. Only quiz metadata is accessible via the API.
+To take the quiz, use `lighthouse student attempt start COURSE_ID QUIZ_ID`. It starts a graded attempt (and the clock on a timed quiz).
 
 ## API Endpoints
 
