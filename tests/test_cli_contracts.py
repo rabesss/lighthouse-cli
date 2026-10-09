@@ -1207,3 +1207,10 @@ def test_format_user_error_uses_fixed_templates_for_known_local_errors(
     assert "789" not in message
     assert "/private/" not in message
     assert "available folders" not in message.lower()
+
+
+def test_quiz_points_to_the_learner_attempt_commands() -> None:
+    with patch.object(LighthouseClient, "get_quiz_detail", return_value={"QuizId": 7, "Name": "Quiz"}):
+        human = CliRunner().invoke(cli, ["quiz", "123", "7"])
+    assert "Take it: lighthouse student attempt start 123 7" in human.stdout
+    assert "student attempt start COURSE_ID QUIZ_ID" in " ".join(CliRunner().invoke(cli, ["quiz", "--help"]).stdout.split())

@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
+import requests
+
 from .api import LighthouseClient, NetworkError, SessionExpiredError, _require_positive_endpoint_id
 from .connection import active_connection
 from .credential_store import CredentialStore, CredentialStoreError, _validate_credential_path
@@ -62,6 +64,10 @@ from .quiz_learner_transport import (
 
 class LearnerWorkflowError(ValueError):
     """Only fixed local messages may be passed to this exception."""
+
+
+_ACCOUNT_FORBIDDEN = ("Brightspace could not verify the signed-in account (HTTP 403). The session may have ended. "
+                      "Run: lighthouse auth login. If that does not help, the account may not have API access.")
 
 
 UNCERTAIN = (LearnerStartUnknownError, LearnerSaveUnknownError, LearnerAdvanceUnknownError, LearnerSubmitUnknownError)
@@ -278,7 +284,13 @@ class LearnerWorkflow:
         self.store.write_artifact(self.path, metadata={}, secret=state)
 
     def _actor(self, client: LighthouseClient) -> int:
-        who = client.get_json(client.base_url + "/d2l/api/lp/1.47/users/whoami", _replay_safe=False)
+        try:
+            who = client.get_json(client.base_url + "/d2l/api/lp/1.47/users/whoami", _replay_safe=False)
+        except requests.HTTPError as e:
+            # A signed-out session gets 403 here, as does an account without API access.
+            if e.response is not None and e.response.status_code == 403:
+                raise LearnerWorkflowError(_ACCOUNT_FORBIDDEN) from None
+            raise
         if not isinstance(who, dict):
             raise LearnerWorkflowError("The signed-in account could not be verified.")
         return _require_positive_endpoint_id(who.get("Identifier"), "account")

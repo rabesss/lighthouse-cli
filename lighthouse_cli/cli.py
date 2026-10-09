@@ -373,8 +373,8 @@ def quiz_detail(course_id: str, quiz_id: int, json_output: bool) -> None:
     """Show detailed info for a specific quiz.
 
     Shows quiz settings, time limits, attempt rules, dates, etc.
-    Note: quiz questions and past attempts are not accessible via the
-    learner API. Use the browser link to view those.
+    To read the questions and take the quiz, use
+    `lighthouse student attempt start COURSE_ID QUIZ_ID`.
     """
     raise SystemExit(cmd_quiz_detail(course_id, quiz_id, json_output))
 
