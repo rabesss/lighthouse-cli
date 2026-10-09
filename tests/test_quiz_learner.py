@@ -808,12 +808,12 @@ def test_previous_post_auth_expiry_is_unknown_after_dispatch():
 RECEIPT = b"<h1>Quiz</h1><h2>Your work has been saved and submitted</h2><p>Written: Oct 3, 2026</p>"
 
 
-def listing(*, attempt_id: int = 30, state: str = "", grade: str = "<label>6</label><label> / </label><label>25</label><label> - </label><label>24 %</label>",
+def listing(*, attempt_id: int = 30, state: str = "", grade: str | None = "<label>6</label><label> / </label><label>25</label><label> - </label><label>24 %</label>",
             rows: int = 1) -> bytes:
     href = (f"/d2l/lms/quizzing/user/quiz_submissions_attempt.d2l?isprv=&amp;qi=20&amp;ai={attempt_id}&amp;isInPopup=0"
             "&amp;cfql=0&amp;fromQB=0&amp;fromSubmissionsList=1&amp;ou=10")
-    row = (f'<tr><td><a class="d2l-link" href="{href}">Attempt 1</a>{state}</td>'
-           f'<td class="d_gn"><div class="dco d2l-grades-score">{grade}</div></td></tr>')
+    cell = "" if grade is None else f'<td class="d_gn"><div class="dco d2l-grades-score">{grade}</div></td>'
+    row = f'<tr><td><a class="d2l-link" href="{href}">Attempt 1</a>{state}</td>{cell}</tr>'
     return f"<table><tr><th>Attempt</th><th>Grade</th></tr>{row * rows}</table>".encode()
 
 
@@ -835,7 +835,7 @@ def test_submit_saves_confirms_and_verifies_the_receipt_and_list_row():
     client, prep, rpc = submit_client()
     result = submit_learner(client, **IDENTITY, page=1, current=LAST)
     assert result == {"mode": "learner", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "submitted": True,
-                      "attempt_number": 1, "score": 6.0, "out_of": 25.0}
+                      "attempt_number": 1, "score": 6.0, "out_of": 25.0, "percent": 24.0}
     save, final = client._request.call_args_list
     assert save.args[1].endswith("quiz_attempt_save_auto.d2l?dnb=0&cfql=0&fromQB=0&d2l_body_type=3&ou=10")
     assert {key: value for key, (_, value) in save.kwargs["files"]}["d2l_actionparam"] == "5,1"
@@ -938,11 +938,25 @@ def test_submit_auth_expiry_after_the_page_save_is_unknown():
     assert client._request.call_count == 2
 
 
-def test_verification_reports_no_score_when_the_quiz_hides_it():
+@pytest.mark.parametrize(("grade", "points", "percent"), [
+    ("<label>6</label><label> / </label><label>25</label><label> - </label><label>24 %</label>", (6.0, 25.0), 24.0),
+    # Points hidden, percentage shown, or the percentage alone; a decimal comma.
+    ("<label>/ </label><label> - </label><label>88.89 %</label>", (None, None), 88.89),
+    ("<label>88.89 %</label>", (None, None), 88.89), ("<label>88,89 %</label>", (None, None), 88.89),
+    # Hidden or unpublished: a blank cell, no grade cell at all, "Pending Evaluation".
+    ("", (None, None), None), (None, (None, None), None), ("<label>Pending Evaluation</label>", (None, None), None),
+    # Extra text after the percentage: the points still parse, the percentage is not guessed.
+    ("<label>6</label><label> / </label><label>25</label><label> - </label><label>24 %</label><label>(rescored)</label>",
+     (6.0, 25.0), None),
+    # A signed or stray-dash value is not read as a percentage.
+    ("<label> - </label><label>-5 %</label>", (None, None), None), ("<label>-5 %</label>", (None, None), None),
+    ("<label>-</label><label>5 %</label>", (None, None), None),
+])
+def test_verification_reports_the_grade_only_as_the_list_shows_it(grade, points, percent):
     client = LighthouseClient(read_only_auth=True)
-    client.get_raw = Mock(side_effect=[(listing(grade=""), {}), (RECEIPT, {})])
+    client.get_raw = Mock(side_effect=[(listing(grade=grade), {}), (RECEIPT, {})])
     result = verify_learner_submission(client, **IDENTITY)
-    assert result["submitted"] and result["score"] is None and result["out_of"] is None
+    assert result["submitted"] and (result["score"], result["out_of"]) == points and result["percent"] == percent
 
 
 @pytest.mark.parametrize("submissions", [

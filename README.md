@@ -269,10 +269,11 @@ and never begins a new one: if it ended elsewhere, `verify` checks whether it wa
 before anything is saved unless the cursor is on the last page; unless
 `--allow-unanswered`, it then stops while any question of the quiz is
 unanswered, listing them under `unanswered` (only the page's own answers were
-saved again). It reports the attempt number and, when the quiz shows it, the
-score. A submission that cannot be verified is settled with `verify`, which
-reads the submissions list and the receipt, and reports an attempt that is
-still in progress. `status` reads the local cursor.
+saved again). It reports the attempt number and, when the quiz shows them, the
+points (`score`, `out_of`) and percentage (`percent`). A submission that
+cannot be verified is settled with `verify`, which reads the submissions list
+and the receipt, and reports an attempt that is still in progress. `status`
+reads the local cursor.
 
 On a timed attempt `start` reads the limit once. Every reply with a page,
 and `status`, then carries `timer`: `limit_seconds`, `seconds_left`,
