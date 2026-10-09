@@ -170,6 +170,9 @@ the shared course reads above. Their JSON envelope is
 `{"course_id": 123, "data": ...}`. Responses use a
 bounded field allowlist; unknown fields and credential-bearing properties are
 not returned. Classlists currently omit email and login identifiers.
+Brightspace refuses `assignment-history` (403) once an assignment's end date
+has passed with access restricted; the CLI then says when it closed and to
+check released grades with `lighthouse grades COURSE_ID`.
 
 Quiz creation makes a **hidden shell without questions or a gradebook link**.
 `--layout all` displays questions together; `--layout one-way` selects one

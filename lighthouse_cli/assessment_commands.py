@@ -25,7 +25,12 @@ if TYPE_CHECKING:
 def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], Any]) -> None:
     # Imported here, not at module level, so role --help skips the HTTP stack.
     from .api import LighthouseClient
-    from .assessment_api import AssessmentAPI, AssessmentWriteUnknownError, project
+    from .assessment_api import (
+        AssessmentAPI,
+        AssessmentWriteUnknownError,
+        AssignmentClosedError,
+        project,
+    )
 
     client = None
     try:
@@ -36,6 +41,7 @@ def _run(course_id: int, json_output: bool, action: Callable[[AssessmentAPI], An
         message = (
             "Write outcome unknown. Inspect the assessment before retrying."
             if isinstance(exc, AssessmentWriteUnknownError)
+            else str(exc) if isinstance(exc, AssignmentClosedError)
             else format_user_error(exc)
         )
         fail(message, json_output, {"course_id": course_id, "data": None, "error": message})
