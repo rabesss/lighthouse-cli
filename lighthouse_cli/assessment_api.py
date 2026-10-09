@@ -199,17 +199,17 @@ class AssessmentAPI:
         availability = folder.get("Availability") if isinstance(folder, dict) else None
         if not isinstance(availability, dict):
             return None
-        # AvailabilityDateType 0 restricts access after the end date (1 restricts only submission).
+        # EndDateAvailabilityType 0 restricts access after the end date (1 restricts only submission).
         restriction, end = availability.get("EndDateAvailabilityType"), availability.get("EndDate")
         if type(restriction) is not int or restriction != 0 or not isinstance(end, str) or len(end) > 40:
             return None
         try:
             closed = datetime.fromisoformat(end.replace("Z", "+00:00"))
-        except ValueError:
+            if closed.tzinfo is None or closed >= datetime.now(timezone.utc):
+                return None
+            return closed.astimezone(timezone.utc)
+        except (ValueError, OverflowError):  # unparseable, or out of range once in UTC
             return None
-        if closed.tzinfo is None or closed >= datetime.now(timezone.utc):
-            return None
-        return closed.astimezone(timezone.utc)
 
     def write(self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None) -> Any:
         if method not in {"POST", "PUT"}:

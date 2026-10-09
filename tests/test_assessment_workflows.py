@@ -25,7 +25,6 @@ from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES
 from lighthouse_cli.connection import LIGHTHOUSE, Connection, active_connection
 from lighthouse_cli.credential_store import CredentialStore
-from lighthouse_cli.display import format_user_error
 from lighthouse_cli.quiz_rules import navigation_rules
 
 
@@ -175,54 +174,64 @@ def _http_error(status):
 
 
 def _closed(end, restriction=0):
-    return {"Availability": {"EndDate": end, "EndDateAvailabilityType": restriction}}
+    return {"Name": "cookie=NEVER_PRINT", "Availability": {"EndDate": end, "EndDateAvailabilityType": restriction}}
 
 
 CLOSED = ("Brightspace refused this (HTTP 403): the assignment closed on 2026-03-05 18:29 UTC and restricts access "
           "after that, so its submissions and feedback cannot be read here. "
           "Check released grades with: lighthouse grades 12")
 PAST = "2026-03-05T18:29:00.000Z"
+DENIED = "Permission denied (HTTP 403)."
 
 
-@pytest.mark.parametrize(("history", "folder", "closed", "reads"), [
+@pytest.mark.parametrize(("history", "folder", "error", "reads"), [
     # Closed with access restricted after the end date: say so, in UTC, and where grades are.
-    (_http_error(403), _closed(PAST), True, 2),
-    (_http_error(403), _closed("2026-03-05T23:59:00+05:30"), True, 2),
+    (_http_error(403), _closed(PAST), CLOSED, 2),
+    (_http_error(403), _closed("2026-03-05T23:59:00+05:30"), CLOSED, 2),
     # Any other availability, or an unreadable folder: the original 403.
-    (_http_error(403), _closed(PAST, None), False, 2),
-    (_http_error(403), {"Availability": {"EndDate": PAST}}, False, 2),
-    (_http_error(403), _closed(PAST, 1), False, 2),
-    (_http_error(403), _closed(PAST, 2), False, 2),
-    (_http_error(403), _closed(PAST, "0"), False, 2),
-    (_http_error(403), _closed(PAST, False), False, 2),
-    (_http_error(403), _closed("2999-01-01T00:00:00Z"), False, 2),
-    (_http_error(403), _closed(None), False, 2),
-    (_http_error(403), _closed("2026-03-05T18:29:00"), False, 2),
-    (_http_error(403), _closed("2026-03-05"), False, 2),
-    (_http_error(403), _closed("cookie=NEVER_PRINT"), False, 2),
-    (_http_error(403), _closed(PAST + " " * 40), False, 2),
-    (_http_error(403), {"Availability": None}, False, 2),
-    (_http_error(403), {"Availability": "x"}, False, 2),
-    (_http_error(403), [PAST], False, 2),
-    (_http_error(403), _http_error(403), False, 2),
-    (_http_error(403), requests.ConnectionError("cookie=NEVER_PRINT"), False, 2),
+    (_http_error(403), _closed(PAST, None), DENIED, 2),
+    (_http_error(403), {"Availability": {"EndDate": PAST}}, DENIED, 2),
+    (_http_error(403), _closed(PAST, 1), DENIED, 2),
+    (_http_error(403), _closed(PAST, 2), DENIED, 2),
+    (_http_error(403), _closed(PAST, "0"), DENIED, 2),
+    (_http_error(403), _closed(PAST, False), DENIED, 2),
+    (_http_error(403), _closed("2999-01-01T00:00:00Z"), DENIED, 2),
+    (_http_error(403), _closed(None), DENIED, 2),
+    (_http_error(403), _closed("2026-03-05T18:29:00"), DENIED, 2),
+    (_http_error(403), _closed("2026-03-05"), DENIED, 2),
+    (_http_error(403), _closed("cookie=NEVER_PRINT"), DENIED, 2),
+    (_http_error(403), _closed(PAST + " " * 40), DENIED, 2),
+    (_http_error(403), _closed("0001-01-01T00:00:00+01:00"), DENIED, 2),
+    (_http_error(403), _closed("9999-12-31T23:59:00-01:00"), DENIED, 2),
+    (_http_error(403), {"Availability": None}, DENIED, 2),
+    (_http_error(403), {"Availability": "x"}, DENIED, 2),
+    (_http_error(403), [PAST], DENIED, 2),
+    (_http_error(403), _http_error(403), DENIED, 2),
+    (_http_error(403), requests.ConnectionError("cookie=NEVER_PRINT"), DENIED, 2),
     # Any other refusal reads nothing more.
-    (requests.HTTPError("403 Client Error"), _closed(PAST), False, 1),
-    (_http_error(404), _closed(PAST), False, 1),
-    (NetworkError("cookie=NEVER_PRINT"), _closed(PAST), False, 1),
+    (requests.HTTPError("403 Client Error"), _closed(PAST), DENIED, 1),
+    (_http_error(404), _closed(PAST), "Not found (HTTP 404).", 1),
+    (NetworkError("cookie=NEVER_PRINT"), _closed(PAST), "Network error. Check your connection and try again.", 1),
 ], ids=["closed", "closed-offset", "null-type", "no-type", "submission-restricted", "hidden", "string-type",
-        "false-type", "open", "null-date", "naive-date", "date-only", "secret-date", "long-date", "no-availability",
-        "bad-availability", "bad-folder", "folder-403", "folder-network", "no-response", "404", "network"])
-def test_learner_history_says_why_a_closed_assignment_is_refused(history, folder, closed, reads):
+        "false-type", "open", "null-date", "naive-date", "date-only", "secret-date", "long-date", "min-date",
+        "max-date", "no-availability", "bad-availability", "bad-folder", "folder-403", "folder-network",
+        "no-response", "404", "network"])
+def test_learner_history_says_why_a_closed_assignment_is_refused(history, folder, error, reads):
     with patch("lighthouse_cli.api.LighthouseClient") as client:
         client.return_value.get_json.side_effect = [history, folder]
         result = CliRunner().invoke(cli, ["student", "assignment-history", "12", "34", "--json"])
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {"course_id": 12, "data": None,
-                                         "error": CLOSED if closed else format_user_error(history)}
+    assert json.loads(result.stdout) == {"course_id": 12, "data": None, "error": error}
     assert [c.args for c in client.return_value.get_json.call_args_list] == [
         ("/12/dropbox/folders/34/submissions/mysubmissions/",), ("/12/dropbox/folders/34",)][:reads]
     assert "NEVER_PRINT" not in result.output
+
+
+def test_learner_history_closed_message_goes_to_stderr():
+    with patch("lighthouse_cli.api.LighthouseClient") as client:
+        client.return_value.get_json.side_effect = [_http_error(403), _closed(PAST)]
+        result = CliRunner().invoke(cli, ["student", "assignment-history", "12", "34"])
+    assert (result.exit_code, result.stdout, result.stderr.strip()) == (1, "", CLOSED)
 
 
 def test_instructor_submissions_refusal_reads_nothing_more():
@@ -230,7 +239,7 @@ def test_instructor_submissions_refusal_reads_nothing_more():
         client.return_value.get_json.side_effect = [_http_error(403), _closed(PAST)]
         result = CliRunner().invoke(cli, ["instructor", "submissions", "12", "34", "--json"])
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["error"] == "Permission denied (HTTP 403)."
+    assert json.loads(result.stdout)["error"] == DENIED
     client.return_value.get_json.assert_called_once_with("/12/dropbox/folders/34/submissions/")
 
 
