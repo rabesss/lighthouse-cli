@@ -773,6 +773,76 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
     assert "Valid sibling" in captured.out
 
 
+@pytest.mark.parametrize(
+    ("submission_type", "expected"),
+    [
+        (0, "File submission"),
+        (1, "Text submission"),
+        (2, "On paper submission"),
+        (3, "Observed in person"),
+        (4, "File or text submission"),
+        ("1", "Text submission"),
+        (" 02 ", "On paper submission"),
+        ("0000000001", "Text submission"),
+        (5, ""),
+        (-1, ""),
+        ("7", ""),
+        (True, ""),
+        (False, ""),
+        (1.0, ""),
+        (None, ""),
+        ({"Id": 1}, ""),
+        ([1], ""),
+        ("\x1b[31m1", ""),
+        ("File upload", "File upload"),
+    ],
+)
+def test_assignment_submission_type_is_labelled(capsys, submission_type, expected) -> None:
+    """Brightspace sends SubmissionType as a number; JSON shows its label."""
+    client = _dropbox_client([_folder(101, SubmissionType=submission_type)])
+
+    structured, _ = _render_json_and_human(capsys, show._show_course_assignments, client)
+
+    assert structured["assignments"][0]["submission_type"] == expected
+
+
+@pytest.mark.parametrize(
+    ("submission_type", "category_name", "expected"),
+    [
+        (1, "Assignment", "Text submission"),
+        (1, {"token": "SECRET"}, "Text submission"),
+        (9, "Assignment", "Assignment"),
+        (None, "Assignment", "Assignment"),
+        (None, {"token": "SECRET"}, ""),
+    ],
+)
+def test_assignment_submission_type_prefers_the_documented_field(
+    capsys, submission_type, category_name, expected
+) -> None:
+    """The undocumented CategoryName only fills in when SubmissionType gives no label."""
+    client = _dropbox_client([
+        _folder(101, SubmissionType=submission_type, CategoryName=category_name)
+    ])
+
+    structured, captured = _render_json_and_human(capsys, show._show_course_assignments, client)
+
+    assert structured["assignments"][0]["submission_type"] == expected
+    assert "SECRET" not in json.dumps(structured) + captured.out + captured.err
+
+
+def test_assignments_json_command_reports_submission_type_label() -> None:
+    """The assignments command prints one JSON document with the label."""
+    with patch.object(
+        LighthouseClient, "get_dropbox_folders", return_value=[_folder(101, SubmissionType=0)]
+    ):
+        result = CliRunner().invoke(cli, ["assignments", "123", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["course_id"] == 123
+    assert payload["assignments"][0]["submission_type"] == "File submission"
+
+
 def test_enrollment_only_name_resolution_and_folder_lookup() -> None:
     client = Mock(spec=LighthouseClient)
     client.get_enrolled_courses.return_value = [

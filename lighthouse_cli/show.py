@@ -26,6 +26,7 @@ from .display import format_user_error, safe_display_text
 from .display import output_json as _output_json
 from .display import print_table as _print_table
 from .display import short as _short
+from .submit import _submission_type
 from .utils import _course_identifier, get_enrolled_course_catalog
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,14 @@ MAX_WORKERS = 5
 _MAX_DISPLAY_TEXT_LENGTH = 512
 _MAX_RICH_TEXT_LENGTH = 4096
 _MAX_ANNOUNCEMENT_ATTACHMENT_SIZE = (1 << 63) - 1
+# Brightspace's dropbox SUBMISSIONTYPE_T values, labelled as its UI names them.
+_SUBMISSION_TYPE_LABELS = {
+    0: "File submission",
+    1: "Text submission",
+    2: "On paper submission",
+    3: "Observed in person",
+    4: "File or text submission",
+}
 
 def _close_client(client: Any) -> None:
     """Close a client when its implementation exposes an explicit close hook.
@@ -776,6 +785,18 @@ def _positive_projection_id(value: Any) -> int | None:
     return identifier if identifier > 0 else None
 
 
+def _assignment_submission_type(folder: dict[str, Any]) -> str:
+    """Label a folder's submission type, which Brightspace sends as a number."""
+    code = _submission_type(folder.get("SubmissionType"))
+    label = (
+        _SUBMISSION_TYPE_LABELS.get(code, "") if code is not None
+        # Not a number: keep descriptive text as before, never an unknown code.
+        else _safe_announcement_text(folder.get("SubmissionType"))
+    )
+    # CategoryName is not a documented folder field, so it is only a last fallback.
+    return label or _safe_announcement_text(folder.get("CategoryName"))
+
+
 def _show_course_assignments(
     client: LighthouseClient,
     org_id: int,
@@ -875,9 +896,6 @@ def _show_course_assignments(
         due_date = _safe_announcement_text(f.get("DueDate"))
         if not due_date:
             due_date = _safe_announcement_text(f.get("Due"))
-        category_name = _safe_announcement_text(f.get("CategoryName"))
-        if not category_name:
-            category_name = _safe_announcement_text(f.get("SubmissionType"))
         start_date = _safe_announcement_text(availability.get("StartDate")) or None
         end_date = _safe_announcement_text(availability.get("EndDate")) or None
         assignments.append({
@@ -891,7 +909,7 @@ def _show_course_assignments(
             "attachment_count": len(attachments), "attachments": attachments,
             "custom_instructions": instructions or None,
             "custom_instructions_preview": instructions_preview,
-            "submission_type": category_name,
+            "submission_type": _assignment_submission_type(f),
             "availability": {"start": start_date, "end": end_date} if (start_date or end_date) else None,
         })
 
