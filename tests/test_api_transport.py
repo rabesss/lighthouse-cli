@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import types
 import urllib.request
 from collections.abc import Iterator
@@ -15,6 +16,7 @@ import pytest
 import requests
 
 import lighthouse_cli.api as api
+from lighthouse_cli import connection, session_renewal
 from lighthouse_cli.api import (
     BASE_URL,
     MAX_HTML_TOPIC_RESPONSE_BYTES,
@@ -27,6 +29,14 @@ from lighthouse_cli.api import (
     _extract_filename,
     resolve_course_id,
 )
+from lighthouse_cli.assessment_api import AssessmentAPI, AssignmentClosedError
+from lighthouse_cli.config import cookie_file_is_legacy, load_cookies, save_cookies
+from lighthouse_cli.connection import LIGHTHOUSE, Connection
+from lighthouse_cli.credential_store import CredentialStore
+from lighthouse_cli.ms_errors import RELOGIN_CATEGORIES
+from lighthouse_cli.quiz_learner_session import LearnerWorkflow, LearnerWorkflowError
+from lighthouse_cli.quiz_preview_session import PreviewWorkflow, PreviewWorkflowError
+from lighthouse_cli.session_renewal import RenewalError, RenewalResult, RenewalUnavailableError
 
 SYNTHETIC_COOKIES = {
     "d2lSameSiteCanaryA": "a",
@@ -1099,3 +1109,824 @@ def test_a_403_keeps_its_status_for_the_attempt_account_check() -> None:
         client._do_request("GET", "https://example.test", False, 30)
 
     assert raised.value.response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Session probe (whoami) and automatic sign-in
+# ---------------------------------------------------------------------------
+
+RESOURCE_URL = BASE_URL + "/d2l/api/lp/1.47/enrollments/myenrollments/"
+WHOAMI_URL = BASE_URL + "/d2l/api/lp/1.47/users/whoami"
+RENEWED_COOKIES = dict.fromkeys(api.COOKIE_NAMES, "renewed-sentinel")
+BROWSER_COOKIES = dict.fromkeys(api.COOKIE_NAMES, "browser-sentinel")
+LEGACY_COOKIES = dict.fromkeys(api.COOKIE_NAMES, "legacy-sentinel")
+PRIVATE_NAME = "Private Learner Sentinel"
+
+
+def _whoami(identifier: object = "4242") -> FakeResponse:
+    return FakeResponse(200, {"Identifier": identifier, "FirstName": PRIVATE_NAME})
+
+
+class NonJsonResponse(FakeResponse):
+    def json(self) -> object:
+        raise ValueError(PRIVATE_NAME)
+
+
+class JarSession:
+    """Session double with the cookie jar that installed cookies populate.
+
+    Queued exceptions are raised instead of returned.
+    """
+
+    def __init__(self, responses: list[FakeResponse | Exception]) -> None:
+        self.responses = iter(responses)
+        self.calls: list[str] = []
+        self.urls: list[str] = []
+        self.cookies = requests.cookies.RequestsCookieJar()
+
+    def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+        self.calls.append(method)
+        self.urls.append(url)
+        item = next(self.responses)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self) -> None:
+        pass
+
+
+def _jar_client(
+    responses: list[FakeResponse | Exception],
+    *,
+    read_only_auth: bool = False,
+    cookies: dict[str, str] | None = SYNTHETIC_COOKIES,
+) -> tuple[LighthouseClient, JarSession]:
+    """A client on a fake session; ``cookies=None`` loads them from disk."""
+    client = LighthouseClient(read_only_auth=read_only_auth)
+    client._csrf_token = "synthetic-csrf"
+    session = JarSession(responses)
+    client._session = session
+    if cookies is not None:
+        client._loaded = True
+        client._cookies = dict(cookies)
+    return client, session
+
+
+def _jar(session: JarSession) -> dict[str, str]:
+    return {cookie.name: cookie.value or "" for cookie in session.cookies}
+
+
+@pytest.fixture
+def renewal(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Unattended sign-in is configured and signs in with fresh cookies."""
+    monkeypatch.setattr(api, "unattended_configured", lambda: True)
+    renew = MagicMock(return_value=RenewalResult(dict(RENEWED_COOKIES), signed_in=True))
+    monkeypatch.setattr(api, "renew_session", renew)
+    return renew
+
+
+@pytest.fixture
+def browser(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """A signed-in browser that CDP can copy cookies from."""
+    refresh = MagicMock(return_value=dict(BROWSER_COOKIES))
+    monkeypatch.setattr(api, "refresh_auth_from_browser", refresh)
+    return refresh
+
+
+@contextmanager
+def _sign_in_lock_held_elsewhere() -> Iterator[None]:
+    """Hold the sign-in lock from another thread for the duration."""
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with session_renewal.renewal_lock():
+            held.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert held.wait(5)
+        yield
+    finally:
+        release.set()
+        thread.join(5)
+
+
+def _write_legacy_cookies() -> bytes:
+    path = CredentialStore().cookie_file
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    original = json.dumps({"cookies": LEGACY_COOKIES}).encode("utf-8")
+    path.write_bytes(original)
+    path.chmod(0o600)
+    return original
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        pytest.param(_whoami("4242"), "valid", id="string-identifier"),
+        pytest.param(_whoami(4242), "valid", id="integer-identifier"),
+        pytest.param(FakeResponse(200, {"FirstName": PRIVATE_NAME}), "invalid", id="no-identifier"),
+        pytest.param(_whoami("0"), "invalid", id="zero-identifier"),
+        pytest.param(_whoami(True), "invalid", id="boolean-identifier"),
+        pytest.param(FakeResponse(200, ["4242"]), "invalid", id="not-an-object"),
+        pytest.param(NonJsonResponse(200), "invalid", id="not-json"),
+    ],
+)
+def test_probe_reads_only_a_positive_whoami_identifier(
+    response: FakeResponse,
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client, session = _jar_client([response], read_only_auth=True)
+
+    assert client.probe_session() == expected
+
+    assert session.calls == ["GET"]
+    assert response.closed is True
+    captured = capsys.readouterr()
+    assert PRIVATE_NAME not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_signed_out_whoami_is_invalid_for_a_read_only_client(
+    status: int,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, _session = _jar_client([FakeResponse(status)], read_only_auth=True)
+    assert client.probe_session() == "invalid"
+
+    client, _session = _jar_client([FakeResponse(status)], read_only_auth=True)
+    assert client.check_auth() is False
+
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(FakeResponse(503), id="server-error"),
+        pytest.param(requests.ConnectionError("NETWORK_SENTINEL"), id="connection-error"),
+    ],
+)
+def test_probe_reports_unavailable_when_d2l_does_not_answer(
+    failure: FakeResponse | Exception,
+) -> None:
+    client, _session = _jar_client([failure] * (LighthouseClient._MAX_RETRIES + 1), read_only_auth=True)
+
+    with patch.object(api.time, "sleep"):
+        assert client.probe_session() == "unavailable"
+
+
+def test_check_auth_keeps_its_exception_contract() -> None:
+    # A server error still reads as signed out; a transport failure still raises.
+    client, _session = _jar_client([FakeResponse(503)], read_only_auth=True)
+    assert client.check_auth() is False
+
+    client, _session = _jar_client(
+        [requests.ConnectionError("NETWORK_SENTINEL")] * (LighthouseClient._MAX_RETRIES + 1),
+        read_only_auth=True,
+    )
+    with patch.object(api.time, "sleep"):
+        with pytest.raises(NetworkError):
+            client.check_auth()
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        pytest.param(_whoami(), "valid", id="signed-in"),
+        pytest.param(FakeResponse(401), "invalid", id="signed-out"),
+    ],
+)
+def test_probe_cookies_sends_only_the_candidate_cookies(
+    response: FakeResponse,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    save_cookies(dict(BROWSER_COOKIES))
+    on_disk = CredentialStore().cookie_file.read_bytes()
+    sessions: list[JarSession] = []
+
+    def new_session() -> JarSession:
+        sessions.append(JarSession([response]))
+        return sessions[-1]
+
+    monkeypatch.setattr(api.requests, "Session", new_session)
+    monkeypatch.setattr(api, "load_cookies", MagicMock(side_effect=AssertionError("cookies.json read")))
+
+    assert api.probe_cookies(dict(RENEWED_COOKIES)) == expected
+
+    [session] = sessions
+    assert session.calls == ["GET"]
+    assert _jar(session) == RENEWED_COOKIES
+    renewal.assert_not_called()
+    browser.assert_not_called()
+    assert CredentialStore().cookie_file.read_bytes() == on_disk
+
+
+def test_a_403_while_whoami_is_signed_in_stays_a_permission_error(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    # Genuine denials (a closed folder, a hidden course) keep their 403.
+    denied, signed_in = FakeResponse(403), _whoami()
+    client, session = _jar_client([denied, signed_in, FakeResponse(403), _whoami()])
+
+    with pytest.raises(requests.HTTPError) as raised:
+        client._request("GET", RESOURCE_URL)
+
+    assert raised.value.response is denied
+    assert denied.closed
+    assert signed_in.closed
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL]
+
+    # The answer is not remembered: the session may expire in between.
+    with pytest.raises(requests.HTTPError):
+        client._request("GET", RESOURCE_URL)
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL, RESOURCE_URL, WHOAMI_URL]
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+_SIGNED_OUT_WHOAMI = [
+    pytest.param(401, None, id="whoami-401"),
+    pytest.param(403, None, id="whoami-403"),
+    pytest.param(302, {"Location": "/d2l/login"}, id="whoami-login-redirect"),
+]
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize(("status", "headers"), _SIGNED_OUT_WHOAMI)
+def test_a_403_from_a_signed_out_session_signs_in_once_and_replays_once(
+    status: int,
+    headers: dict[str, str] | None,
+    method: str,
+    renewal: MagicMock,
+    browser: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # D2L answers some reads of an expired session with 403, not 401.
+    client, session = _jar_client(
+        [FakeResponse(403), FakeResponse(status, headers=headers), FakeResponse(200)],
+    )
+
+    assert client._request(method, RESOURCE_URL).status_code == 200
+
+    assert session.calls == [method, "GET", method]
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL, RESOURCE_URL]
+    renewal.assert_called_once_with(
+        observed_cookies=SYNTHETIC_COOKIES, validate=api.probe_cookies, automatic=True,
+    )
+    browser.assert_not_called()
+    assert client.renewed_session is True
+    assert _jar(session) == RENEWED_COOKIES
+    assert client._csrf_token is None
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "renewed-sentinel" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "whoami",
+    [
+        pytest.param(FakeResponse(500), id="server-error"),
+        pytest.param(FakeResponse(503), id="unavailable"),
+        pytest.param(FakeResponse(429, headers={"Retry-After": "60"}), id="rate-limited"),
+        pytest.param(FakeResponse(302, headers={"Location": "/d2l/other"}), id="other-redirect"),
+        pytest.param(requests.ConnectionError("SENTINEL"), id="network"),
+    ],
+)
+def test_a_403_is_kept_when_whoami_gives_no_answer(
+    whoami: FakeResponse | Exception,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    # The check is one attempt: no retry, no backoff, no Retry-After wait.
+    denied = FakeResponse(403)
+    client, session = _jar_client([denied, whoami])
+
+    with patch.object(api.time, "sleep") as sleep, pytest.raises(requests.HTTPError) as raised:
+        client._request("GET", RESOURCE_URL)
+
+    assert raised.value.response is denied
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL]
+    sleep.assert_not_called()
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+def test_the_whoami_check_has_its_own_short_timeout_and_no_request_options(renewal: MagicMock) -> None:
+    client, session = _jar_client([FakeResponse(403), _whoami()])
+    seen: list[dict[str, object]] = []
+    request = session.request
+
+    def recording(method: str, url: str, **kwargs: object) -> FakeResponse:
+        seen.append(kwargs)
+        return request(method, url, **kwargs)
+
+    session.request = recording  # type: ignore[method-assign]
+    with pytest.raises(requests.HTTPError):
+        client._request("GET", RESOURCE_URL, stream=True, headers={"Range": "bytes=0-1"})
+
+    assert seen[1] == {"allow_redirects": False, "timeout": LighthouseClient._SIGNED_OUT_CHECK_TIMEOUT}
+    renewal.assert_not_called()
+
+
+def test_a_403_returned_to_the_caller_is_not_checked(renewal: MagicMock) -> None:
+    client, session = _jar_client([FakeResponse(403)])
+
+    assert client._request("GET", RESOURCE_URL, _skip_raise=True).status_code == 403
+
+    assert session.urls == [RESOURCE_URL]
+    renewal.assert_not_called()
+
+
+def test_a_signed_out_403_without_unattended_sign_in_refreshes_from_the_browser(
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(403), FakeResponse(403), FakeResponse(200)])
+
+    assert client._request("GET", RESOURCE_URL).status_code == 200
+
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL, RESOURCE_URL]
+    browser.assert_called_once_with()
+    assert client.cookies == BROWSER_COOKIES
+    assert client.renewed_session is False
+
+
+def test_a_signed_out_403_with_no_browser_reports_an_expired_session(
+    browser: MagicMock,
+) -> None:
+    browser.side_effect = RuntimeError("no browser")
+    client, session = _jar_client([FakeResponse(403), FakeResponse(403)])
+
+    with pytest.raises(SessionExpiredError, match=r"auto-refresh failed"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL]
+
+
+def test_a_403_after_signing_in_again_does_not_sign_in_twice(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client(
+        [FakeResponse(403), FakeResponse(403), FakeResponse(403), FakeResponse(403)],
+    )
+
+    with pytest.raises(SessionExpiredError, match="auto-refresh already attempted"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL, RESOURCE_URL, WHOAMI_URL]
+    renewal.assert_called_once()
+    browser.assert_not_called()
+
+
+def test_a_403_after_signing_in_again_is_a_permission_error_if_whoami_is_signed_in(
+    renewal: MagicMock,
+) -> None:
+    denied = FakeResponse(403)
+    client, session = _jar_client([FakeResponse(403), FakeResponse(403), denied, _whoami()])
+
+    with pytest.raises(requests.HTTPError) as raised:
+        client._request("GET", RESOURCE_URL)
+
+    assert raised.value.response is denied
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL, RESOURCE_URL, WHOAMI_URL]
+    renewal.assert_called_once()
+
+
+def test_a_403_after_signing_in_for_a_401_does_not_sign_in_twice(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(401), FakeResponse(403), FakeResponse(403)])
+
+    with pytest.raises(SessionExpiredError, match="auto-refresh already attempted"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.urls == [RESOURCE_URL, RESOURCE_URL, WHOAMI_URL]
+    renewal.assert_called_once()
+    browser.assert_not_called()
+
+
+def test_a_failed_sign_in_after_a_signed_out_403_records_its_category(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    renewal.side_effect = RenewalError("code_rejected")
+    client, session = _jar_client([FakeResponse(403), FakeResponse(403)])
+
+    with pytest.raises(SessionExpiredError, match="automatic sign-in failed: code_rejected"):
+        client._request("GET", RESOURCE_URL)
+
+    assert client.renewal_failure == "code_rejected"
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL]
+    browser.assert_not_called()
+
+
+def test_a_signed_out_403_on_a_later_page_resumes_that_page_once(renewal: MagicMock) -> None:
+    second_page = f"{ENROLLMENTS_PAGE}?page=2"
+    client, session = _jar_client([
+        FakeResponse(200, {"Items": [{"id": 1}], "Next": second_page}),
+        FakeResponse(403),
+        FakeResponse(403),
+        FakeResponse(200, {"Items": [{"id": 2}], "Next": None}),
+    ])
+
+    assert client.get_enrollments() == [{"id": 1}, {"id": 2}]
+
+    assert session.urls == [ENROLLMENTS_PAGE, second_page, WHOAMI_URL, second_page]
+    renewal.assert_called_once()
+
+
+def test_a_closed_folder_403_still_reports_the_closed_assignment(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    folder = {"Availability": {"EndDateAvailabilityType": 0, "EndDate": "2020-01-01T00:00:00.000Z"}}
+    client, session = _jar_client([FakeResponse(403), _whoami(), FakeResponse(200, folder)])
+
+    with pytest.raises(AssignmentClosedError):
+        AssessmentAPI(client, 12).submissions(34, mine=True)
+
+    assert session.urls[1] == WHOAMI_URL
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("workflow", "error"),
+    [
+        pytest.param(LearnerWorkflow, LearnerWorkflowError, id="learner"),
+        pytest.param(PreviewWorkflow, PreviewWorkflowError, id="preview"),
+    ],
+)
+def test_quiz_account_checks_still_see_their_403(
+    workflow: type[LearnerWorkflow | PreviewWorkflow],
+    error: type[Exception],
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(403)])
+
+    with pytest.raises(error, match=r"HTTP 403"):
+        object.__new__(workflow)._actor(client)
+
+    assert session.urls == [WHOAMI_URL]
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+def test_a_signed_out_403_after_signing_in_for_missing_cookies_is_final(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(403), FakeResponse(403)], cookies={})
+
+    with pytest.raises(SessionExpiredError, match="auto-refresh already attempted"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.urls == [RESOURCE_URL, WHOAMI_URL]
+    renewal.assert_called_once()
+    browser.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_an_expired_session_signs_in_once_and_replays_once(
+    method: str,
+    renewal: MagicMock,
+    browser: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client, session = _jar_client([FakeResponse(401), FakeResponse(200)])
+
+    assert client._request(method, RESOURCE_URL).status_code == 200
+
+    assert session.calls == [method, method]
+    renewal.assert_called_once_with(
+        observed_cookies=SYNTHETIC_COOKIES, validate=api.probe_cookies, automatic=True,
+    )
+    browser.assert_not_called()
+    assert client.renewed_session is True
+    assert client.renewal_failure is None
+    assert client.cookies == RENEWED_COOKIES
+    assert _jar(session) == RENEWED_COOKIES
+    assert client._csrf_token is None
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Signing in again with the stored authenticator" in captured.err
+    assert "renewed-sentinel" not in captured.err
+
+
+def test_reusing_another_callers_sign_in_is_not_reported_as_renewed(renewal: MagicMock) -> None:
+    renewal.return_value = RenewalResult(dict(RENEWED_COOKIES), signed_in=False)
+    client, _session = _jar_client([FakeResponse(401), FakeResponse(200)])
+
+    client._request("GET", RESOURCE_URL)
+
+    assert client.renewed_session is False
+    assert client.cookies == RENEWED_COOKIES
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_check_auth_signs_in_again_after_a_signed_out_whoami(
+    status: int,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(status), _whoami()])
+
+    assert client.check_auth() is True
+
+    assert session.calls == ["GET", "GET"]
+    renewal.assert_called_once()
+    browser.assert_not_called()
+    assert client.renewed_session is True
+
+
+def test_check_auth_without_unattended_sign_in_still_refreshes_from_the_browser(
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(403), _whoami()])
+
+    assert client.check_auth() is True
+
+    assert session.calls == ["GET", "GET"]
+    browser.assert_called_once_with()
+    assert client.cookies == BROWSER_COOKIES
+    assert load_cookies() == BROWSER_COOKIES
+    assert client.renewed_session is False
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(None, id="no-cookies-file"),
+        pytest.param({"d2lSessionVal": "partial"}, id="partial-cookies"),
+    ],
+)
+def test_missing_cookies_sign_in_before_the_request_when_configured(
+    stored: dict[str, str] | None,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(200)], cookies=stored)
+
+    assert client._request("GET", RESOURCE_URL).status_code == 200
+
+    renewal.assert_called_once_with(
+        observed_cookies=stored or {}, validate=api.probe_cookies, automatic=True,
+    )
+    browser.assert_not_called()
+    assert session.calls == ["GET"]
+    assert client.renewed_session is True
+    assert client.cookies == RENEWED_COOKIES
+
+
+def test_missing_cookies_without_unattended_sign_in_fail_before_any_request(
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([], cookies=None)
+
+    with pytest.raises(SessionExpiredError, match="no cookies found"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.calls == []
+    browser.assert_not_called()
+
+
+def test_missing_cookies_and_no_matching_authenticator_never_open_the_browser(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    renewal.side_effect = RenewalUnavailableError()
+    client, session = _jar_client([], cookies=None)
+
+    with pytest.raises(SessionExpiredError, match="no cookies found"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.calls == []
+    renewal.assert_called_once()
+    browser.assert_not_called()
+
+
+def test_expiry_with_no_matching_authenticator_falls_back_to_the_browser(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    renewal.side_effect = RenewalUnavailableError()
+    client, session = _jar_client([FakeResponse(401), FakeResponse(200)])
+
+    assert client._request("GET", RESOURCE_URL).status_code == 200
+
+    assert session.calls == ["GET", "GET"]
+    browser.assert_called_once_with()
+    assert client.cookies == BROWSER_COOKIES
+    assert client.renewed_session is False
+    assert client.renewal_failure is None
+
+
+@pytest.mark.parametrize("category", sorted(RELOGIN_CATEGORIES))
+def test_a_failed_sign_in_records_its_category_and_skips_the_browser(
+    category: str,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    renewal.side_effect = RenewalError(category)
+    client, session = _jar_client([FakeResponse(401)])
+
+    with pytest.raises(SessionExpiredError) as raised:
+        client._request("GET", RESOURCE_URL)
+
+    assert f"automatic sign-in failed: {category}" in str(raised.value)
+    assert client.renewal_failure == category
+    assert client.renewed_session is False
+    assert session.calls == ["GET"]
+    browser.assert_not_called()
+    assert client.cookies == SYNTHETIC_COOKIES
+
+
+_NO_RECOVERY_CASES = [
+    pytest.param("POST", {}, "default", id="post"),
+    pytest.param("PUT", {}, "default", id="put"),
+    pytest.param("DELETE", {}, "default", id="delete"),
+    pytest.param("GET", {"_replay_safe": False}, "default", id="state-creating-get"),
+    pytest.param("GET", {}, "read-only", id="read-only-client"),
+    pytest.param("GET", {}, "override", id="connection-override"),
+]
+
+
+def _client_for(
+    kind: str,
+    responses: list[FakeResponse | Exception],
+    monkeypatch: pytest.MonkeyPatch,
+    cookies: dict[str, str] | None = SYNTHETIC_COOKIES,
+) -> tuple[LighthouseClient, JarSession]:
+    if kind == "override":
+        # A value-identical copy of the built-in connection still may not sign in.
+        copy = Connection(LIGHTHOUSE.origin, None)
+        monkeypatch.setattr(connection, "active_connection", lambda: copy)
+    return _jar_client(responses, read_only_auth=kind == "read-only", cookies=cookies)
+
+
+@pytest.mark.parametrize(("method", "options", "kind"), _NO_RECOVERY_CASES)
+def test_an_expiry_is_not_recovered_when_replay_or_sign_in_is_not_allowed(
+    method: str,
+    options: dict[str, object],
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _client_for(kind, [FakeResponse(401)], monkeypatch)
+
+    with pytest.raises(SessionExpiredError):
+        client._request(method, RESOURCE_URL, **options)
+
+    assert session.calls == [method]
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+@pytest.mark.parametrize(("method", "options", "kind"), _NO_RECOVERY_CASES)
+def test_missing_cookies_are_not_recovered_when_replay_or_sign_in_is_not_allowed(
+    method: str,
+    options: dict[str, object],
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _client_for(kind, [], monkeypatch, cookies={})
+
+    with pytest.raises(SessionExpiredError, match="no cookies found"):
+        client._request(method, RESOURCE_URL, **options)
+
+    assert session.calls == []
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+@pytest.mark.parametrize(("method", "options", "kind"), _NO_RECOVERY_CASES)
+def test_a_403_is_not_checked_when_replay_or_sign_in_is_not_allowed(
+    method: str,
+    options: dict[str, object],
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _client_for(kind, [FakeResponse(403)], monkeypatch)
+
+    with pytest.raises(requests.HTTPError) as raised:
+        client._request(method, RESOURCE_URL, **options)
+
+    assert raised.value.response.status_code == 403
+    assert session.calls == [method]
+    renewal.assert_not_called()
+    browser.assert_not_called()
+
+
+def test_a_second_expiry_after_signing_in_does_not_sign_in_again(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(401), FakeResponse(401)])
+
+    with pytest.raises(SessionExpiredError, match="auto-refresh already attempted"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.calls == ["GET", "GET"]
+    renewal.assert_called_once()
+    browser.assert_not_called()
+
+
+def test_signing_in_for_missing_cookies_uses_up_the_single_recovery(
+    renewal: MagicMock,
+    browser: MagicMock,
+) -> None:
+    client, session = _jar_client([FakeResponse(401)], cookies={})
+
+    with pytest.raises(SessionExpiredError, match="auto-refresh already attempted"):
+        client._request("GET", RESOURCE_URL)
+
+    assert session.calls == ["GET"]
+    renewal.assert_called_once()
+    browser.assert_not_called()
+
+
+def test_a_browser_refresh_writes_nothing_while_a_sign_in_holds_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    browser: MagicMock,
+) -> None:
+    monkeypatch.setattr(session_renewal, "LOCK_TIMEOUT_SECONDS", 0.2)
+    client, session = _jar_client([FakeResponse(401)])
+
+    with _sign_in_lock_held_elsewhere():
+        with pytest.raises(SessionExpiredError, match="auto-refresh busy"):
+            client._request("GET", RESOURCE_URL)
+
+    browser.assert_called_once_with()
+    assert session.calls == ["GET"]
+    assert not CredentialStore().cookie_file.exists()
+    assert client.cookies == SYNTHETIC_COOKIES
+
+
+def test_the_legacy_cookie_upgrade_returns_cookies_a_concurrent_sign_in_saved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_legacy_cookies()
+    held, waiting = threading.Event(), threading.Event()
+    real_lock = api.renewal_lock
+
+    @contextmanager
+    def signalling_lock(**kwargs: float | None) -> Iterator[None]:
+        waiting.set()
+        with real_lock(**kwargs):
+            yield
+
+    monkeypatch.setattr(api, "renewal_lock", signalling_lock)
+
+    def sign_in() -> None:
+        with session_renewal.renewal_lock():
+            held.set()
+            # Write only once the upgrade has seen the legacy file and is
+            # waiting for the lock.
+            waiting.wait(5)
+            save_cookies(dict(RENEWED_COOKIES))
+
+    thread = threading.Thread(target=sign_in)
+    thread.start()
+    try:
+        assert held.wait(5)
+        cookies = LighthouseClient().cookies
+    finally:
+        waiting.set()
+        thread.join(5)
+
+    assert cookies == RENEWED_COOKIES
+    assert not cookie_file_is_legacy()
+    assert load_cookies() == RENEWED_COOKIES
+
+
+def test_the_legacy_cookie_upgrade_leaves_the_file_untouched_while_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _write_legacy_cookies()
+    monkeypatch.setattr(session_renewal, "LOCK_TIMEOUT_SECONDS", 0.2)
+    client, session = _jar_client([], cookies=None)
+
+    with _sign_in_lock_held_elsewhere():
+        with pytest.raises(SessionExpiredError, match="cookie upgrade busy"):
+            client._request("GET", RESOURCE_URL)
+
+    assert session.calls == []
+    assert CredentialStore().cookie_file.read_bytes() == original

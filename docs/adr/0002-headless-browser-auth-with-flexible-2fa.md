@@ -7,6 +7,13 @@
 > (interactive, `--totp`, stdin pipe, env var), and offline Authenticator TOTP
 > now completes in one step. See
 > [auth-microsoft-sso.md](../auth-microsoft-sso.md).
+>
+> **Update (2026-10) — stored-secret TOTP implemented as opt-in.** The
+> deferred option below now exists: `auth totp-setup` seals an
+> authenticator-app secret next to the saved credentials, and the CLI signs in
+> unattended on the `PhoneAppOTP` path. It is opt-in because it accepts the
+> trade-off noted below: whoever can unseal the store holds both factors. See
+> [auth-unattended.md](../auth-unattended.md).
 
 The CLI supports a full headless login flow (`auth login`) through Microsoft SSO + 2FA, not just cookie extraction from an existing browser (`auth refresh`). This is necessary because server-based agents have no local browser to extract cookies from, and D2L sessions expire every ~5 days behind Manipal's Azure AD with mandatory 2FA.
 

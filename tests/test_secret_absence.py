@@ -7,6 +7,7 @@ exception message.
 
 from __future__ import annotations
 
+import base64
 import traceback
 import urllib.parse
 from pathlib import Path
@@ -16,10 +17,13 @@ from unittest.mock import patch
 import pytest
 import requests
 
+from lighthouse_cli import session_renewal
 from lighthouse_cli.auth import CredentialStore, LoginPlan
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import COOKIE_NAMES, save_cookies
 from lighthouse_cli.ms_auth import MfaPendingError, MicrosoftSSOClient, MicrosoftSSOError
+from lighthouse_cli.session_renewal import RenewalError, renew_session
+from lighthouse_cli.totp import parse_totp_secret, totp_code
 
 # ---------------------------------------------------------------------------
 # Sentinels — unique strings planted in every secret-bearing position.
@@ -328,3 +332,147 @@ class TestNoSecretsInErrorsAndOutput:
         for sentinel in ALL_SENTINELS:
             assert sentinel not in tb
         assert tb != "NoneType: None\n"
+
+
+# ---------------------------------------------------------------------------
+# Unattended sign-in with the stored authenticator
+# ---------------------------------------------------------------------------
+
+S_USERNAME = "sentinel-user-k2v7@manipal.edu"
+S_KEY = "SENTINELKEYQ7X4KSENTINELKEYQ7X4K"
+S_KEY_URI = f"otpauth://totp/MAHE:{S_USERNAME}?secret={S_KEY}&issuer=MAHE"
+T_SETUP = 1_800_000_015.0
+# The next time step, so the provider never waits for a fresh one.
+T_SIGN_IN = T_SETUP + 30
+
+
+def _generated_code(at: float) -> str:
+    params = parse_totp_secret(S_KEY)
+    return totp_code(params.key, for_time=at, digits=params.digits, period=params.period)
+
+
+def _unattended_sentinels(code: str) -> list[str]:
+    return [*ALL_SENTINELS, S_USERNAME, S_KEY, S_KEY_URI, code]
+
+
+def _assert_absent(text: str, sentinels: list[str]) -> None:
+    for sentinel in sentinels:
+        assert sentinel not in text
+
+
+def _assert_nothing_on_disk(config_dir: Path, sentinels: list[str]) -> None:
+    """No sentinel, nor the decoded authenticator key, in any stored file."""
+    decoded_key = base64.b32decode(S_KEY)
+    blobs = [path.read_bytes() for path in sorted(config_dir.rglob("*")) if path.is_file()]
+    assert blobs, "expected at least one artifact to scan"
+    for blob in blobs:
+        assert decoded_key not in blob
+        for sentinel in sentinels:
+            assert sentinel.encode() not in blob
+            assert urllib.parse.quote(sentinel).encode() not in blob
+
+
+class RecordingSession(ScriptedSession):
+    """Also records each POST's arguments, to show the code really was sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[str] = []
+
+    def post(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.sent.append(repr(kwargs))
+        return super().post(url, **kwargs)
+
+
+def _rejected_end_auth(code: str) -> FakeResponse:
+    # A hostile EndAuth reply that echoes the submitted code and the username.
+    return FakeResponse(json_data={
+        "Success": False, "Retry": True, "ErrCode": code, "ResultValue": code,
+        "Message": f"Code {code} for {S_USERNAME} was rejected",
+    })
+
+
+@pytest.fixture
+def stored_authenticator(
+    sealed_dir: Path, cli_runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Saved sentinel credentials plus an authenticator set up from a URI."""
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+    monkeypatch.setattr(session_renewal, "_clock", lambda: T_SETUP)
+    CredentialStore().save(S_USERNAME, S_PASSWORD)
+
+    result = cli_runner.invoke(cli, ["auth", "totp-setup", "--json"], input=S_KEY_URI + "\n")
+
+    assert result.exit_code == 0
+    _assert_absent(result.stdout + result.stderr, _unattended_sentinels(_generated_code(T_SETUP)))
+    monkeypatch.setattr(session_renewal, "_clock", lambda: T_SIGN_IN)
+    return sealed_dir
+
+
+class TestUnattendedSignInLeavesNoSecrets:
+    def test_signing_in_leaves_no_plaintext_secret(
+        self, stored_authenticator: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = _generated_code(T_SIGN_IN)
+        session = RecordingSession()
+        session.enqueue(*_pre_mfa_responses(), *_post_mfa_responses())
+        _plant_d2l_cookies(session)
+
+        with patch("requests.Session", return_value=session):
+            result = renew_session(observed_cookies={}, validate=lambda _cookies: "valid", automatic=True)
+
+        assert result.signed_in is True
+        # The code really was submitted, so its absence everywhere else counts.
+        assert any(code in body for body in session.sent)
+        _assert_nothing_on_disk(stored_authenticator, _unattended_sentinels(code))
+        captured = capsys.readouterr()
+        _assert_absent(captured.out + captured.err + repr(result), _unattended_sentinels(code))
+
+    def test_a_rejected_code_leaves_no_secret_in_the_error_or_breaker_state(
+        self, stored_authenticator: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = _generated_code(T_SIGN_IN)
+        session = RecordingSession()
+        session.enqueue(*_pre_mfa_responses(), _rejected_end_auth(code))
+
+        with patch("requests.Session", return_value=session):
+            with pytest.raises(RenewalError) as exc_info:
+                renew_session(observed_cookies={}, validate=lambda _cookies: "valid", automatic=True)
+
+        assert exc_info.value.category == "code_rejected"
+        assert any(code in body for body in session.sent)
+        assert (stored_authenticator / "relogin_state.json").is_file()
+        _assert_nothing_on_disk(stored_authenticator, _unattended_sentinels(code))
+        rendered = "".join(traceback.format_exception(exc_info.value))
+        captured = capsys.readouterr()
+        _assert_absent(
+            str(exc_info.value) + repr(exc_info.value) + rendered + captured.out + captured.err,
+            _unattended_sentinels(code),
+        )
+
+    @pytest.mark.parametrize("outcome", ["signed-in", "code-rejected"])
+    def test_cli_login_with_the_stored_authenticator_prints_no_secret(
+        self,
+        outcome: str,
+        stored_authenticator: Path,
+        cli_runner: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LIGHTHOUSE_USERNAME", S_USERNAME)
+        monkeypatch.setenv("LIGHTHOUSE_PASSWORD", S_PASSWORD)
+        code = _generated_code(T_SIGN_IN)
+        session = RecordingSession()
+        if outcome == "signed-in":
+            session.enqueue(*_pre_mfa_responses(), *_post_mfa_responses())
+            _plant_d2l_cookies(session)
+        else:
+            session.enqueue(*_pre_mfa_responses(), _rejected_end_auth(code))
+
+        with patch("requests.Session", return_value=session), \
+                patch("lighthouse_cli.auth.probe_cookies", return_value="valid"):
+            result = cli_runner.invoke(cli, ["auth", "login", "--json"], catch_exceptions=False)
+
+        assert result.exit_code == (0 if outcome == "signed-in" else 1)
+        assert any(code in body for body in session.sent)
+        _assert_absent(result.stdout + result.stderr, _unattended_sentinels(code))
+        _assert_nothing_on_disk(stored_authenticator, _unattended_sentinels(code))

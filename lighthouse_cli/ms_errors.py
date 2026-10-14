@@ -205,17 +205,60 @@ MS_ERROR_CODES: dict[int, str] = {
 }
 
 
+#: Failure categories for stored-authenticator sign-in.  The values are fixed
+#: identifiers: safe to print, store in ``relogin_state.json`` and return in
+#: ``--json`` output.
+RELOGIN_CATEGORIES = frozenset({
+    "credentials_rejected",  # bad password or an account problem
+    "code_rejected",  # the authenticator code was not accepted
+    "method_unavailable",  # no PhoneAppOTP proof, or a legacy MFA form
+    "clock_skew",  # no fresh time step is available
+    "interrupt",  # unrecognized page, registration nudge, policy
+    "network",  # transport failure or a server-side outage
+    "store",  # key source, decryption, lock-file or state-file failure
+    "busy",  # another sign-in held the lock past the deadline
+    "pending_human_login",  # a human's MFA checkpoint exists
+    "unknown",  # anything else
+})
+
+# Codes that mean the password or the account itself was refused.  Every other
+# known code is an ``interrupt``; 50059 is a recognized outage (``network``).
+_CREDENTIAL_ERROR_CODES = frozenset({50034, 50053, 50055, 50056, 50057, 50126, 50133, 50144})
+_NETWORK_ERROR_CODES = frozenset({50059})
+
+
+def sso_error_category(code: int) -> str | None:
+    """Return the failure category of a known Microsoft error code, or None."""
+    if code in _CREDENTIAL_ERROR_CODES:
+        return "credentials_rejected"
+    if code in _NETWORK_ERROR_CODES:
+        return "network"
+    return "interrupt" if code in MS_ERROR_CODES else None
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 
 class MicrosoftSSOError(Exception):
-    """Raised when any step of the Microsoft SSO flow fails."""
+    """Raised when any step of the Microsoft SSO flow fails.
 
-    def __init__(self, message: str, step: str | None = None, recovery: str | None = None) -> None:
+    ``category`` is one of ``RELOGIN_CATEGORIES`` when the failure was
+    classified at its source; it is not part of the rendered message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        step: str | None = None,
+        recovery: str | None = None,
+        *,
+        category: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.step = step
         self.recovery = recovery
+        self.category = category if category in RELOGIN_CATEGORIES else None
 
     def __str__(self) -> str:
         parts = [super().__str__()]

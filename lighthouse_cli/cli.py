@@ -31,6 +31,8 @@ def _lazy_command(module: str, name: str) -> Callable[..., int]:
 cmd_auth_login = _lazy_command(".auth", "cmd_auth_login")
 cmd_auth_mfa_methods = _lazy_command(".auth", "cmd_auth_mfa_methods")
 cmd_auth_refresh = _lazy_command(".auth", "cmd_auth_refresh")
+cmd_auth_totp_remove = _lazy_command(".auth", "cmd_auth_totp_remove")
+cmd_auth_totp_setup = _lazy_command(".auth", "cmd_auth_totp_setup")
 cmd_auth_verify = _lazy_command(".auth", "cmd_auth_verify")
 cmd_auth_status = _lazy_command(".commands", "cmd_auth_status")
 cmd_content = _lazy_command(".commands", "cmd_content")
@@ -203,6 +205,36 @@ def auth_mfa_methods(username: str | None, json_output: bool) -> None:
     TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
     """
     raise SystemExit(cmd_auth_mfa_methods(username=username, password=None, json_output=json_output))
+
+
+@auth.command("totp-setup", cls=JsonOutputCommand)
+@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
+def auth_totp_setup(json_output: bool) -> None:
+    """Store an authenticator-app secret so expired sessions sign in again unattended.
+
+    First save credentials (lighthouse auth login --save-credentials). Then, in
+    Microsoft security info, add a sign-in method: Authenticator app, "Set up a
+    different authentication app", "Can't scan image?". Enter the secret key
+    here; input is hidden in a terminal, or pipe it on stdin. The secret is
+    never accepted as a command-line argument.
+
+    Trade-off: the password and the second factor then sit on this machine,
+    sealed with the same key source (LIGHTHOUSE_SECRETS_PASSPHRASE or the OS
+    keyring). Anyone who can unseal them can sign in as you. Undo with
+    lighthouse auth totp-remove and remove the app from Microsoft security info.
+    """
+    raise SystemExit(cmd_auth_totp_setup(json_output=json_output))
+
+
+@auth.command("totp-remove", cls=JsonOutputCommand)
+@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
+def auth_totp_remove(json_output: bool) -> None:
+    """Delete the stored authenticator secret.
+
+    Saved credentials and cookies stay. Also remove the authenticator app from
+    Microsoft security info.
+    """
+    raise SystemExit(cmd_auth_totp_remove(json_output=json_output))
 
 
 # ---------------------------------------------------------------------------

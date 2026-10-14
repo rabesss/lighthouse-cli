@@ -247,6 +247,18 @@ def save_cookies(cookies: dict[str, str], *, extracted_at: str | None = None) ->
     )
 
 
+def cookie_file_is_legacy(config_dir: Path | None = None) -> bool:
+    """True when ``cookies.json`` holds a legacy plaintext document.
+
+    A read-only peek: callers that may migrate the file take the sign-in lock
+    first, and a sealed or absent file needs no lock because loading it never
+    writes.
+    """
+    store = CredentialStore(config_dir=config_dir) if config_dir is not None else CredentialStore()
+    doc = _read_cookie_document(store)
+    return doc is not None and not is_sealed_document(doc)
+
+
 def get_cookie_age_days() -> float | None:
     """Return the age of stored cookies in days, or None if unavailable."""
     data = _read_cookie_document(CredentialStore())

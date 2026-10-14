@@ -25,10 +25,19 @@ from .config import (
     API_LE,
     BASE_URL,
     COOKIE_NAMES,
+    cookie_file_is_legacy,
     d2l_cookies_from_entries,
     load_cookies,
     missing_cookie_names,
     save_cookies,
+)
+from .session_renewal import (
+    RenewalError,
+    RenewalUnavailableError,
+    SessionProbe,
+    renew_session,
+    renewal_lock,
+    unattended_configured,
 )
 from .utils import _sanitize_filename, get_enrolled_course_catalog
 
@@ -44,6 +53,11 @@ DOWNLOAD_CHUNK_BYTES = 64 * 1024
 MAX_HTML_TOPIC_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_DOWNLOAD_BYTES_ENV = "LIGHTHOUSE_MAX_DOWNLOAD_BYTES"
 CDP_RESPONSE_TIMEOUT_SECONDS = 15
+
+# whoami answers 403 (not 401) when the cookies are signed out.
+_WHOAMI_PATH = "/d2l/api/lp/1.47/users/whoami"
+_EXPIRED_STATUSES = frozenset({401})
+_WHOAMI_EXPIRED_STATUSES = frozenset({401, 403})
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +413,10 @@ class LighthouseClient:
         # Only the built-in Lighthouse connection object may refresh or
         # migrate auth; any override is read-only, even one naming Lighthouse.
         self._read_only_auth = bool(read_only_auth) or self.connection is not LIGHTHOUSE
+        # Set by automatic sign-in: whether this client signed in again, and
+        # the failure category when it could not.
+        self.renewed_session = False
+        self.renewal_failure: str | None = None
 
     # -- cookie management --------------------------------------------------
 
@@ -412,17 +430,40 @@ class LighthouseClient:
                 path="/",
             )
 
+    def _install_cookies(self, cookies: dict[str, str]) -> None:
+        """Use a fresh cookie set from now on (after a sign-in or refresh)."""
+        self._cookies = dict(cookies)
+        self._csrf_token = None
+        self._apply_cookies_to_session(self._cookies)
+        self._loaded = True
+
     def _ensure_cookies(self) -> dict[str, str]:
         """Load cookies from disk on first use."""
         if not self._loaded:
-            self._cookies = (
-                load_cookies(read_only=True, config_dir=self.connection.cookie_dir, expected_origin=self.base_url)
-                if self.connection.cookie_dir is not None
-                else load_cookies(read_only=self._read_only_auth)
-            )
-            self._apply_cookies_to_session(self._cookies)
-            self._loaded = True
+            if self.connection.cookie_dir is not None:
+                cookies = load_cookies(
+                    read_only=True, config_dir=self.connection.cookie_dir, expected_origin=self.base_url
+                )
+            elif not self._read_only_auth and cookie_file_is_legacy():
+                cookies = self._load_migrating_legacy_cookies()
+            else:
+                cookies = load_cookies(read_only=self._read_only_auth)
+            self._install_cookies(cookies)
         return self._cookies
+
+    @staticmethod
+    def _load_migrating_legacy_cookies() -> dict[str, str]:
+        """Re-seal legacy plaintext cookies under the sign-in lock.
+
+        The document is reread under the lock, so cookies a renewal sealed in
+        the meantime are returned instead of being overwritten.
+        """
+        try:
+            with renewal_lock():
+                return load_cookies()
+        except RenewalError as exc:
+            detail = "cookie upgrade busy" if exc.category == "busy" else "cookie upgrade failed"
+            raise _session_expired(detail) from None
 
     @property
     def cookies(self) -> dict[str, str]:
@@ -442,8 +483,13 @@ class LighthouseClient:
     # D2L normally returns a small number of pages, but a broken ``Next``
     # chain must not make a command loop or issue unbounded requests.
     _MAX_PAGINATION_PAGES = 100
+    # The whoami check behind a 403 is a single attempt with a short timeout.
+    _SIGNED_OUT_CHECK_TIMEOUT = 15
 
-    def _request(self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, _replay_safe: bool = True, **kwargs: Any) -> requests.Response:
+    def _request(
+        self, method: str, url: str, _skip_raise: bool = False, _timeout: int = 30, _replay_safe: bool = True,
+        _expired_statuses: frozenset[int] = _EXPIRED_STATUSES, **kwargs: Any,
+    ) -> requests.Response:
         """Make an authenticated request with safe retry and auto-refresh.
 
         GET and HEAD requests retry HTTP 429 (Too Many Requests) with
@@ -453,10 +499,14 @@ class LighthouseClient:
         sent exactly once because replaying a non-idempotent request could
         duplicate a remote side effect.
 
-        On SessionExpiredError, GET and HEAD attempt one auto-refresh via CDP
-        if a browser with valid cookies is running, then retry the request
-        once.  Non-idempotent methods surface the failure without refreshing
-        or replaying the request.
+        On SessionExpiredError, GET and HEAD recover once, then retry the
+        request once: with the stored authenticator when unattended sign-in
+        is configured, otherwise via CDP if a browser with valid cookies is
+        running.  D2L answers some reads of an expired session with 403, so
+        a 403 counts as expiry when whoami also reports the session signed
+        out.  Missing cookies recover the same way, but only through the
+        stored authenticator.  Non-idempotent methods surface the failure
+        without refreshing or replaying the request.
 
         Args:
             _skip_raise: If True, skip raise_for_status() and return the raw
@@ -464,44 +514,106 @@ class LighthouseClient:
             _timeout: Request timeout in seconds (default 30).
             _replay_safe: False for legacy GET routes that create state, such
                 as preview start. Disables retries and automatic auth replay.
+            _expired_statuses: Statuses that mean the session is signed out.
         """
-        if missing_cookie_names(self.cookies):
-            raise _session_expired("no cookies found")
-
         retryable = method.upper() in self._RETRYABLE_METHODS and _replay_safe
+        # A POST/PUT/etc. may already have been accepted by the server even
+        # when its response reports an expired session.  Never refresh and
+        # send that body again.  The read-only auth mode also forbids
+        # sign-in, browser refresh and cookie persistence for GET/HEAD.
+        can_recover = retryable and not self._read_only_auth
         refresh_attempted = False
+        if missing_cookie_names(self.cookies):
+            if not (can_recover and unattended_configured()):
+                raise _session_expired("no cookies found")
+            refresh_attempted = True
+            self._recover_session(browser_fallback=False)
         while True:
             try:
-                return self._do_request(method, url, _skip_raise, _timeout, _replay_safe=_replay_safe, **kwargs)
+                return self._do_request(
+                    method, url, _skip_raise, _timeout, _replay_safe=_replay_safe,
+                    _expired_statuses=_expired_statuses, **kwargs,
+                )
             except SessionExpiredError:
-                if self._read_only_auth or not retryable:
-                    # A POST/PUT/etc. may already have been accepted by the
-                    # server even when its response reports an expired
-                    # session.  Never refresh and send that body again.  The
-                    # read-only auth mode also forbids browser refresh and
-                    # cookie persistence for GET/HEAD requests.
+                if not can_recover:
                     raise
-                if refresh_attempted:
-                    raise _session_expired("auto-refresh already attempted") from None
-                refresh_attempted = True
-                print("Session expired. Refreshing from browser...", file=sys.stderr)
-                try:
-                    new_cookies = refresh_auth_from_browser()
-                except Exception:
-                    raise _session_expired("auto-refresh failed") from None
+            except requests.HTTPError as exc:
+                status = getattr(exc.response, "status_code", None)
+                if not (can_recover and status == 403 and self._whoami_signed_out()):
+                    raise
+            if refresh_attempted:
+                raise _session_expired("auto-refresh already attempted")
+            refresh_attempted = True
+            self._recover_session(browser_fallback=True)
 
-                if missing := missing_cookie_names(new_cookies):
-                    raise _session_expired(f"CDP cookies missing: {missing}") from None
+    def _whoami_signed_out(self) -> bool:
+        """Whether whoami positively reports the current cookies as signed out.
 
+        Tells an expired session's 403 apart from a genuine permission
+        denial.  ``_do_request`` is called directly, so this check never
+        signs in or nests, and it is sent once, without retries.  Only a
+        401, 403 or login redirect counts; any other answer or failure keeps
+        the caller's 403.
+        """
+        try:
+            resp = self._do_request(
+                "GET", f"{self.base_url}{_WHOAMI_PATH}", False, self._SIGNED_OUT_CHECK_TIMEOUT,
+                _replay_safe=False, _expired_statuses=_WHOAMI_EXPIRED_STATUSES,
+            )
+        except SessionExpiredError:
+            return True
+        except (requests.RequestException, NetworkError):
+            return False
+        _close_response(resp)
+        return False
+
+    def _recover_session(self, *, browser_fallback: bool) -> None:
+        """Replace expired cookies: stored authenticator first, then CDP."""
+        if unattended_configured():
+            print("Session expired. Signing in again with the stored authenticator...", file=sys.stderr)
+            try:
+                result = renew_session(
+                    observed_cookies=dict(self._cookies), validate=probe_cookies, automatic=True
+                )
+            except RenewalUnavailableError:
+                pass
+            except RenewalError as exc:
+                self.renewal_failure = exc.category
+                raise _session_expired(f"automatic sign-in failed: {exc.category}") from None
+            else:
+                self.renewed_session = self.renewed_session or result.signed_in
+                self._install_cookies(result.cookies)
+                return
+        if not browser_fallback:
+            raise _session_expired("no cookies found")
+        self._refresh_from_browser()
+
+    def _refresh_from_browser(self) -> None:
+        """Copy a signed-in browser's cookies through CDP and save them."""
+        print("Session expired. Refreshing from browser...", file=sys.stderr)
+        try:
+            new_cookies = refresh_auth_from_browser()
+        except Exception:
+            raise _session_expired("auto-refresh failed") from None
+
+        if missing := missing_cookie_names(new_cookies):
+            raise _session_expired(f"CDP cookies missing: {missing}") from None
+
+        # Extraction stays outside the lock; only the write is serialized
+        # with automatic sign-in.
+        try:
+            with renewal_lock():
                 save_cookies(new_cookies)
-                self._cookies = new_cookies
-                self._csrf_token = None
-                self._apply_cookies_to_session(new_cookies)
+        except RenewalError as exc:
+            detail = "auto-refresh busy" if exc.category == "busy" else "auto-refresh failed"
+            raise _session_expired(detail) from None
+        self._install_cookies(new_cookies)
 
     def _do_request(
         self, method: str, url: str,
         # skip_raise forwarded from _request._skip_raise
-        skip_raise: bool, timeout: int, _replay_safe: bool = True, **kwargs: Any,
+        skip_raise: bool, timeout: int, _replay_safe: bool = True,
+        _expired_statuses: frozenset[int] = _EXPIRED_STATUSES, **kwargs: Any,
     ) -> requests.Response:
         """Execute the HTTP request with bounded idempotent retries.
 
@@ -547,8 +659,9 @@ class LighthouseClient:
 
             try:
                 _raise_for_redirect(resp, allow_other=skip_raise)
-                if resp.status_code == 401:
-                    raise _session_expired("HTTP 401 Unauthorized")
+                if resp.status_code in _expired_statuses:
+                    reason = "Unauthorized" if resp.status_code == 401 else "Forbidden"
+                    raise _session_expired(f"HTTP {resp.status_code} {reason}")
                 if not skip_raise:
                     _check_status(resp)
             except Exception:
@@ -964,12 +1077,42 @@ class LighthouseClient:
             sanitized = sanitized + ".html"
         return content_bytes, sanitized
 
-    def check_auth(self) -> bool:
-        """Quick auth check via /d2l/api/versions/."""
+    def _whoami_signed_in(self) -> bool:
+        """Whether whoami names an account for these cookies.
+
+        The body is checked for a positive ``Identifier`` and then dropped.
+        A server error or transport failure raises.
+        """
         try:
-            self.get_json(f"{self.base_url}/d2l/api/versions/")
-            return True
-        except (SessionExpiredError, requests.HTTPError):
+            resp = self._request("GET", f"{self.base_url}{_WHOAMI_PATH}", _expired_statuses=_WHOAMI_EXPIRED_STATUSES)
+        except SessionExpiredError:
+            return False
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if isinstance(status, int) and (status >= 500 or status == 429):
+                raise
+            return False
+        try:
+            body = resp.json()
+        except ValueError:
+            return False
+        finally:
+            _close_response(resp)
+        identifier = body.get("Identifier") if isinstance(body, dict) else None
+        return _positive_org_unit_id(identifier) is not None
+
+    def probe_session(self) -> SessionProbe:
+        """``valid``, ``invalid`` (signed out), or ``unavailable`` (D2L did not answer)."""
+        try:
+            return "valid" if self._whoami_signed_in() else "invalid"
+        except (NetworkError, requests.RequestException):
+            return "unavailable"
+
+    def check_auth(self) -> bool:
+        """Whether the session is signed in.  Transport failures still raise."""
+        try:
+            return self._whoami_signed_in()
+        except requests.HTTPError:
             return False
 
     # -- Dropbox / Assignments ----------------------------------------------
@@ -1160,6 +1303,20 @@ def _extract_filename(headers: dict[str, str]) -> str:
             filename = value
 
     return extended_filename or filename
+
+
+def probe_cookies(cookies: dict[str, str]) -> SessionProbe:
+    """Probe a candidate cookie set without reading or writing ``cookies.json``.
+
+    The client is read-only, so a signed-out answer never triggers another
+    sign-in.
+    """
+    client = LighthouseClient(read_only_auth=True)
+    client._install_cookies(cookies)
+    try:
+        return client.probe_session()
+    finally:
+        client._session.close()
 
 
 def resolve_course_id(client: LighthouseClient, identifier: str) -> int:

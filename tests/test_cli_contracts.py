@@ -5,23 +5,28 @@ from __future__ import annotations
 import io
 import json
 import math
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import requests
 from click.testing import CliRunner
 
-from lighthouse_cli.api import LighthouseClient, NetworkError
+from lighthouse_cli import display
+from lighthouse_cli.api import LighthouseClient, NetworkError, _session_expired
 from lighthouse_cli.cli import cli
 from lighthouse_cli.commands import _resolve_course_scope
+from lighthouse_cli.config import COOKIE_NAMES, save_cookies
 from lighthouse_cli.display import (
     _has_json_option,
     format_user_error,
     output_json,
     safe_display_text,
 )
+from lighthouse_cli.ms_errors import RELOGIN_CATEGORIES
 from lighthouse_cli.utils import get_course_name, get_enrolled_course_catalog
 
 
@@ -381,6 +386,8 @@ def test_auth_status_invalid_json_and_human_paths_fail_safely() -> None:
     client = Mock()
     client.cookies = {"d2lSecureSessionVal": sentinel}
     client.check_auth.return_value = False
+    client.renewed_session = False
+    client.renewal_failure = None
 
     with patch("lighthouse_cli.commands.LighthouseClient", return_value=client):
         result = CliRunner().invoke(cli, ["auth", "status", "--json"])
@@ -390,11 +397,137 @@ def test_auth_status_invalid_json_and_human_paths_fail_safely() -> None:
     assert json.loads(result.stdout) == {
         "valid": False,
         "cookies": ["d2lSecureSessionVal"],
+        "renewed": False,
+        "category": None,
+        "unattended_login": {"configured": False, "blocked": False},
         "error": "Session expired. Run: lighthouse auth login",
     }
     assert sentinel not in result.stdout + result.stderr
     assert human.exit_code == 1
     assert "Error: Session expired. Run: lighthouse auth login" in human.stderr
+
+
+_CONFIGURED = {"configured": True, "blocked": False}
+
+
+def _status_client(cookies: dict[str, str]) -> Mock:
+    client = Mock()
+    client.cookies = cookies
+    client.renewed_session = False
+    client.renewal_failure = None
+    return client
+
+
+def _invoke_status(
+    make_client: Callable[[], Mock], unattended: dict[str, bool],
+) -> tuple[Any, Any]:
+    """Run ``auth status --json`` and the human form, each on a fresh client."""
+    with patch("lighthouse_cli.commands.LighthouseClient", side_effect=make_client), \
+            patch("lighthouse_cli.commands.unattended_status", return_value=unattended):
+        return (
+            CliRunner().invoke(cli, ["auth", "status", "--json"]),
+            CliRunner().invoke(cli, ["auth", "status"]),
+        )
+
+
+def test_auth_status_signs_in_for_missing_cookies_and_reports_the_renewal() -> None:
+    sentinel = "COOKIE_VALUE_SENTINEL"
+
+    def make_client() -> Mock:
+        client = _status_client({})
+
+        def check_auth() -> bool:
+            client.cookies = {"d2lSecureSessionVal": sentinel}
+            client.renewed_session = True
+            return True
+
+        client.check_auth.side_effect = check_auth
+        return client
+
+    result, human = _invoke_status(make_client, _CONFIGURED)
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "valid": True,
+        "cookies": ["d2lSecureSessionVal"],
+        "renewed": True,
+        "unattended_login": _CONFIGURED,
+    }
+    assert human.exit_code == 0
+    assert human.stdout.startswith("Session renewed.\nSession valid. Cookies: d2lSecureSessionVal")
+    assert sentinel not in result.stdout + result.stderr + human.stdout + human.stderr
+
+
+def test_auth_status_reports_the_automatic_sign_in_failure_category() -> None:
+    sentinel = "COOKIE_VALUE_SENTINEL"
+    blocked = {"configured": True, "blocked": True}
+    message = "Session expired; automatic sign-in failed (code_rejected). Run: lighthouse auth login"
+
+    def make_client() -> Mock:
+        client = _status_client({"d2lSecureSessionVal": sentinel})
+
+        def check_auth() -> bool:
+            client.renewal_failure = "code_rejected"
+            return False
+
+        client.check_auth.side_effect = check_auth
+        return client
+
+    result, human = _invoke_status(make_client, blocked)
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "valid": False,
+        "cookies": ["d2lSecureSessionVal"],
+        "renewed": False,
+        "category": "code_rejected",
+        "unattended_login": blocked,
+        "error": message,
+    }
+    assert human.exit_code == 1
+    assert human.stdout == ""
+    assert f"Error: {message}" in human.stderr
+    assert sentinel not in result.stdout + result.stderr + human.stderr
+
+
+def test_auth_status_without_cookies_or_unattended_sign_in_does_not_probe() -> None:
+    clients: list[Mock] = []
+
+    def make_client() -> Mock:
+        clients.append(_status_client({}))
+        return clients[-1]
+
+    unconfigured = {"configured": False, "blocked": False}
+    result, _human = _invoke_status(make_client, unconfigured)
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "valid": False,
+        "unattended_login": unconfigured,
+        "error": "No cookies found. Run: lighthouse auth login",
+    }
+    for client in clients:
+        client.check_auth.assert_not_called()
+
+
+def test_auth_status_transport_failure_keeps_the_renewal_fields() -> None:
+    error = NetworkError("Network request failed after 4 attempt(s).")
+
+    def make_client() -> Mock:
+        client = _status_client({"d2lSecureSessionVal": "COOKIE_VALUE_SENTINEL"})
+        client.check_auth.side_effect = error
+        return client
+
+    result, _human = _invoke_status(make_client, _CONFIGURED)
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "valid": False,
+        "renewed": False,
+        "category": None,
+        "unattended_login": _CONFIGURED,
+        "error": format_user_error(error),
+    }
 
 
 def test_semesters_normalize_malformed_records_for_human_and_json() -> None:
@@ -462,6 +595,31 @@ def test_human_usage_errors_stay_on_stderr_and_never_echo_values(argv: list[str]
     assert result.stdout == ""
     assert "Invalid command arguments. See --help." in result.stderr
     assert "SENTINEL" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("category", sorted(RELOGIN_CATEGORIES))
+def test_format_user_error_names_the_automatic_sign_in_failure(category: str) -> None:
+    error = _session_expired(f"automatic sign-in failed: {category}")
+
+    assert format_user_error(error) == (
+        f"Session expired; automatic sign-in failed ({category}). Run: lighthouse auth login"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Session expired (automatic sign-in failed: not_a_category).",
+        "Session expired (automatic sign-in failed: CATEGORY_SENTINEL).",
+        "Session expired (automatic sign-in failed: code_rejected",
+    ],
+)
+def test_format_user_error_ignores_an_unknown_sign_in_category(raw: str) -> None:
+    assert format_user_error(raw) == "Session expired. Run: lighthouse auth login"
+
+
+def test_display_mirrors_the_sign_in_failure_categories() -> None:
+    assert display._RENEWAL_FAILURE_CATEGORIES == RELOGIN_CATEGORIES
 
 
 def test_format_user_error_keeps_status_and_category_without_transport_details() -> None:
@@ -858,6 +1016,42 @@ def test_leaf_constructor_failure_is_one_json_document(
     assert payload["error"] == "Command failed."
     assert result.stdout.count("\"error\"") == 1
     assert "Error: Command failed." in result.stderr
+
+
+def _d2l_response(status: int) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status
+    response._content = b"{}"
+    return response
+
+
+@pytest.mark.parametrize(
+    ("whoami_status", "error"),
+    [
+        pytest.param(403, "Session expired. Run: lighthouse auth login", id="signed-out"),
+        pytest.param(200, "Permission denied (HTTP 403).", id="signed-in"),
+    ],
+)
+def test_courses_reports_a_403_from_an_expired_session_as_expired(
+    whoami_status: int, error: str,
+) -> None:
+    # D2L answers an expired session's enrollment read with 403; only a
+    # whoami that is signed out too makes it a session expiry.
+    save_cookies(dict.fromkeys(COOKIE_NAMES, "expired-cookie-sentinel"))
+
+    def request(_session: object, _method: str, url: str, **_kwargs: object) -> requests.Response:
+        return _d2l_response(whoami_status if url.endswith("/users/whoami") else 403)
+
+    with patch.object(requests.Session, "request", request), \
+            patch("lighthouse_cli.api.refresh_auth_from_browser", side_effect=RuntimeError("no browser")):
+        result = CliRunner().invoke(cli, ["courses", "--json"])
+        human = CliRunner().invoke(cli, ["courses"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"courses": [], "error": error}
+    assert human.exit_code == 1
+    assert f"Error: {error}" in human.stderr
+    assert "expired-cookie-sentinel" not in result.stdout + result.stderr + human.stdout + human.stderr
 
 
 @pytest.mark.parametrize("command", ["download", "sync"])

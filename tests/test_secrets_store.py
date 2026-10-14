@@ -156,9 +156,8 @@ class TestKeySourceMatrix:
         mock_sso = MagicMock()
         with (
             patch("lighthouse_cli.auth.MicrosoftSSOClient", return_value=mock_sso) as sso_cls,
-            patch("lighthouse_cli.auth.LighthouseClient") as client_cls,
+            patch("lighthouse_cli.auth.probe_cookies", return_value="valid"),
         ):
-            client_cls.return_value.check_auth.return_value = True
             result = cli_runner.invoke(cli, ["auth", "login", "--json"], catch_exceptions=False)
 
         assert result.exit_code == 1

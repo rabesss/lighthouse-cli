@@ -99,6 +99,28 @@ def test_read_only_client_does_not_refresh_or_save_after_401(method: str) -> Non
     save.assert_not_called()
 
 
+@pytest.mark.parametrize("stored", [_cookies(), {}], ids=["expired", "missing"])
+def test_read_only_client_never_signs_in_with_the_stored_authenticator(
+    stored: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renew = MagicMock()
+    monkeypatch.setattr(api, "unattended_configured", lambda: True)
+    monkeypatch.setattr(api, "renew_session", renew)
+    client, session = _authenticated_client()
+    client._loaded = True
+    client._cookies = dict(stored)
+    session.request.return_value = MagicMock(status_code=401, headers={})
+
+    with patch.object(api, "refresh_auth_from_browser") as refresh:
+        with pytest.raises(SessionExpiredError):
+            client._request("GET", f"{BASE_URL}/d2l/api/versions/")
+
+    renew.assert_not_called()
+    refresh.assert_not_called()
+    assert session.request.call_count == (1 if stored else 0)
+
+
 def test_normal_client_still_migrates_legacy_cookies(
     cookie_path: Path,
 ) -> None:
