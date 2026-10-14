@@ -53,6 +53,7 @@ _SUBMISSION_TYPE_LABELS = {
     4: "File or text submission",
 }
 
+
 def _close_client(client: Any) -> None:
     """Close a client when its implementation exposes an explicit close hook.
 
@@ -788,11 +789,12 @@ def _positive_projection_id(value: Any) -> int | None:
 def _assignment_submission_type(folder: dict[str, Any]) -> str:
     """Label a folder's submission type, which Brightspace sends as a number."""
     code = _submission_type(folder.get("SubmissionType"))
-    label = (
-        _SUBMISSION_TYPE_LABELS.get(code, "") if code is not None
-        # Not a number: keep descriptive text as before, never an unknown code.
-        else _safe_announcement_text(folder.get("SubmissionType"))
-    )
+    if code is not None:
+        label = _SUBMISSION_TYPE_LABELS.get(code, "")
+    else:
+        # Keep descriptive text as before, but never a code spelled another way ("+1", "2.0").
+        text = _safe_announcement_text(folder.get("SubmissionType"))
+        label = text if any(char.isalpha() for char in text) else ""
     # CategoryName is not a documented folder field, so it is only a last fallback.
     return label or _safe_announcement_text(folder.get("CategoryName"))
 

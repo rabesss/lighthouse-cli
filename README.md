@@ -904,7 +904,8 @@ human output shows a short preview with HTML markup removed. Brightspace sends
 `SubmissionType` as a number; `submission_type` is its label (`File
 submission`, `Text submission`, `On paper submission`, `Observed in person`
 or `File or text submission`). A folder without a known type keeps any
-descriptive text it sends, otherwise the field is empty. If the selected
+descriptive text it sends, in `SubmissionType` or the undocumented
+`CategoryName`; otherwise the field is empty. If the selected
 course has no folders, human output says `No assignments found for this
 course.` and exits `0`; JSON returns an empty `assignments` array.
 

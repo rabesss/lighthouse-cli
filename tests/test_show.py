@@ -784,9 +784,15 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
         ("1", "Text submission"),
         (" 02 ", "On paper submission"),
         ("0000000001", "Text submission"),
+        ("0", "File submission"),
+        ("4", "File or text submission"),
         (5, ""),
         (-1, ""),
         ("7", ""),
+        ("1234567890", ""),
+        ("+1", ""),
+        ("2.0", ""),
+        ("\u0661", ""),
         (True, ""),
         (False, ""),
         (1.0, ""),
@@ -814,6 +820,12 @@ def test_assignment_submission_type_is_labelled(capsys, submission_type, expecte
         (9, "Assignment", "Assignment"),
         (None, "Assignment", "Assignment"),
         (None, {"token": "SECRET"}, ""),
+        (True, "Assignment", "Assignment"),
+        ("+1", "Assignment", "Assignment"),
+        ("1000000000", "Assignment", "Assignment"),
+        ("File upload", "Assignment", "File upload"),
+        (None, "\x1b[31mAssignment", ""),
+        (None, "SECRET=" + "x" * 600, ""),
     ],
 )
 def test_assignment_submission_type_prefers_the_documented_field(
@@ -828,6 +840,18 @@ def test_assignment_submission_type_prefers_the_documented_field(
 
     assert structured["assignments"][0]["submission_type"] == expected
     assert "SECRET" not in json.dumps(structured) + captured.out + captured.err
+
+
+def test_assignment_submission_type_comes_from_folder_detail(capsys) -> None:
+    """A list entry without attachments is merged with its detail, type included."""
+    client = _dropbox_client(
+        [{"Id": 101, "Name": "Assignment"}],
+        detail={"Id": 101, "Attachments": [], "SubmissionType": 1},
+    )
+
+    structured, _ = _render_json_and_human(capsys, show._show_course_assignments, client)
+
+    assert structured["assignments"][0]["submission_type"] == "Text submission"
 
 
 def test_assignments_json_command_reports_submission_type_label() -> None:
