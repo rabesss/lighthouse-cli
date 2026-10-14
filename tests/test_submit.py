@@ -1141,7 +1141,10 @@ class TestSubmitFolderType:
     @pytest.mark.parametrize("name", ["Lab record", "", "x" * 300, None])
     @pytest.mark.parametrize(
         ("submission_type", "message"),
-        [(1, _TEXT), (2, _PAPER), (3, _OBSERVED), ("2", _PAPER), (" 3 ", _OBSERVED)],
+        [
+            (1, _TEXT), (2, _PAPER), (3, _OBSERVED), ("2", _PAPER), (" 3 ", _OBSERVED),
+            ("02", _PAPER), ("0000000001", _TEXT),
+        ],
     )
     def test_folder_that_takes_no_file_is_refused_before_any_file_work(
         self, run_submit, flags: tuple[str, ...], name: str | None,
@@ -1152,13 +1155,15 @@ class TestSubmitFolderType:
             detail["Name"] = name
         client = self._client(detail)
         with patch("lighthouse_cli.submit.LighthouseClient", return_value=client), \
-                patch.object(Path, "read_bytes", side_effect=AssertionError("must not read the file")), \
-                patch.object(submit_module, "_submit_dry_run", side_effect=AssertionError("must not plan")):
+                patch.object(Path, "read_bytes", autospec=True) as read_bytes, \
+                patch.object(submit_module, "_submit_dry_run", autospec=True) as plan:
             result = run_submit(*flags)
+        read_bytes.assert_not_called()
+        plan.assert_not_called()
+        client.submit_file.assert_not_called()
         assert result.exit_code == 1
         assert json_module.loads(result.stdout) == {"error": message}
         assert f"Error: {message}" in result.stderr
-        client.submit_file.assert_not_called()
 
     def test_human_refusal_goes_to_stderr_only(self, run_submit) -> None:
         client = self._client({"Name": "Lab record", "SubmissionType": 2})
@@ -1194,6 +1199,14 @@ class TestSubmitFolderType:
         {"Name": "Report", "SubmissionType": "OnPaper"},
         {"Name": "Report", "SubmissionType": "2.0"},
         {"Name": "Report", "SubmissionType": 99},
+        {"Name": "Report", "SubmissionType": False},
+        {"Name": "Report", "SubmissionType": 1.0},
+        {"Name": "Report", "SubmissionType": -2},
+        {"Name": "Report", "SubmissionType": ""},
+        {"Name": "Report", "SubmissionType": "+1"},
+        {"Name": "Report", "SubmissionType": "-1"},
+        {"Name": "Report", "SubmissionType": "\u0661"},
+        {"Name": "Report", "SubmissionType": "1234567890"},
         ["not", "a", "dict"],
         RuntimeError("lookup failed"),
     ])

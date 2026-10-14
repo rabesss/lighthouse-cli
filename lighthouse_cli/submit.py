@@ -68,6 +68,9 @@ def cmd_submit(
 
     ``dry_run`` resolves the same destination with a read-only client and
     prints the plan without reading the file body or uploading anything.
+
+    A folder that takes text, paper or observation instead of a file is
+    refused, also with ``dry_run``, before the file is read or sent.
     """
     # Validate the local input before constructing a client or resolving any
     # remote identifiers. A declined submission should not read the file body,
@@ -378,8 +381,10 @@ def _submission_type(value: object) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,9}", value.strip()):
-        return int(value.strip())
+    if isinstance(value, str):
+        # Leading zeros do not change the type, so "0000000001" reads as 1.
+        digits = re.fullmatch(r"0*([0-9]{1,9})", value.strip())
+        return int(digits.group(1)) if digits else None
     return None
 
 
