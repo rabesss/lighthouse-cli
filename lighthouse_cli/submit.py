@@ -31,6 +31,17 @@ _OUTCOME_UNKNOWN = (
     "Submission outcome is unknown because the API returned an unsupported result shape. "
     "Verify the assignment status before trying again."
 )
+# DropboxFolder.SubmissionType values (Text=1, OnPaper=2, Observed=3) whose
+# folders take no file. The only learner submission route requires a file, so
+# these are refused before the file is read or anything is sent.
+_NO_FILE_FOLDER_ERRORS = {
+    1: (
+        "This assignment takes a text submission, not a file. "
+        "Nothing was submitted; enter the text on Brightspace."
+    ),
+    2: "This assignment is submitted on paper, not online. Nothing was submitted.",
+    3: "This assignment is assessed by observation, not by file upload. Nothing was submitted.",
+}
 
 
 def cmd_submit(
@@ -57,6 +68,9 @@ def cmd_submit(
 
     ``dry_run`` resolves the same destination with a read-only client and
     prints the plan without reading the file body or uploading anything.
+
+    A folder that takes text, paper or observation instead of a file is
+    refused, also with ``dry_run``, before the file is read or sent.
     """
     # Validate the local input before constructing a client or resolving any
     # remote identifiers. A declined submission should not read the file body,
@@ -91,7 +105,12 @@ def cmd_submit(
     except Exception as e:
         return _submit_error(e, json_output)
 
-    folder_name, folder_verified = _get_folder_name(client, org_id, folder_id_int)
+    folder_name, folder_verified, refusal = _get_folder(client, org_id, folder_id_int)
+    # A folder that takes no file can never accept this upload, so refuse it
+    # before the prompt, the file read and the dry-run plan. An unknown or
+    # unreadable type falls through; Brightspace still decides the POST.
+    if refusal is not None:
+        return _submit_error(refusal, json_output)
     if dry_run:
         return _submit_dry_run(
             org_id, course_name, folder_id_int, folder_name, folder_verified,
@@ -245,6 +264,8 @@ def _safe_submit_error(message: BaseException | str) -> str:
             return _NEEDS_YES
         if lowered.startswith("submission outcome is unknown"):
             return _OUTCOME_UNKNOWN
+        if normalized in _NO_FILE_FOLDER_ERRORS.values():
+            return normalized
     return format_user_error(message)
 
 
@@ -336,16 +357,35 @@ def _positive_folder_id(value: object) -> int | None:
     return None
 
 
-def _get_folder_name(client: LighthouseClient, org_id: int, folder_id: int) -> tuple[str, bool]:
-    """Get a dropbox folder's display name and whether it was read and usable."""
+def _get_folder(
+    client: LighthouseClient, org_id: int, folder_id: int,
+) -> tuple[str, bool, str | None]:
+    """Get a dropbox folder's display name, whether it was read and usable, and
+    the refusal message when its submission type takes no file (else None)."""
     try:
         detail = client.get_dropbox_folder_detail(org_id, folder_id)
     except Exception:
-        return _DEFAULT_FOLDER_NAME, False
+        return _DEFAULT_FOLDER_NAME, False, None
     if not isinstance(detail, dict):
-        return _DEFAULT_FOLDER_NAME, False
+        return _DEFAULT_FOLDER_NAME, False, None
+    submission_type = _submission_type(detail.get("SubmissionType"))
+    refusal = None if submission_type is None else _NO_FILE_FOLDER_ERRORS.get(submission_type)
     name = _safe_display_name(detail.get("Name"), "")
-    return (name, True) if name else (_DEFAULT_FOLDER_NAME, False)
+    return (name, True, refusal) if name else (_DEFAULT_FOLDER_NAME, False, refusal)
+
+
+def _submission_type(value: object) -> int | None:
+    """Read a folder's SubmissionType: Brightspace sends an integer while the
+    docs type it as a string, so accept both forms and nothing else."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        # Leading zeros do not change the type, so "0000000001" reads as 1.
+        digits = re.fullmatch(r"0*([0-9]{1,9})", value.strip())
+        return int(digits.group(1)) if digits else None
+    return None
 
 
 def _safe_display_name(value: object, fallback: str) -> str:

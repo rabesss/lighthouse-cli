@@ -1113,3 +1113,129 @@ class TestSubmitDryRun:
         assert result.exit_code == 1
         assert "--yes" in result.output
         client_cls.assert_not_called()
+
+
+class TestSubmitFolderType:
+    """`submit` refuses a folder that takes no file before reading or sending anything."""
+
+    _TEXT = (
+        "This assignment takes a text submission, not a file. "
+        "Nothing was submitted; enter the text on Brightspace."
+    )
+    _PAPER = "This assignment is submitted on paper, not online. Nothing was submitted."
+    _OBSERVED = "This assignment is assessed by observation, not by file upload. Nothing was submitted."
+
+    @staticmethod
+    def _client(detail: object) -> MagicMock:
+        client = MagicMock()
+        client.get_courses.return_value = [{"OrgUnitId": 44347, "Name": "Signals & Systems"}]
+        client.get_dropbox_folders.return_value = [{"Id": 789, "Name": "Assignment 1 - Signals"}]
+        if isinstance(detail, Exception):
+            client.get_dropbox_folder_detail.side_effect = detail
+        else:
+            client.get_dropbox_folder_detail.return_value = detail
+        client.submit_file.return_value = {"submissionId": 5, "submittedAt": "2026-10-14T10:00:00Z"}
+        return client
+
+    @pytest.mark.parametrize("flags", [("--dry-run", "--json"), ("--yes", "--json")])
+    @pytest.mark.parametrize("name", ["Lab record", "", "x" * 300, None])
+    @pytest.mark.parametrize(
+        ("submission_type", "message"),
+        [
+            (1, _TEXT), (2, _PAPER), (3, _OBSERVED), ("2", _PAPER), (" 3 ", _OBSERVED),
+            ("02", _PAPER), ("0000000001", _TEXT),
+        ],
+    )
+    def test_folder_that_takes_no_file_is_refused_before_any_file_work(
+        self, run_submit, flags: tuple[str, ...], name: str | None,
+        submission_type: object, message: str,
+    ) -> None:
+        detail: dict[str, object] = {"SubmissionType": submission_type}
+        if name is not None:
+            detail["Name"] = name
+        client = self._client(detail)
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client), \
+                patch.object(Path, "read_bytes", autospec=True) as read_bytes, \
+                patch.object(submit_module, "_submit_dry_run", autospec=True) as plan:
+            result = run_submit(*flags)
+        read_bytes.assert_not_called()
+        plan.assert_not_called()
+        client.submit_file.assert_not_called()
+        assert result.exit_code == 1
+        assert json_module.loads(result.stdout) == {"error": message}
+        assert f"Error: {message}" in result.stderr
+
+    def test_human_refusal_goes_to_stderr_only(self, run_submit) -> None:
+        client = self._client({"Name": "Lab record", "SubmissionType": 2})
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = run_submit("--yes")
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert result.stderr == f"Error: {self._PAPER}\n"
+        client.submit_file.assert_not_called()
+
+    def test_interactive_refusal_comes_before_the_prompt(
+        self, client: MagicMock, temp_pdf_file: Path,
+    ) -> None:
+        client.get_dropbox_folder_detail.return_value = {"Name": "Viva", "SubmissionType": 3}
+        exit_code, stdout, stderr, input_mock = _prompt(
+            temp_pdf_file, json_output=False, side_effect=AssertionError("unexpected prompt"),
+        )
+        assert exit_code == 1
+        assert stdout == ""
+        assert stderr == f"Error: {self._OBSERVED}\n"
+        input_mock.assert_not_called()
+        client.submit_file.assert_not_called()
+
+    @pytest.mark.parametrize("detail", [
+        {"Name": "Report", "SubmissionType": 0},
+        {"Name": "Report", "SubmissionType": 4},
+        {"Name": "Report", "SubmissionType": "4"},
+        {"Name": "Report"},
+        {"Name": "Report", "SubmissionType": None},
+        {"Name": "Report", "SubmissionType": True},
+        {"Name": "Report", "SubmissionType": 2.0},
+        {"Name": "Report", "SubmissionType": [2]},
+        {"Name": "Report", "SubmissionType": "OnPaper"},
+        {"Name": "Report", "SubmissionType": "2.0"},
+        {"Name": "Report", "SubmissionType": 99},
+        {"Name": "Report", "SubmissionType": False},
+        {"Name": "Report", "SubmissionType": 1.0},
+        {"Name": "Report", "SubmissionType": -2},
+        {"Name": "Report", "SubmissionType": ""},
+        {"Name": "Report", "SubmissionType": "+1"},
+        {"Name": "Report", "SubmissionType": "-1"},
+        {"Name": "Report", "SubmissionType": "\u0661"},
+        {"Name": "Report", "SubmissionType": "1234567890"},
+        ["not", "a", "dict"],
+        RuntimeError("lookup failed"),
+    ])
+    def test_file_folders_and_unknown_types_still_upload(self, run_submit, detail: object) -> None:
+        """Only a recognised no-file type is refused; anything else is left to Brightspace."""
+        client = self._client(detail)
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = run_submit("--yes", "--json")
+        assert result.exit_code == 0, result.output
+        assert json_module.loads(result.stdout)["submission_id"] == 5
+        client.submit_file.assert_called_once()
+
+    @pytest.mark.parametrize("submission_type", [0, 4, 99])
+    def test_dry_run_plan_is_unchanged_for_other_types(
+        self, run_submit, temp_pdf_file: Path, submission_type: int,
+    ) -> None:
+        client = self._client({"Name": "Report", "SubmissionType": submission_type})
+        with patch("lighthouse_cli.submit.LighthouseClient", return_value=client):
+            result = run_submit("--dry-run", "--json")
+        assert result.exit_code == 0, result.output
+        assert json_module.loads(result.stdout) == {
+            "dry_run": True, "course_id": 44347, "course_name": "Signals & Systems",
+            "folder_id": 789, "folder_name": "Report", "folder_verified": True,
+            "file": {"name": "test.pdf", "size_bytes": temp_pdf_file.stat().st_size},
+        }
+        client.submit_file.assert_not_called()
+
+    def test_refusal_messages_pass_the_error_allowlist_verbatim(self) -> None:
+        messages = submit_module._NO_FILE_FOLDER_ERRORS
+        assert messages == {1: self._TEXT, 2: self._PAPER, 3: self._OBSERVED}
+        for message in messages.values():
+            assert submit_module._safe_submit_error(message) == message
