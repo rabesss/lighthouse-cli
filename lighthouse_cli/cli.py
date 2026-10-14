@@ -423,6 +423,8 @@ def submit(course_id: str, folder_id: str, file_path: str, yes: bool, dry_run: b
     Use --yes to skip the prompt (required for agent/automation use).
     --dry-run only resolves the course and folder (read-only) and prints the
     destination; it needs no --yes and never uploads.
+    A folder that takes text, paper or observation instead of a file is
+    refused (also with --dry-run) before the file is read or sent.
 
     On success, prints a JSON object with submission_id, folder_id, folder_name,
     course_id, course_name, file info, and submitted_at timestamp. A --dry-run

@@ -1000,6 +1000,9 @@ stderr. The local file is checked before the remote request is made.
 - Session expired → prints message to stderr, exit code 1
 - Permission denied → folder not accessible, exit code 1
 - Folder not found → lists available folders, exit code 1
+- Folder that takes no file (text-only, on paper, or assessed by observation)
+  → refused before the file is read or anything is sent, also with
+  `--dry-run`, exit code 1
 - Server error → reports HTTP status, exit code 1
 
 **Human output:**
