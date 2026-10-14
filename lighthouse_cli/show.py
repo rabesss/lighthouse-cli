@@ -787,15 +787,14 @@ def _positive_projection_id(value: Any) -> int | None:
 
 
 def _assignment_submission_type(folder: dict[str, Any]) -> str:
-    """Label a folder's submission type, which Brightspace sends as a number."""
+    """Label a folder's submission type, which Brightspace sends as a number.
+
+    Only a documented code gets a label, so no other value ("+1", "1e9", text)
+    is echoed. CategoryName is not a documented folder field; it is only a
+    fallback.
+    """
     code = _submission_type(folder.get("SubmissionType"))
-    if code is not None:
-        label = _SUBMISSION_TYPE_LABELS.get(code, "")
-    else:
-        # Keep descriptive text as before, but never a code spelled another way ("+1", "2.0").
-        text = _safe_announcement_text(folder.get("SubmissionType"))
-        label = text if any(char.isalpha() for char in text) else ""
-    # CategoryName is not a documented folder field, so it is only a last fallback.
+    label = _SUBMISSION_TYPE_LABELS.get(code, "") if code is not None else ""
     return label or _safe_announcement_text(folder.get("CategoryName"))
 
 

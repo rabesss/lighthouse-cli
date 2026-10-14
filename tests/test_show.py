@@ -793,6 +793,10 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
         ("+1", ""),
         ("2.0", ""),
         ("\u0661", ""),
+        ("1e9", ""),
+        ("inf", ""),
+        ("0x1", ""),
+        ("token=abc123", ""),
         (True, ""),
         (False, ""),
         (1.0, ""),
@@ -800,7 +804,7 @@ def test_assignment_projection_sanitizes_folder_scalars_and_rich_text(capsys) ->
         ({"Id": 1}, ""),
         ([1], ""),
         ("\x1b[31m1", ""),
-        ("File upload", "File upload"),
+        ("File upload", ""),
     ],
 )
 def test_assignment_submission_type_is_labelled(capsys, submission_type, expected) -> None:
@@ -823,7 +827,8 @@ def test_assignment_submission_type_is_labelled(capsys, submission_type, expecte
         (True, "Assignment", "Assignment"),
         ("+1", "Assignment", "Assignment"),
         ("1000000000", "Assignment", "Assignment"),
-        ("File upload", "Assignment", "File upload"),
+        ("1e9", "Assignment", "Assignment"),
+        ("File upload", "Assignment", "Assignment"),
         (None, "\x1b[31mAssignment", ""),
         (None, "SECRET=" + "x" * 600, ""),
     ],
@@ -831,7 +836,7 @@ def test_assignment_submission_type_is_labelled(capsys, submission_type, expecte
 def test_assignment_submission_type_prefers_the_documented_field(
     capsys, submission_type, category_name, expected
 ) -> None:
-    """The undocumented CategoryName only fills in when SubmissionType gives no label."""
+    """The undocumented CategoryName only fills in when SubmissionType is not a known code."""
     client = _dropbox_client([
         _folder(101, SubmissionType=submission_type, CategoryName=category_name)
     ])
