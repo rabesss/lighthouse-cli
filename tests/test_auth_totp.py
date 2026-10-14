@@ -29,7 +29,7 @@ from lighthouse_cli.totp import SECRET_ERROR_MESSAGES, parse_totp_secret, time_s
 USERNAME = "student@example.edu"
 PASSWORD = "pw-sentinel-Q7"  # pragma: allowlist secret
 SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"  # pragma: allowlist secret
-OTHER_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # pragma: allowlist secret
+OTHER_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # pragma: allowlist secret  gitleaks:allow
 URI = f"otpauth://totp/Microsoft:{USERNAME}?secret={SECRET}&issuer=Microsoft"
 T0 = 1_800_000_015.0  # 15 s into a 30 s step
 STEP0 = int(T0 // 30)
