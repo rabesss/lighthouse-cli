@@ -355,3 +355,12 @@ def test_setup_help_discloses_the_trade_off(runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "Trade-off" in result.stdout
     assert "never accepted as a command-line argument" in " ".join(result.stdout.split())
+
+
+def test_login_help_explains_the_stored_authenticator(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["auth", "login", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    text = " ".join(result.stdout.split())
+    assert "unless a stored authenticator is set up" in text
+    assert "With a stored authenticator (lighthouse auth totp-setup)" in text

@@ -131,7 +131,8 @@ def auth_refresh(cdp_port: str | None, json_output: bool) -> None:
               help="Authenticator app code, or '-' to enter a fresh text code after it is sent.")
 @click.option("--mfa-method", type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]), default=None,
               help=("MFA: sms, call, app, push, choose, or auto. A plain interactive login "
-                    "shows the methods Microsoft reports for your account."))
+                    "shows the methods Microsoft reports for your account, unless a stored "
+                    "authenticator is set up."))
 @click.option("--save-credentials", "save_credentials", is_flag=True, default=False,
               help="Save email/password encrypted for future logins (session cookies still expire ~5 days).")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
@@ -150,6 +151,11 @@ def auth_login(username: str | None, totp: str | None, mfa_method: str | None, s
     Enter your email and password, choose from the verification methods Microsoft
     reports for your account, then enter the fresh code or approve the request.
     The command saves and verifies the session before showing useful next steps.
+
+    With a stored authenticator (lighthouse auth totp-setup), a login with no
+    --totp and no --mfa-method, or with --mfa-method app, uses it instead: no
+    method chooser and no code prompt. Any other --mfa-method, or a --totp,
+    keeps the steps above.
 
     MFA flags remain available for scripts and explicit selection: auto, sms,
     call, app, push, or choose. Text codes may arrive via SMS or WhatsApp
