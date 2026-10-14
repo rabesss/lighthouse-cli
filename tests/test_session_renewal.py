@@ -310,6 +310,24 @@ def test_store_failures_are_not_recorded(configured: CredentialStore, config_dir
     with pytest.raises(RenewalError) as caught:
         _renew()
     assert caught.value.category == "store"
+    state = _state(config_dir)
+    assert state is None or (state["blocked"], state["category"]) == (False, None)
+
+
+@pytest.mark.parametrize("error", [PermissionError("read-only"), CredentialStoreError("unsafe")])
+def test_automatic_sign_in_needs_a_writable_breaker_first(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO,
+    monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    def fail_write(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(sr, "atomic_write", fail_write)
+    for _ in range(2):
+        with pytest.raises(RenewalError) as caught:
+            _renew()
+        assert caught.value.category == "store"
+    assert sso.logins == []
     assert _state(config_dir) is None
 
 
@@ -413,6 +431,19 @@ def test_network_cooldown(configured: CredentialStore, config_dir: Path, sso: Fa
     assert len(sso.logins) == 2
 
 
+def test_network_cooldown_holds_when_the_clock_goes_back(
+    configured: CredentialStore, sso: FakeSSO, clock: Clock
+) -> None:
+    _fail_with(sso, requests.ConnectionError("down"))
+    with pytest.raises(RenewalError):
+        _renew()
+    clock.now -= 60
+    with pytest.raises(RenewalError) as caught:
+        _renew()
+    assert caught.value.category == "network"
+    assert len(sso.logins) == 1
+
+
 def test_pending_two_step_login_blocks_automatic_only(
     configured: CredentialStore, config_dir: Path, sso: FakeSSO
 ) -> None:
@@ -423,6 +454,9 @@ def test_pending_two_step_login_blocks_automatic_only(
     assert sso.logins == []
     assert _state(config_dir) is None
     assert _renew(automatic=False).signed_in is True
+
+
+_STAMP = "2027-01-15T08:00:15+00:00"
 
 
 @pytest.mark.parametrize(
@@ -441,6 +475,12 @@ def test_pending_two_step_login_blocks_automatic_only(
         '{"v": 1, "blocked": false, "category": null, "since": null}',
         '{"v": 1, "blocked": false, "category": null, "since": null, "last_attempt": null, "x": 1}',
         '{"v": true, "blocked": false, "category": null, "since": null, "last_attempt": null}',
+        f'{{"v": 1, "blocked": true, "category": [], "since": "{_STAMP}", "last_attempt": "{_STAMP}"}}',
+        f'{{"v": 1, "blocked": false, "category": {{}}, "since": "{_STAMP}", "last_attempt": "{_STAMP}"}}',
+        '{"v": 1, "blocked": false, "category": "network", "since": null, "last_attempt": null}',
+        f'{{"v": 1, "blocked": false, "category": "network", "since": "{_STAMP}", "last_attempt": null}}',
+        '{"v": 1, "blocked": true, "category": "code_rejected", "since": null, "last_attempt": null}',
+        f'{{"v": 1, "blocked": false, "category": null, "since": "{_STAMP}", "last_attempt": null}}',
     ],
 )
 def test_corrupt_state_fails_closed(
@@ -452,6 +492,8 @@ def test_corrupt_state_fails_closed(
     assert caught.value.category == "unknown"
     assert sso.logins == []
     assert unattended_status() == {"configured": True, "blocked": True}
+    assert _renew(automatic=False).signed_in is True
+    assert _state(config_dir) is None
 
 
 def test_state_file_is_private_and_secret_free(
@@ -529,6 +571,20 @@ def test_provider_reports_clock_skew_when_no_fresh_step(
     assert stored is not None and stored.last_step == STEP0 + 10
     state = _state(config_dir)
     assert state is not None and state["category"] == "clock_skew"
+
+
+def test_setup_again_recovers_from_a_step_reserved_by_a_fast_clock(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO, clock: Clock
+) -> None:
+    configured.reserve_totp_step(STEP0 + 100)
+    with pytest.raises(RenewalError) as caught:
+        _renew(automatic=False)
+    assert caught.value.category == "clock_skew"
+    sr.store_authenticator(USERNAME, parse_totp_secret(SECRET))
+    assert _state(config_dir) is None
+    assert _renew().signed_in is True
+    key = parse_totp_secret(SECRET).key
+    assert sso.codes == [totp_code(key, for_time=(STEP0 + 1) * 30)]
 
 
 def test_provider_reports_clock_skew_after_clock_rolls_back_during_wait(

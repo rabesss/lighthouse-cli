@@ -50,6 +50,9 @@ LOCK_TIMEOUT_SECONDS = 120.0
 NETWORK_COOLDOWN_SECONDS = 300.0
 _LOCK_POLL_SECONDS = 0.25
 _STEP_MARGIN_SECONDS = 0.05
+#: Setup keeps a used step at most this far ahead of the clock.  A step further
+#: ahead came from a clock running fast, so its code was rejected.
+_MAX_FUTURE_STEPS = 2
 _LOCK_FILE = "relogin.lock"
 _STATE_FILE = "relogin_state.json"
 _STATE_VERSION = 1
@@ -229,7 +232,10 @@ def _state_from_document(doc: object) -> _BreakerState:
     if type(doc["v"]) is not int or doc["v"] != _STATE_VERSION or type(blocked) is not bool:
         return _CORRUPT_STATE
     allowed = BLOCKING_CATEGORIES if blocked else {None, "network"}
-    if category not in allowed:
+    if (category is not None and type(category) is not str) or category not in allowed:
+        return _CORRUPT_STATE
+    # A recorded failure has both timestamps; a clear state has neither.
+    if any((doc[key] is None) != (category is None) for key in ("since", "last_attempt")):
         return _CORRUPT_STATE
     try:
         for key in ("since", "last_attempt"):
@@ -306,7 +312,8 @@ def store_authenticator(username: str, params: TotpParams) -> None:
 
     The current time step counts as used, so the code just typed to register
     the app is never sent again.  Re-storing the same key keeps a newer
-    recorded step.
+    recorded step, unless a fast clock left it more than ``_MAX_FUTURE_STEPS``
+    ahead: setup is how a person recovers from that.
     """
     with renewal_lock():
         store = CredentialStore()
@@ -320,6 +327,7 @@ def store_authenticator(username: str, params: TotpParams) -> None:
             and previous.last_step is not None
             and previous.username.casefold() == username.casefold()
             and hmac.compare_digest(previous.params.key, params.key)
+            and previous.last_step <= last_step + _MAX_FUTURE_STEPS
         ):
             last_step = max(last_step, previous.last_step)
         store.save_totp(username, params, last_step=last_step)
@@ -400,8 +408,9 @@ def _check_gates(store: CredentialStore, state: _BreakerState) -> None:
     if state.blocked:
         raise RenewalError(state.category or "unknown")
     if state.category == "network" and state.last_attempt:
+        # A clock that went back keeps the cooldown until it catches up.
         elapsed = (_utc_now() - _parse_utc(state.last_attempt)).total_seconds()
-        if 0 <= elapsed < NETWORK_COOLDOWN_SECONDS:
+        if elapsed < NETWORK_COOLDOWN_SECONDS:
             raise RenewalError("network")
     try:
         _validate_credential_path(store.mfa_pending_file)
@@ -499,6 +508,10 @@ def _attempt(
     except RenewalError as exc:
         raise _UnrecordedError(exc) from None
     username, password, stored_totp = _usable_pair(credentials, stored)
+    if automatic:
+        # Prove the breaker is writable before Microsoft sees the password, so
+        # a failure that could not be recorded is not repeated on every read.
+        _write_state(store, state)
     cookies = _sign_in(store, username, password, stored_totp)
     save_cookies(cookies)
     probe = validate(dict(cookies))
