@@ -900,7 +900,12 @@ ID    Name                          Due Date            Attachments
 `CustomInstructions` may be Brightspace RichText (`Text` and `Html`) or a
 plain string. The CLI accepts either shape and normalizes it to the extracted
 instruction string in `custom_instructions` (preferring `Html` when present);
-human output shows a short preview with HTML markup removed. If the selected
+human output shows a short preview with HTML markup removed. Brightspace sends
+`SubmissionType` as a number; `submission_type` is its label (`File
+submission`, `Text submission`, `On paper submission`, `Observed in person`
+or `File or text submission`). A folder without a known type shows the
+undocumented `CategoryName` text if it sends one; otherwise the field is
+empty. If the selected
 course has no folders, human output says `No assignments found for this
 course.` and exits `0`; JSON returns an empty `assignments` array.
 
