@@ -122,9 +122,13 @@ def test_setup_reserves_the_current_step(runner: CliRunner, saved: CredentialSto
 
 
 @pytest.mark.parametrize("ahead", [2, 100])
-def test_setup_with_the_same_key_keeps_a_newer_step(runner: CliRunner, saved: CredentialStore, ahead: int) -> None:
-    """Even a step a fast clock reserved: forgetting it could resend an accepted code."""
-    saved.save_totp(USERNAME.upper(), parse_totp_secret(SECRET), last_step=STEP0 + ahead)
+@pytest.mark.parametrize("bound_to", [USERNAME.upper(), "alias@example.edu"])
+def test_setup_with_the_same_key_keeps_a_newer_step(
+    runner: CliRunner, saved: CredentialStore, ahead: int, bound_to: str,
+) -> None:
+    """Even a step a fast clock reserved, or one used under another username:
+    forgetting it could resend an accepted code."""
+    saved.save_totp(bound_to, parse_totp_secret(SECRET), last_step=STEP0 + ahead)
 
     assert _setup(runner, f"{SECRET}\n", "--json").exit_code == 0
 
@@ -142,6 +146,26 @@ def test_setup_with_a_new_key_starts_from_the_current_step(runner: CliRunner, sa
     assert stored is not None
     assert stored.params == parse_totp_secret(SECRET)
     assert stored.last_step == STEP0
+
+
+def test_setup_never_replaces_an_authenticator_it_cannot_read(runner: CliRunner, saved: CredentialStore) -> None:
+    """Its used steps are unknown, so replacing it could resend an accepted code."""
+    saved.authenticator_file.write_text("{", encoding="utf-8")
+
+    refused = _setup(runner, f"{SECRET}\n", "--json")
+
+    assert refused.exit_code == 1
+    assert json.loads(refused.stdout) == {
+        "success": False, "error": session_renewal._UNREADABLE_AUTHENTICATOR,
+    }
+    assert saved.authenticator_file.read_text(encoding="utf-8") == "{"
+    _assert_no_secret(refused)
+
+    removed = runner.invoke(cli, ["auth", "totp-remove", "--json"], catch_exceptions=False)
+    assert removed.exit_code == 0
+    assert _setup(runner, f"{SECRET}\n", "--json").exit_code == 0
+    stored = saved.load_totp()
+    assert stored is not None and stored.last_step == STEP0
 
 
 def test_setup_clears_the_breaker(runner: CliRunner, saved: CredentialStore, config_dir: Path) -> None:

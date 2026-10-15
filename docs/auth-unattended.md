@@ -106,7 +106,7 @@ than one authenticator-app method, and the CLI cannot choose between them.
 
 | Command | What it does |
 |---------|--------------|
-| `lighthouse auth totp-setup [--json]` | Store the authenticator secret (hidden prompt or stdin). Needs saved credentials. Clears the breaker. JSON: `{"success": true, "configured": true}` |
+| `lighthouse auth totp-setup [--json]` | Store the authenticator secret (hidden prompt or stdin). Needs saved credentials. Clears the breaker. Refuses to replace a stored secret it cannot read; run `totp-remove` first. JSON: `{"success": true, "configured": true}` |
 | `lighthouse auth totp-remove [--json]` | Delete the stored secret and the breaker state. Saved credentials and cookies stay. JSON: `{"success": true, "removed": true}` (`false` if nothing was stored) |
 | `lighthouse auth login [--json]` | With the stored authenticator configured, signs in with no prompt. Any `--totp`, or `--mfa-method sms\|call\|push\|choose\|auto`, keeps the person-driven flow |
 | `lighthouse auth status [--json]` | Signs in again if needed, like any read. Reports `renewed` and `unattended_login: {configured, blocked}` |

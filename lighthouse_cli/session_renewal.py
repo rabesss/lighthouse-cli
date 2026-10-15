@@ -75,6 +75,11 @@ _MESSAGES = {
     "pending_human_login": "A two-step sign-in is waiting for verification.",
     "unknown": "Automatic sign-in failed unexpectedly.",
 }
+# Setup cannot keep the used steps of an authenticator it cannot read.
+_UNREADABLE_AUTHENTICATOR = (
+    "The stored authenticator could not be read. Check the system clock, "
+    "then run: lighthouse auth totp-remove and lighthouse auth totp-setup"
+)
 
 # Indirection so tests can drive the clock without patching ``time``.
 _clock: Callable[[], float] = time.time
@@ -309,8 +314,9 @@ def store_authenticator(username: str, params: TotpParams) -> None:
 
     The current time step counts as used, so the code just typed to register
     the app is never sent again.  Re-storing the same key keeps a newer
-    recorded step, even one a fast clock reserved: only ``totp-remove``
-    forgets used steps.
+    recorded step, even one a fast clock reserved or one used under another
+    username, and an authenticator that cannot be read is never replaced:
+    only ``totp-remove`` forgets used steps.
     """
     with renewal_lock():
         store = CredentialStore()
@@ -318,11 +324,10 @@ def store_authenticator(username: str, params: TotpParams) -> None:
         try:
             previous = store.load_totp()
         except CredentialStoreError:
-            previous = None  # replaced below
+            raise CredentialStoreError(_UNREADABLE_AUTHENTICATOR) from None
         if (
             previous is not None
             and previous.last_step is not None
-            and previous.username.casefold() == username.casefold()
             and hmac.compare_digest(previous.params.key, params.key)
         ):
             last_step = max(last_step, previous.last_step)

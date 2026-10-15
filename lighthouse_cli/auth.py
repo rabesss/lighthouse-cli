@@ -53,6 +53,7 @@ from .ms_errors import (
 )
 from .ms_mfa import format_user_proof, safe_auth_method_id
 from .session_renewal import (
+    _UNREADABLE_AUTHENTICATOR,
     RenewalError,
     RenewalUnavailableError,
     remove_authenticator,
@@ -179,6 +180,7 @@ _SAFE_FIXED_AUTH_MESSAGES = frozenset({
     _HIDDEN_INPUT_UNAVAILABLE,
     _NO_MATCHING_AUTHENTICATOR,
     _INVALID_TOTP_MSG,
+    _UNREADABLE_AUTHENTICATOR,
     *_STORED_LOGIN_FAILURES.values(),
     *SECRET_ERROR_MESSAGES,
 })
