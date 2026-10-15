@@ -9,7 +9,9 @@ The Microsoft SSO flow itself lives in ``lighthouse_cli.ms_auth``
   planning (``resume`` | ``fresh`` | ``defer``);
 - the ``auth login`` / ``auth verify`` entry points, which share one
   persist→check→report success tail (seal cookies → validate session → only
-  then optionally store credentials; verify never stores credentials).
+  then optionally store credentials; verify never stores credentials);
+- ``auth totp-setup`` / ``auth totp-remove`` and the stored-authenticator
+  login, which sign in through ``lighthouse_cli.session_renewal``.
 """
 
 from __future__ import annotations
@@ -20,12 +22,13 @@ import json
 import os
 import re
 import sys
+import warnings
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from .api import LighthouseClient, NetworkError, refresh_auth_from_browser
+from .api import NetworkError, probe_cookies, refresh_auth_from_browser
 from .config import (
     COOKIE_NAMES,
     clear_mfa_pending,
@@ -34,7 +37,7 @@ from .config import (
     missing_cookie_names,
     save_cookies,
 )
-from .credential_store import CredentialStore, CredentialStoreError
+from .credential_store import _INVALID_TOTP_MSG, CredentialStore, CredentialStoreError
 from .ms_auth import MicrosoftSSOClient
 from .ms_errors import (
     MFA_METHOD_APP,
@@ -49,6 +52,17 @@ from .ms_errors import (
     MicrosoftSSOError,
 )
 from .ms_mfa import format_user_proof, safe_auth_method_id
+from .session_renewal import (
+    _UNREADABLE_AUTHENTICATOR,
+    RenewalError,
+    RenewalUnavailableError,
+    remove_authenticator,
+    renew_session,
+    renewal_lock,
+    store_authenticator,
+    unattended_supported,
+)
+from .totp import SECRET_ERROR_MESSAGES, TotpSecretError, parse_totp_secret
 
 # ---------------------------------------------------------------------------
 # Exceptions and uniform exits
@@ -57,6 +71,10 @@ from .ms_mfa import format_user_proof, safe_auth_method_id
 
 class _PromptUnavailableError(Exception):
     """A credential is missing and stdin cannot be prompted."""
+
+
+class _HiddenInputUnavailableError(Exception):
+    """The terminal cannot turn echo off for a secret prompt."""
 
 
 _AUTH_ERROR_FALLBACK = "Authentication failed. Check your credentials and try again."
@@ -105,6 +123,71 @@ _SAFE_BROWSER_NETWORK_ERRORS = frozenset({
     "The local browser cookie helper failed.",
     "The local browser cookie helper returned invalid data.",
     "No usable Lighthouse cookies were found in the browser.",
+})
+_SIGN_IN_BUSY = "Another sign-in is in progress. Run the command again."
+_SIGN_IN_STORE = str(RenewalError("store"))
+_NO_SAVED_CREDENTIALS = "No saved credentials. Run: lighthouse auth login --save-credentials"
+_UNATTENDED_UNSUPPORTED = "Unattended sign-in needs a POSIX system such as Linux or macOS."
+_HIDDEN_INPUT_UNAVAILABLE = (
+    "Cannot hide input on this terminal. Pipe the secret on stdin instead."
+)
+_NO_MATCHING_AUTHENTICATOR = str(RenewalUnavailableError())
+# Stored-authenticator login failures, one fixed message per category.
+_STORED_LOGIN_FAILURES = {
+    "credentials_rejected": (
+        "Microsoft rejected the username or password. "
+        "Run: lighthouse auth login --save-credentials"
+    ),
+    "code_rejected": (
+        "The stored authenticator's code was rejected. "
+        "Register the app again, then run: lighthouse auth totp-setup"
+    ),
+    "method_unavailable": (
+        "The account offers no authenticator-app code method. "
+        "Register the app, then run: lighthouse auth totp-setup"
+    ),
+    "clock_skew": (
+        "No fresh authenticator time step is available. "
+        "Check the system clock, then run: lighthouse auth login. "
+        "If this repeats with the clock right, run lighthouse auth totp-remove "
+        "and lighthouse auth totp-setup first."
+    ),
+    "interrupt": (
+        "Microsoft sign-in stopped at a page that needs a person. "
+        "Sign in once in a browser, then run: lighthouse auth login"
+    ),
+    "network": (
+        "The sign-in service could not be reached. "
+        "Check the connection, then run: lighthouse auth login"
+    ),
+    "store": (
+        "Local sign-in data could not be read or written. "
+        "Check the encryption key source, then run: lighthouse auth login"
+    ),
+    "busy": _SIGN_IN_BUSY,
+    "pending_human_login": (
+        "A two-step sign-in is waiting for verification. "
+        "Run: lighthouse auth verify <code>"
+    ),
+    "unknown": (
+        "Sign-in with the stored authenticator failed unexpectedly. "
+        "Run: lighthouse auth login. If it fails again, use "
+        "lighthouse auth login --mfa-method choose; automatic sign-in stays "
+        "blocked until lighthouse auth login works with the stored authenticator."
+    ),
+}
+# First-party fixed messages shown verbatim: the generic filter below would
+# drop their recovery commands.
+_SAFE_FIXED_AUTH_MESSAGES = frozenset({
+    _SIGN_IN_STORE,
+    _NO_SAVED_CREDENTIALS,
+    _UNATTENDED_UNSUPPORTED,
+    _HIDDEN_INPUT_UNAVAILABLE,
+    _NO_MATCHING_AUTHENTICATOR,
+    _INVALID_TOTP_MSG,
+    _UNREADABLE_AUTHENTICATOR,
+    *_STORED_LOGIN_FAILURES.values(),
+    *SECRET_ERROR_MESSAGES,
 })
 _SAFE_FIRST_PARTY_AUTH_PREFIXES = (
     ("2fa verification timed out", "2FA verification timed out waiting for approval."),
@@ -232,7 +315,7 @@ def _safe_auth_error_message(msg: object) -> str:
     if not isinstance(msg, str) or not msg:
         return _AUTH_ERROR_FALLBACK
     text = " ".join(msg.split())
-    if text in _SAFE_BROWSER_NETWORK_ERRORS:
+    if text in _SAFE_BROWSER_NETWORK_ERRORS or text in _SAFE_FIXED_AUTH_MESSAGES:
         return text
     lowered = text.casefold()
     for prefix, safe_message in _SAFE_FIRST_PARTY_AUTH_PREFIXES:
@@ -494,6 +577,19 @@ def plan_login(
     return LoginPlan(mode, totp_code, read_totp_after_challenge, defer_mfa_to_pending)
 
 
+def use_stored_authenticator(
+    *, explicit_method: str | None, totp_code: str | None, totp_stdin: bool
+) -> bool:
+    """Whether ``auth login`` may answer MFA with the stored authenticator.
+
+    Only when no method was requested (flag or ``LIGHTHOUSE_MFA_METHOD``) or
+    ``app`` was, and no code was supplied.
+    """
+    if totp_code is not None or totp_stdin:
+        return False
+    return explicit_method in (None, MFA_METHOD_APP)
+
+
 def _resolve_command_credentials(
     username: str | None, password: str | None, *, interactive: bool, json_output: bool
 ) -> tuple[str | None, str | None]:
@@ -558,6 +654,11 @@ def _print_login_next_steps() -> None:
         _print_command_guide()
 
 
+def _lock_failure_message(exc: RenewalError) -> str:
+    """Fixed message for a sign-in lock that could not be taken."""
+    return _SIGN_IN_BUSY if exc.category == "busy" else _SIGN_IN_STORE
+
+
 def _persist_check_report(
     cookies: dict[str, str],
     *,
@@ -574,26 +675,51 @@ def _persist_check_report(
     session is validated second, and only after a verified session may the
     username/password pair be stored.  Verify passes no pair — it NEVER saves
     credentials.
+
+    The sequence holds the sign-in lock, so an automatic sign-in cannot
+    publish cookies in between, and it checks these cookies themselves rather
+    than whatever ``cookies.json`` holds by then.
     """
-    save_cookies(cookies)
-
     hint = f" {failure_hint}" if failure_hint else ""
-    if not LighthouseClient(read_only_auth=True).check_auth():
-        return _auth_error(
-            f"Login completed but session verification failed.{hint}",
-            json_output,
-        )
+    try:
+        with renewal_lock():
+            save_cookies(cookies)
+            if probe_cookies(cookies) != "valid":
+                return _auth_error(
+                    f"Login completed but session verification failed.{hint}",
+                    json_output,
+                )
 
-    if save_credentials_pair is not None:
-        try:
-            CredentialStore().save(*save_credentials_pair)
-        except CredentialStoreError as exc:
-            print(
-                "Warning: Could not save credentials: "
-                f"{_safe_auth_error_message(str(exc))}",
-                file=sys.stderr,
-            )
+            if save_credentials_pair is not None:
+                try:
+                    CredentialStore().save(*save_credentials_pair)
+                except CredentialStoreError as exc:
+                    print(
+                        "Warning: Could not save credentials: "
+                        f"{_safe_auth_error_message(str(exc))}",
+                        file=sys.stderr,
+                    )
+    except RenewalError as exc:
+        return _auth_error(_lock_failure_message(exc), json_output)
 
+    return _report_login_success(
+        cookies,
+        json_output=json_output,
+        success_message=success_message,
+        include_cookie_names=include_cookie_names,
+        show_next_steps=show_next_steps,
+    )
+
+
+def _report_login_success(
+    cookies: dict[str, str],
+    *,
+    json_output: bool,
+    success_message: str = "Login complete. Session saved and verified.",
+    include_cookie_names: bool = True,
+    show_next_steps: bool = False,
+) -> int:
+    """Report a saved, verified session (cookie names only, never values)."""
     reported_cookie_names = [name for name in COOKIE_NAMES if name in cookies]
     if json_output:
         print(json.dumps({"success": True, "cookies": reported_cookie_names}))
@@ -863,6 +989,24 @@ def cmd_auth_login(
     # been read earlier, but only under error suppression.)
     CredentialStore().preflight()
 
+    # A stored authenticator answers the code itself.  An explicit method
+    # other than ``app``, or any --totp, keeps the person-driven flow.
+    if (
+        use_stored_authenticator(
+            explicit_method=resolved_mfa_method if configured_mfa_method else None,
+            totp_code=totp_code,
+            totp_stdin=totp_stdin,
+        )
+        and _stored_authenticator_matches(username)
+    ):
+        return _login_with_stored_authenticator(
+            username,
+            password,
+            save_credentials=save_credentials,
+            json_output=json_output,
+            show_next_steps=interactive and not json_output,
+        )
+
     # Resume the pending MFA session only when the provided code belongs to it.
     # An explicit --mfa-method that differs from the pending session (e.g. an
     # offline app TOTP after a stale SMS pending) starts a fresh flow instead.
@@ -953,3 +1097,138 @@ def cmd_auth_login(
         include_cookie_names=False,
         show_next_steps=interactive and not json_output,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stored authenticator (unattended sign-in)
+# ---------------------------------------------------------------------------
+
+_MAX_SECRET_LINE = 4096
+
+
+def _stored_authenticator_matches(username: str) -> bool:
+    """Whether a readable stored authenticator is bound to ``username``."""
+    if not unattended_supported():
+        return False
+    try:
+        stored = CredentialStore().load_totp()
+    except CredentialStoreError as exc:
+        print(
+            "Warning: ignoring an unreadable stored authenticator ("
+            f"{_safe_auth_error_message(str(exc))}).",
+            file=sys.stderr,
+        )
+        return False
+    return stored is not None and stored.username.casefold() == username.casefold()
+
+
+def _login_with_stored_authenticator(
+    username: str,
+    password: str,
+    *,
+    save_credentials: bool,
+    json_output: bool,
+    show_next_steps: bool,
+) -> int:
+    """Sign in with the stored authenticator; cookies are saved and checked inside."""
+    print("Using the stored authenticator for verification.", file=sys.stderr, flush=True)
+    try:
+        result = renew_session(
+            observed_cookies={},
+            validate=probe_cookies,
+            automatic=False,
+            credentials=(username, password),
+            persist_credentials=save_credentials,
+        )
+    except RenewalUnavailableError:
+        return _auth_error(_NO_MATCHING_AUTHENTICATOR, json_output)
+    except RenewalError as exc:
+        return _auth_error(
+            _STORED_LOGIN_FAILURES.get(exc.category, _STORED_LOGIN_FAILURES["unknown"]),
+            json_output,
+        )
+
+    # This sign-in supersedes any deferred two-step challenge, which would
+    # otherwise keep blocking automatic sign-in.
+    clear_mfa_pending()
+    return _report_login_success(
+        result.cookies,
+        json_output=json_output,
+        include_cookie_names=False,
+        show_next_steps=show_next_steps,
+    )
+
+
+def _read_totp_secret() -> str:
+    """Read the secret: a hidden prompt on a terminal, else one stdin line.
+
+    ``getpass`` falls back to echoed input with only a warning when it cannot
+    turn echo off; that warning is raised as an error before anything is read.
+    """
+    if not _is_interactive():
+        return sys.stdin.readline(_MAX_SECRET_LINE)
+    print(
+        "Paste the authenticator secret key or otpauth:// URI (input is hidden).",
+        file=sys.stderr,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        try:
+            return getpass.getpass("Secret: ", stream=sys.stderr)
+        except getpass.GetPassWarning:
+            raise _HiddenInputUnavailableError from None
+        except EOFError:
+            return ""
+
+
+@_clean_auth_command
+def cmd_auth_totp_setup(*, json_output: bool = False) -> int:
+    """Store the authenticator secret for unattended sign-in.
+
+    The secret is bound to the saved username and sealed like the password.
+    It is never printed, and neither is a code generated from it.
+    """
+    if not unattended_supported():
+        return _auth_error(_UNATTENDED_UNSUPPORTED, json_output)
+    ensure_config_dir()
+    store = CredentialStore()
+    store.preflight()
+    credentials = store.load()
+    if credentials is None:
+        return _auth_error(_NO_SAVED_CREDENTIALS, json_output)
+
+    try:
+        params = parse_totp_secret(_read_totp_secret())
+    except _HiddenInputUnavailableError:
+        return _auth_error(_HIDDEN_INPUT_UNAVAILABLE, json_output)
+    except TotpSecretError as exc:
+        return _auth_error(str(exc), json_output)
+
+    try:
+        store_authenticator(credentials[0], params)
+    except RenewalError as exc:
+        return _auth_error(_lock_failure_message(exc), json_output)
+
+    if json_output:
+        print(json.dumps({"success": True, "configured": True}))
+    else:
+        print("Authenticator secret stored. Next: lighthouse auth login")
+    return 0
+
+
+@_clean_auth_command
+def cmd_auth_totp_remove(*, json_output: bool = False) -> int:
+    """Delete the stored authenticator; saved credentials and cookies stay."""
+    ensure_config_dir()
+    try:
+        removed = remove_authenticator()
+    except RenewalError as exc:
+        return _auth_error(_lock_failure_message(exc), json_output)
+
+    if json_output:
+        print(json.dumps({"success": True, "removed": removed}))
+    elif removed:
+        print("Stored authenticator removed.")
+    else:
+        print("No stored authenticator was configured.")
+    return 0

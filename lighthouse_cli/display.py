@@ -488,6 +488,16 @@ def _safe_local_message(raw: str) -> str | None:
     return None
 
 
+# Mirrors ``ms_errors.RELOGIN_CATEGORIES`` (a sibling layer this module may
+# not import); a test keeps the two equal.
+_RENEWAL_FAILURE_CATEGORIES = frozenset({
+    "credentials_rejected", "code_rejected", "method_unavailable", "clock_skew",
+    "interrupt", "network", "store", "busy", "pending_human_login", "unknown",
+})
+# The raw "(automatic sign-in failed: X)" or this formatter's own
+# "automatic sign-in failed (X)", so formatting twice keeps the category.
+_RENEWAL_FAILURE_RE = re.compile(r"automatic sign-in failed(?:: | \()([a-z_]{1,32})\)")
+
 _STATUS_CATEGORIES = {
     401: "Session expired", 403: "Permission denied", 404: "Not found", 429: "Rate limited",
 }
@@ -534,6 +544,12 @@ def format_user_error(error_value: BaseException | str) -> str:
     # The auth exception has a detailed __str__ containing nested recovery and
     # transport text.  Its category and fixed recovery command are enough.
     if name in {"sessionexpirederror", "sessionexpired"} or "session expired" in lowered:
+        renewal = _RENEWAL_FAILURE_RE.search(raw)
+        if renewal and renewal.group(1) in _RENEWAL_FAILURE_CATEGORIES:
+            return (
+                f"Session expired; automatic sign-in failed ({renewal.group(1)}). "
+                "Run: lighthouse auth login"
+            )
         return "Session expired. Run: lighthouse auth login"
 
     # Submission rate limiting is deliberately not retried by the API client.

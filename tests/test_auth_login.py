@@ -7,6 +7,7 @@ I/O; end-to-end behaviour runs through CliRunner smokes.
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import urllib.parse
@@ -20,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from lighthouse_cli import auth as auth_mod
+from lighthouse_cli import session_renewal
 from lighthouse_cli.auth import (
     normalize_totp,
     plan_login,
@@ -28,9 +30,12 @@ from lighthouse_cli.auth import (
 )
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import load_cookies, save_cookies, save_mfa_pending
-from lighthouse_cli.credential_store import CredentialStoreError
+from lighthouse_cli.credential_store import CredentialStore, CredentialStoreError
 from lighthouse_cli.ms_auth import MicrosoftSSOError
+from lighthouse_cli.ms_errors import RELOGIN_CATEGORIES, VALID_MFA_METHODS
 from lighthouse_cli.ms_mfa import MfaProbeResult, UserProof
+from lighthouse_cli.session_renewal import RenewalError, RenewalUnavailableError, renewal_lock
+from lighthouse_cli.totp import parse_totp_secret
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -98,12 +103,12 @@ def creds_env(isolated_config: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @contextmanager
 def _mock_sso(
-    check_auth: bool = True,
+    session_valid: bool = True,
     login_side_effect: BaseException | None = None,
 ) -> Iterator[tuple[MagicMock, MagicMock]]:
-    """Mock MicrosoftSSOClient and LighthouseClient inside lighthouse_cli.auth.
+    """Mock MicrosoftSSOClient and the session probe inside lighthouse_cli.auth.
 
-    Yields ``(sso_mock, client_mock)``; ``sso.login`` returns valid cookies
+    Yields ``(sso_mock, probe_mock)``; ``sso.login`` returns valid cookies
     unless ``login_side_effect`` is given.
     """
     sso = MagicMock()
@@ -111,9 +116,10 @@ def _mock_sso(
     if login_side_effect is not None:
         sso.login.side_effect = login_side_effect
     with patch.object(auth_mod, "MicrosoftSSOClient", return_value=sso):
-        with patch.object(auth_mod, "LighthouseClient") as client_cls:
-            client_cls.return_value.check_auth.return_value = check_auth
-            yield sso, client_cls.return_value
+        with patch.object(
+            auth_mod, "probe_cookies", return_value="valid" if session_valid else "invalid",
+        ) as probe:
+            yield sso, probe
 
 
 def _invoke_login(
@@ -296,17 +302,17 @@ def test_plan_login(
 def _patch_tail(
     monkeypatch: pytest.MonkeyPatch, check_ok: bool = True,
 ) -> tuple[list[str], MagicMock, MagicMock]:
-    """Stub the tail's collaborators; return (call order, client factory, store)."""
+    """Stub the tail's collaborators; return (call order, session probe, store)."""
     order: list[str] = []
     monkeypatch.setattr(auth_mod, "save_cookies", lambda cookies: order.append("cookies"))
-    client = MagicMock()
-    client.check_auth.side_effect = lambda: order.append("check") or check_ok
-    client_factory = MagicMock(return_value=client)
-    monkeypatch.setattr(auth_mod, "LighthouseClient", client_factory)
+    probe = MagicMock(
+        side_effect=lambda cookies: order.append("check") or ("valid" if check_ok else "invalid"),
+    )
+    monkeypatch.setattr(auth_mod, "probe_cookies", probe)
     store = MagicMock()
     store.save.side_effect = lambda u, p: order.append("creds")
     monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
-    return order, client_factory, store
+    return order, probe, store
 
 
 @pytest.mark.parametrize(
@@ -321,23 +327,25 @@ def test_tail_orders_cookies_before_check_before_credential_save(
     monkeypatch: pytest.MonkeyPatch, pair: tuple[str, str] | None, expected_order: list[str],
 ) -> None:
     """Security ordering: seal cookies → validate session → save credentials."""
-    order, client_factory, _store = _patch_tail(monkeypatch)
+    order, probe, _store = _patch_tail(monkeypatch)
+    cookies = _make_d2l_cookies()
 
     rc = auth_mod._persist_check_report(
-        _make_d2l_cookies(), json_output=True,
+        cookies, json_output=True,
         failure_hint="Try: lighthouse auth login", save_credentials_pair=pair,
     )
 
     assert rc == 0
     assert order == expected_order
-    client_factory.assert_called_once_with(read_only_auth=True)
+    # The candidate cookies themselves are probed, not whatever is on disk.
+    probe.assert_called_once_with(cookies)
 
 
 def test_tail_failed_session_check_saves_nothing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """check_auth failure reports an error and never stores credentials."""
-    _order, _factory, store = _patch_tail(monkeypatch, check_ok=False)
+    """A failed session probe reports an error and never stores credentials."""
+    _order, _probe, store = _patch_tail(monkeypatch, check_ok=False)
 
     rc = auth_mod._persist_check_report(
         _make_d2l_cookies(), json_output=True,
@@ -463,15 +471,15 @@ def test_login_credential_sources(
 # ---------------------------------------------------------------------------
 
 def test_totp_flag_submits_code_and_verifies_session(cli_runner: CliRunner, creds_env: Path) -> None:
-    """--totp submits the 2FA code without prompting; check_auth() then confirms
-    the session is valid."""
-    with _mock_sso() as (sso, client):
+    """--totp submits the 2FA code without prompting; the session probe then
+    confirms the session is valid."""
+    with _mock_sso() as (sso, probe):
         result = _invoke_login(cli_runner, ["--totp", "123456"])
 
     assert result.exit_code == 0
     sso.login.assert_called_once()
     assert sso.login.call_args.args[2] == "123456"
-    client.check_auth.assert_called_once()
+    probe.assert_called_once_with(_make_d2l_cookies())
 
 
 def test_explicit_app_method_ignores_stale_sms_pending(cli_runner: CliRunner, creds_env: Path) -> None:
@@ -575,13 +583,13 @@ def test_auth_status_works_after_login(cli_runner: CliRunner, isolated_config: P
     (isolated_config / "cookies.json").write_text(json.dumps(cookies))
 
     with patch("lighthouse_cli.commands.LighthouseClient") as mock_commands:
-        with patch.object(auth_mod, "LighthouseClient") as mock_auth:
-            mock_client = MagicMock()
-            mock_client.check_auth.return_value = True
-            mock_client.cookies = cookies
-            mock_commands.return_value = mock_client
-            mock_auth.return_value = mock_client
-            result = cli_runner.invoke(cli, ["auth", "status"], catch_exceptions=False)
+        mock_client = MagicMock()
+        mock_client.check_auth.return_value = True
+        mock_client.cookies = cookies
+        mock_client.renewed_session = False
+        mock_client.renewal_failure = None
+        mock_commands.return_value = mock_client
+        result = cli_runner.invoke(cli, ["auth", "status"], catch_exceptions=False)
 
     assert result.exit_code == 0
     assert "Session valid" in result.output or "valid" in result.output
@@ -668,8 +676,8 @@ def test_unexpected_error_never_leaks_exception_text(cli_runner: CliRunner, cred
 
 def test_unexpected_failure_wrapped_cleanly(cli_runner: CliRunner, creds_env: Path) -> None:
     """An unexpected exception exits cleanly under --json — never a traceback."""
-    with _mock_sso() as (_sso, client):
-        client.check_auth.side_effect = RuntimeError("kaboom")
+    with _mock_sso() as (_sso, probe):
+        probe.side_effect = RuntimeError("kaboom")
         result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
 
     assert result.exit_code == 1
@@ -827,7 +835,7 @@ def test_keyring_failure_is_clean_under_json(
 
 def test_failed_validation_never_saves_credentials(cli_runner: CliRunner, creds_env: Path) -> None:
     """--save-credentials with a failed session check stores nothing."""
-    with _mock_sso(check_auth=False):
+    with _mock_sso(session_valid=False):
         result = _invoke_login(
             cli_runner, ["--totp", "123456", "--save-credentials", "--json"],
         )
@@ -849,8 +857,7 @@ def test_verify_never_saves_credentials(
         with patch.object(auth_mod, "MicrosoftSSOClient") as sso_cls:
             sso_cls.return_value.complete_mfa_pending.return_value = _make_d2l_cookies()
             with patch.object(auth_mod, "CredentialStore", store_cls):
-                with patch.object(auth_mod, "LighthouseClient") as client_cls:
-                    client_cls.return_value.check_auth.return_value = True
+                with patch.object(auth_mod, "probe_cookies", return_value="valid"):
                     result = cli_runner.invoke(
                         cli, ["auth", "verify", "123456", "--json"],
                         catch_exceptions=False,
@@ -1389,3 +1396,396 @@ class TestMfaMethodVocabulary:
             catch_exceptions=False,
         )
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Stored authenticator (unattended sign-in)
+# ---------------------------------------------------------------------------
+
+AUTHENTICATOR_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"  # pragma: allowlist secret
+STORED_PASSWORD = "stored-password-sentinel"  # pragma: allowlist secret
+STORED_LOGIN_NOTICE = "Using the stored authenticator"
+
+
+class _UnreadableStdin(io.BytesIO):
+    """A stdin that fails the test when read (Click probes it with ``read(0)``)."""
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size == 0:
+            return b""
+        raise AssertionError("stdin was read")
+
+    def read1(self, size: int = -1) -> bytes:
+        raise AssertionError("stdin was read")
+
+    def readline(self, size: int | None = -1) -> bytes:
+        raise AssertionError("stdin was read")
+
+    def readinto(self, buffer: Any) -> int:
+        raise AssertionError("stdin was read")
+
+
+def _provider_login(username: str, password: str, **kwargs: Any) -> dict[str, str]:
+    """Answer MFA through the provider once, like the real PhoneAppOTP path."""
+    kwargs["totp_provider"]()
+    return _make_d2l_cookies()
+
+
+@pytest.fixture
+def stored_authenticator(
+    creds_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[MagicMock, MagicMock]:
+    """Saved credentials plus an authenticator bound to the env username.
+
+    Returns ``(sso, probe)``: the fake SSO client the stored path signs in
+    with, and the session probe (always ``valid``).
+    """
+    store = CredentialStore()
+    store.save("user@manipal.edu", STORED_PASSWORD)
+    store.save_totp("User@Manipal.edu", parse_totp_secret(AUTHENTICATOR_SECRET), last_step=None)
+    sso = MagicMock()
+    sso.login.side_effect = _provider_login
+    monkeypatch.setattr(session_renewal, "MicrosoftSSOClient", lambda: sso)
+    probe = MagicMock(return_value="valid")
+    monkeypatch.setattr(auth_mod, "probe_cookies", probe)
+    monkeypatch.delenv("LIGHTHOUSE_MFA_METHOD", raising=False)
+    return sso, probe
+
+
+@pytest.mark.parametrize(
+    ("explicit_method", "totp_code", "totp_stdin", "expected"),
+    [
+        pytest.param(None, None, False, True, id="method-unset"),
+        pytest.param("app", None, False, True, id="app"),
+        *[
+            pytest.param(method, None, False, False, id=method)
+            for method in VALID_MFA_METHODS if method != "app"
+        ],
+        pytest.param(None, "123456", False, False, id="literal-totp"),
+        pytest.param("app", "123456", False, False, id="app-literal-totp"),
+        pytest.param(None, None, True, False, id="totp-stdin"),
+    ],
+)
+def test_use_stored_authenticator_policy(
+    explicit_method: str | None, totp_code: str | None, totp_stdin: bool, expected: bool,
+) -> None:
+    assert auth_mod.use_stored_authenticator(
+        explicit_method=explicit_method, totp_code=totp_code, totp_stdin=totp_stdin,
+    ) is expected
+
+
+@pytest.mark.parametrize(
+    ("args", "env_method"),
+    [
+        pytest.param([], None, id="method-unset"),
+        pytest.param(["--mfa-method", "app"], None, id="flag-app"),
+        pytest.param([], "app", id="env-app"),
+    ],
+)
+def test_stored_authenticator_signs_in_without_reading_stdin(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    env_method: str | None,
+) -> None:
+    sso, probe = stored_authenticator
+    if env_method is not None:
+        monkeypatch.setenv("LIGHTHOUSE_MFA_METHOD", env_method)
+
+    with patch.object(auth_mod, "MicrosoftSSOClient") as human_sso:
+        result = cli_runner.invoke(
+            cli, ["auth", "login", *args, "--json"],
+            input=_UnreadableStdin(), catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0, result.stderr
+    # json.loads rejects a second document, so this is the only one.
+    assert json.loads(result.stdout) == {"success": True, "cookies": list(auth_mod.COOKIE_NAMES)}
+    assert STORED_LOGIN_NOTICE in result.stderr
+    human_sso.assert_not_called()
+    sso.login.assert_called_once()
+    # The password resolved for this run (env), not the stored one.
+    assert sso.login.call_args.args == ("user@manipal.edu", "secret")
+    assert sso.login.call_args.kwargs["mfa_method"] == "app"
+    probe.assert_called_once_with(_make_d2l_cookies())
+    assert load_cookies() == _make_d2l_cookies()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        *[
+            pytest.param(["--mfa-method", method], id=method)
+            for method in VALID_MFA_METHODS if method != "app"
+        ],
+        pytest.param(["--totp", "123456"], id="literal-totp"),
+        pytest.param(["--mfa-method", "app", "--totp", "123456"], id="app-literal-totp"),
+    ],
+)
+def test_explicit_method_or_code_keeps_the_person_driven_flow(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock], args: list[str],
+) -> None:
+    sso, _probe = stored_authenticator
+
+    with _mock_sso():
+        result = _invoke_login(cli_runner, [*args, "--json"])
+
+    json.loads(result.stdout)
+    sso.login.assert_not_called()
+    assert STORED_LOGIN_NOTICE not in result.stderr
+
+
+def test_env_method_other_than_app_keeps_the_person_driven_flow(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sso, _probe = stored_authenticator
+    monkeypatch.setenv("LIGHTHOUSE_MFA_METHOD", "sms")
+
+    with _mock_sso():
+        result = _invoke_login(cli_runner, ["--json"])
+
+    json.loads(result.stdout)
+    sso.login.assert_not_called()
+
+
+def test_username_mismatch_keeps_the_person_driven_flow(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sso, _probe = stored_authenticator
+    monkeypatch.setenv("LIGHTHOUSE_USERNAME", "someone.else@manipal.edu")
+
+    with _mock_sso() as (human_sso, _human_probe):
+        result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    human_sso.login.assert_called_once()
+    sso.login.assert_not_called()
+
+
+def test_unreadable_stored_authenticator_warns_and_keeps_the_person_driven_flow(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock],
+) -> None:
+    sso, _probe = stored_authenticator
+    CredentialStore().authenticator_file.write_text("{not json")
+
+    with _mock_sso() as (human_sso, _human_probe):
+        result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    assert "ignoring an unreadable stored authenticator" in result.stderr
+    human_sso.login.assert_called_once()
+    sso.login.assert_not_called()
+
+
+def test_without_flock_login_keeps_the_person_driven_flow(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sso, _probe = stored_authenticator
+    monkeypatch.setattr(session_renewal, "_HAS_FLOCK", False)
+
+    with _mock_sso() as (human_sso, _human_probe):
+        result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    assert STORED_LOGIN_NOTICE not in result.stderr
+    human_sso.login.assert_called_once()
+    sso.login.assert_not_called()
+
+
+def test_valid_cookies_on_disk_do_not_skip_an_explicit_login(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock],
+) -> None:
+    sso, _probe = stored_authenticator
+    save_cookies({**_make_d2l_cookies(), "d2lSessionVal": "older-session"})
+
+    result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    sso.login.assert_called_once()
+    assert load_cookies() == _make_d2l_cookies()
+
+
+def test_stored_login_saves_cookies_once_and_skips_the_person_tail(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[dict[str, str]] = []
+    real_save = session_renewal.save_cookies
+
+    def counting_save(cookies: dict[str, str]) -> None:
+        saved.append(dict(cookies))
+        real_save(cookies)
+
+    monkeypatch.setattr(session_renewal, "save_cookies", counting_save)
+    monkeypatch.setattr(auth_mod, "save_cookies", MagicMock(side_effect=AssertionError("person tail ran")))
+
+    result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    assert saved == [_make_d2l_cookies()]
+    stored_authenticator[1].assert_called_once_with(_make_d2l_cookies())
+
+
+def test_stored_login_records_a_failure_and_a_later_success_clears_it(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock], creds_env: Path,
+) -> None:
+    sso, _probe = stored_authenticator
+    state_file = creds_env / "relogin_state.json"
+    sso.login.side_effect = MicrosoftSSOError(
+        "rejected", step="POST credentials", category="credentials_rejected",
+    )
+
+    failed = _invoke_login(cli_runner, ["--json"])
+
+    assert failed.exit_code == 1
+    assert json.loads(failed.stdout) == {
+        "success": False, "error": auth_mod._STORED_LOGIN_FAILURES["credentials_rejected"],
+    }
+    state = json.loads(state_file.read_text())
+    assert (state["blocked"], state["category"]) == (True, "credentials_rejected")
+
+    # An explicit login ignores the breaker, and success clears it.
+    sso.login.side_effect = _provider_login
+    succeeded = _invoke_login(cli_runner, ["--json"])
+
+    assert succeeded.exit_code == 0
+    assert not state_file.exists()
+
+
+def test_every_category_has_a_stored_login_message() -> None:
+    assert set(auth_mod._STORED_LOGIN_FAILURES) == RELOGIN_CATEGORIES
+
+
+def test_unknown_stored_login_failure_names_the_login_that_clears_the_block() -> None:
+    """A chooser login signs in but leaves automatic sign-in blocked."""
+    message = auth_mod._STORED_LOGIN_FAILURES["unknown"]
+
+    assert "Run: lighthouse auth login." in message
+    assert "automatic sign-in stays blocked until lighthouse auth login works with the stored authenticator" in message
+
+
+@pytest.mark.parametrize("category", sorted(RELOGIN_CATEGORIES))
+def test_stored_login_failure_renders_one_fixed_document(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock], category: str,
+) -> None:
+    message = auth_mod._STORED_LOGIN_FAILURES[category]
+
+    with patch.object(auth_mod, "renew_session", side_effect=RenewalError(category)):
+        result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"success": False, "error": message}
+    assert f"Error: {message}" in result.stderr
+
+
+def test_stored_login_without_a_matching_authenticator_reports_setup(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock],
+) -> None:
+    with patch.object(auth_mod, "renew_session", side_effect=RenewalUnavailableError()):
+        result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"success": False, "error": str(RenewalUnavailableError())}
+
+
+def test_stored_login_clears_a_pending_two_step_login(
+    cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock], creds_env: Path,
+) -> None:
+    save_mfa_pending({"mfa_method": "sms", "created_at": "2026-08-27T00:00:00Z"})
+    assert (creds_env / "mfa_pending.json").exists()
+
+    result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    assert not (creds_env / "mfa_pending.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        pytest.param(["--save-credentials"], ("user@manipal.edu", "secret"), id="save"),
+        pytest.param([], ("user@manipal.edu", STORED_PASSWORD), id="no-save"),
+    ],
+)
+def test_stored_login_saves_credentials_only_when_asked(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    args: list[str],
+    expected: tuple[str, str],
+) -> None:
+    result = _invoke_login(cli_runner, [*args, "--json"])
+
+    assert result.exit_code == 0
+    assert CredentialStore().load() == expected
+
+
+def test_tail_holds_the_sign_in_lock_while_it_checks_its_own_cookies(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A concurrent automatic sign-in cannot publish cookies mid-tail."""
+    candidate = _make_d2l_cookies()
+    other_attempts: list[str] = []
+
+    def other_sign_in() -> None:
+        try:
+            with renewal_lock(timeout=0.2):
+                other_attempts.append("acquired")
+        except RenewalError as exc:
+            other_attempts.append(exc.category)
+
+    def probe(cookies: dict[str, str]) -> str:
+        worker = threading.Thread(target=other_sign_in)
+        worker.start()
+        worker.join(10)
+        assert cookies == candidate
+        return "valid"
+
+    monkeypatch.setattr(auth_mod, "probe_cookies", probe)
+
+    rc = auth_mod._persist_check_report(candidate, json_output=True)
+
+    assert rc == 0
+    assert other_attempts == ["busy"]
+    assert load_cookies() == candidate
+    assert json.loads(capsys.readouterr().out)["success"] is True
+
+
+def test_tail_busy_saves_no_cookies_and_no_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    probe = MagicMock(return_value="valid")
+    monkeypatch.setattr(auth_mod, "probe_cookies", probe)
+    store = MagicMock()
+    monkeypatch.setattr(auth_mod, "CredentialStore", lambda: store)
+    monkeypatch.setattr(session_renewal, "LOCK_TIMEOUT_SECONDS", 0.2)
+    held, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with renewal_lock():
+            held.set()
+            release.wait(10)
+
+    worker = threading.Thread(target=holder)
+    worker.start()
+    assert held.wait(10)
+    try:
+        rc = auth_mod._persist_check_report(
+            _make_d2l_cookies(), json_output=True, save_credentials_pair=("u", "p"),
+        )
+    finally:
+        release.set()
+        worker.join(10)
+
+    assert rc == 1
+    assert json.loads(capsys.readouterr().out) == {"success": False, "error": auth_mod._SIGN_IN_BUSY}
+    assert not CredentialStore().cookie_file.exists()
+    probe.assert_not_called()
+    store.save.assert_not_called()

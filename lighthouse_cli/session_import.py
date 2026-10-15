@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+from contextlib import AbstractContextManager, nullcontext
+from typing import NoReturn
 
 import click
 
@@ -10,7 +12,20 @@ from .config import COOKIE_NAMES, missing_cookie_names
 from .connection import active_connection
 from .credential_store import CredentialStore
 from .display import JsonOutputCommand, output_json, utc_now_iso
+from .session_renewal import RenewalError, renewal_lock
 from .utils import _loads_strict_json
+
+_IMPORT_FAILED = (
+    "Session import failed. Check the input origin, required cookies and encryption key source."
+)
+_SIGN_IN_BUSY = "Another sign-in is in progress. Run the command again."
+
+
+def _fail(message: str, json_output: bool) -> NoReturn:
+    click.echo(message, err=True)
+    if json_output:
+        output_json({"imported": False, "error": message})
+    raise SystemExit(1)
 
 
 @click.command("import-session", cls=JsonOutputCommand)
@@ -40,17 +55,20 @@ def import_session(json_output: bool) -> None:
         if missing_cookie_names(cookies):
             raise ValueError()
         store = CredentialStore(config_dir=connection.cookie_dir)
-        store.write_artifact(
-            store.cookie_file,
-            metadata={"extracted_at": utc_now_iso()},
-            secret={"origin": connection.origin, "cookies": cookies},
+        # The built-in session is also written by automatic sign-in.
+        lock: AbstractContextManager[None] = (
+            renewal_lock() if connection.cookie_dir is None else nullcontext()
         )
+        with lock:
+            store.write_artifact(
+                store.cookie_file,
+                metadata={"extracted_at": utc_now_iso()},
+                secret={"origin": connection.origin, "cookies": cookies},
+            )
+    except RenewalError as exc:
+        _fail(_SIGN_IN_BUSY if exc.category == "busy" else _IMPORT_FAILED, json_output)
     except Exception:
-        message = "Session import failed. Check the input origin, required cookies and encryption key source."
-        click.echo(message, err=True)
-        if json_output:
-            output_json({"imported": False, "error": message})
-        raise SystemExit(1) from None
+        _fail(_IMPORT_FAILED, json_output)
     if json_output:
         output_json({"imported": True, "verified": False})
     else:

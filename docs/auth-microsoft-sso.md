@@ -110,6 +110,21 @@ lighthouse auth login --mfa-method app --totp 123456
 An explicit `--mfa-method app` starts a fresh app flow and will not resume a
 stale SMS `mfa_pending.json`.
 
+### Stored authenticator (app TOTP) — unattended
+
+```bash
+lighthouse auth totp-setup        # once; secret from a hidden prompt or stdin
+lighthouse auth login             # no prompt
+```
+
+With saved credentials and a stored authenticator secret, `auth login`
+(no `--totp`; `--mfa-method` unset or `app`) runs the same `PhoneAppOTP` flow.
+The CLI generates the code itself after `BeginAuth` and sends exactly one
+`EndAuth`; any rejection fails with `code_rejected` and is never retried.
+It never writes `mfa_pending.json`. Read commands use the same path to sign in
+again when the session expires. Setup, the security trade-off, and the failure
+breaker are in [auth-unattended.md](auth-unattended.md).
+
 ### Voice call — codeless approval
 
 ```bash
@@ -211,6 +226,8 @@ followed manually so the SAML body is never replayed to an untrusted target.
 | `lighthouse_cli/ms_auth.py` | SSO + MFA + SAML implementation |
 | `lighthouse_cli/auth.py` | CLI orchestration, credential store |
 | `lighthouse_cli/config.py` | `cookies.json`, `mfa_pending.json` |
+| `lighthouse_cli/session_renewal.py` | Unattended sign-in: lock, time-step reservation, breaker |
+| `lighthouse_cli/totp.py` | RFC 6238 code generation for the stored authenticator |
 
 ## Verification
 

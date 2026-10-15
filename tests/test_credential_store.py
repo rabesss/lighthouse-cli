@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from lighthouse_cli import credential_store
 from lighthouse_cli.auth import CredentialStore, CredentialStoreError
 from lighthouse_cli.config import ensure_config_dir
 from lighthouse_cli.credential_store import _derive_passphrase_key
+from lighthouse_cli.totp import TotpParams
 from lighthouse_cli.utils import _loads_strict_json
 
 
@@ -407,3 +409,163 @@ def test_invalid_recorded_kdf_iterations_rejected_before_derivation(
         CredentialStore().load()
     if is_int:
         assert str(bad_iterations) in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Stored authenticator (authenticator.json)
+# ---------------------------------------------------------------------------
+
+_TOTP_KEY = b"authenticator-sentinel-key"
+_TOTP_BASE32 = base64.b32encode(_TOTP_KEY).decode("ascii").rstrip("=")
+_TOTP_USER = "totp-owner@learner.manipal.edu"
+_TOTP_METADATA = {"kind": "totp", "algorithm": "SHA1", "digits": 6, "period": 30}
+
+
+def _totp_params(key: bytes = _TOTP_KEY) -> TotpParams:
+    return TotpParams(key=key)
+
+
+def _write_totp_document(
+    config_dir: Path, *, metadata: dict[str, Any], secret: dict[str, Any]
+) -> None:
+    store = CredentialStore()
+    store.write_artifact(store.authenticator_file, metadata=metadata, secret=secret)
+
+
+@pytest.mark.parametrize("source", ["passphrase", "keyring"])
+def test_totp_round_trip_under_each_key_source(
+    config_dir: Path, request: pytest.FixtureRequest, source: str
+) -> None:
+    if source == "keyring":
+        request.getfixturevalue("fake_keyring")
+    store = CredentialStore()
+    store.save_totp(_TOTP_USER, _totp_params(), last_step=None)
+
+    path = config_dir / "authenticator.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert doc["key_source"] == source
+    assert {k: doc[k] for k in _TOTP_METADATA} == _TOTP_METADATA
+    assert path.stat().st_mode & 0o777 == 0o600
+
+    loaded = CredentialStore().load_totp()
+    assert loaded is not None
+    assert loaded.username == _TOTP_USER
+    assert loaded.params.key == _TOTP_KEY
+    assert loaded.last_step is None
+
+
+def test_totp_file_holds_no_plaintext_secret_or_username(config_dir: Path) -> None:
+    CredentialStore().save_totp(_TOTP_USER, _totp_params(), last_step=7)
+    raw = (config_dir / "authenticator.json").read_text(encoding="utf-8")
+    assert _TOTP_BASE32 not in raw
+    assert _TOTP_BASE32.lower() not in raw
+    assert _TOTP_USER not in raw
+    assert "totp-owner" not in raw
+
+
+def test_stored_totp_repr_hides_secret_fields(config_dir: Path) -> None:
+    CredentialStore().save_totp(_TOTP_USER, _totp_params(), last_step=3)
+    loaded = CredentialStore().load_totp()
+    rendered = repr(loaded)
+    assert _TOTP_USER not in rendered
+    assert _TOTP_BASE32 not in rendered
+    assert repr(_TOTP_KEY) not in rendered
+    assert rendered == "StoredTotp(last_step=3)"
+
+
+def test_load_totp_absent_returns_none(config_dir: Path) -> None:
+    assert CredentialStore().load_totp() is None
+
+
+_GOOD_SECRET = {"username": _TOTP_USER, "secret": _TOTP_BASE32, "last_step": 5}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "secret"),
+    [
+        ({**_TOTP_METADATA, "kind": "hotp"}, _GOOD_SECRET),
+        ({**_TOTP_METADATA, "digits": 8}, _GOOD_SECRET),
+        ({**_TOTP_METADATA, "digits": 6.0}, _GOOD_SECRET),
+        ({**_TOTP_METADATA, "period": "30"}, _GOOD_SECRET),
+        ({**_TOTP_METADATA, "algorithm": "SHA256"}, _GOOD_SECRET),
+        ({**_TOTP_METADATA, "extra": "x"}, _GOOD_SECRET),
+        ({k: v for k, v in _TOTP_METADATA.items() if k != "period"}, _GOOD_SECRET),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "last_step": True}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "last_step": -1}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "last_step": 5.0}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "last_step": "5"}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "username": ""}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "username": 42}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "secret": "not base32!"}),  # pragma: allowlist secret
+        (_TOTP_METADATA, {**_GOOD_SECRET, "secret": 12345}),
+        (_TOTP_METADATA, {**_GOOD_SECRET, "extra": 1}),
+        (_TOTP_METADATA, {"username": _TOTP_USER, "secret": _TOTP_BASE32}),
+    ],
+)
+def test_load_totp_rejects_tampered_documents(
+    config_dir: Path, metadata: dict[str, Any], secret: dict[str, Any]
+) -> None:
+    _write_totp_document(config_dir, metadata=metadata, secret=secret)
+    with pytest.raises(CredentialStoreError) as exc_info:
+        CredentialStore().load_totp()
+    message = str(exc_info.value)
+    assert message == (
+        "Stored authenticator data is invalid. Run: lighthouse auth totp-setup"
+    )
+    assert _TOTP_USER not in message
+
+
+def test_reserve_totp_step_strictly_advances(config_dir: Path) -> None:
+    store = CredentialStore()
+    store.save_totp(_TOTP_USER, _totp_params(), last_step=None)
+    store.reserve_totp_step(100)
+    loaded = store.load_totp()
+    assert loaded is not None and loaded.last_step == 100
+    assert loaded.username == _TOTP_USER and loaded.params.key == _TOTP_KEY
+    for stale in (100, 99):
+        with pytest.raises(CredentialStoreError, match="already used"):
+            store.reserve_totp_step(stale)
+    store.reserve_totp_step(101)
+    assert store.load_totp().last_step == 101  # type: ignore[union-attr]
+
+
+def test_reserve_totp_step_without_authenticator_fails(config_dir: Path) -> None:
+    with pytest.raises(CredentialStoreError, match="invalid"):
+        CredentialStore().reserve_totp_step(1)
+    assert not (config_dir / "authenticator.json").exists()
+
+
+def test_save_totp_rejects_bad_arguments(config_dir: Path) -> None:
+    store = CredentialStore()
+    with pytest.raises(CredentialStoreError):
+        store.save_totp("", _totp_params(), last_step=None)
+    with pytest.raises(CredentialStoreError):
+        store.save_totp(_TOTP_USER, _totp_params(), last_step=True)  # type: ignore[arg-type]
+    with pytest.raises(CredentialStoreError):
+        store.save_totp(_TOTP_USER, TotpParams(key=_TOTP_KEY, digits=8), last_step=None)
+    assert not (config_dir / "authenticator.json").exists()
+
+
+def test_delete_totp_is_idempotent(config_dir: Path) -> None:
+    store = CredentialStore()
+    store.save_totp(_TOTP_USER, _totp_params(), last_step=None)
+    assert store.delete_totp() is True
+    assert not (config_dir / "authenticator.json").exists()
+    assert store.delete_totp() is False
+
+
+def test_totp_paths_reject_symlinks(config_dir: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside-sentinel", encoding="utf-8")
+    (config_dir / "authenticator.json").symlink_to(outside)
+    store = CredentialStore()
+    for action in (
+        lambda: store.save_totp(_TOTP_USER, _totp_params(), last_step=None),
+        store.load_totp,
+        lambda: store.reserve_totp_step(1),
+        store.delete_totp,
+    ):
+        with pytest.raises(CredentialStoreError, match="symlink"):
+            action()
+    assert (config_dir / "authenticator.json").is_symlink()
+    assert outside.read_text(encoding="utf-8") == "outside-sentinel"

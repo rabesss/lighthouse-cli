@@ -24,6 +24,7 @@ from .display import short as _short
 from .display import utc_now_iso as _utc_now_iso
 from .manifest import MAX_MANIFEST_SIZE, normalize_sha256
 from .quiz_rules import navigation_rules
+from .session_renewal import unattended_status
 from .sync_engine import Mode, run_course, safe_output_path_text, validate_output_root
 from .utils import _course_identifier, get_enrolled_course_catalog
 
@@ -1032,32 +1033,60 @@ def _resolve_course_scope(
 # ---------------------------------------------------------------------------
 
 def cmd_auth_status(json_output: bool = False) -> int:
-    """Check if stored cookies are valid."""
-    payload = {"valid": False}
+    """Check if stored cookies are valid.
+
+    An expired (or missing) session signs in again when unattended sign-in is
+    configured, exactly as any other command would.
+    """
+    unattended = unattended_status()
+    payload: dict[str, Any] = {"valid": False, "unattended_login": unattended}
     try:
         client = LighthouseClient()
         cookies = client.cookies
     except Exception as e:
         return _error(e, json_output=json_output, payload=payload)
-    if not cookies:
+    if not cookies and not unattended["configured"]:
         return _error("No cookies found. Run: lighthouse auth login", json_output=json_output, payload=payload)
 
     try:
         valid = client.check_auth()
     except Exception as e:
-        return _error(e, json_output=json_output, payload=payload)
+        return _error(e, json_output=json_output, payload=_status_payload(payload, client))
+    cookies = client.cookies
     if valid:
         if json_output:
-            _output_json({"valid": True, "cookies": list(cookies.keys())})
+            _output_json({
+                "valid": True,
+                "cookies": list(cookies.keys()),
+                "renewed": client.renewed_session,
+                "unattended_login": unattended_status(),
+            })
             return 0
+        if client.renewed_session:
+            print("Session renewed.")
         print(f"Session valid. Cookies: {', '.join(cookies.keys())}")
         warn_if_cookies_stale()
         return 0
-    return _error(
-        "Session expired. Run: lighthouse auth login",
-        json_output=json_output,
-        payload={"valid": False, "cookies": list(cookies.keys())},
+    message = (
+        f"Session expired (automatic sign-in failed: {client.renewal_failure})."
+        if client.renewal_failure
+        else "Session expired. Run: lighthouse auth login"
     )
+    return _error(
+        message,
+        json_output=json_output,
+        payload=_status_payload({**payload, "cookies": list(cookies.keys())}, client),
+    )
+
+
+def _status_payload(payload: dict[str, Any], client: LighthouseClient) -> dict[str, Any]:
+    """Add the renewal outcome (a fixed category or null) to a failure payload."""
+    return {
+        **payload,
+        "renewed": client.renewed_session,
+        "category": client.renewal_failure,
+        "unattended_login": unattended_status(),
+    }
 
 
 def cmd_semesters(json_output: bool = False) -> int:
