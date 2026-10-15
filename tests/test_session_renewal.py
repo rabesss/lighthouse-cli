@@ -737,6 +737,60 @@ def test_lock_rejects_a_symlinked_lock_file(config_dir: Path, tmp_path: Path) ->
     assert caught.value.category == "store"
 
 
+_WITHOUT_FCNTL = """
+import sys
+sys.modules["fcntl"] = None  # importing it fails, as on Windows
+from lighthouse_cli import api, auth, cli, commands, session_import, session_renewal
+print(session_renewal.unattended_supported())
+"""
+
+
+def test_modules_import_without_fcntl() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", _WITHOUT_FCNTL],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"
+
+
+@pytest.fixture
+def no_flock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sr, "_HAS_FLOCK", False)
+
+
+def test_without_flock_the_lock_still_serializes_threads(config_dir: Path, no_flock: None) -> None:
+    entered, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with renewal_lock():
+            entered.set()
+            release.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(RenewalError) as caught:
+            with renewal_lock(timeout=0.2):
+                pass
+        assert caught.value.category == "busy"
+    finally:
+        release.set()
+        t.join(5)
+    assert not (config_dir / "relogin.lock").exists()
+
+
+def test_without_flock_stored_authenticator_sign_in_is_off(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO, no_flock: None,
+) -> None:
+    assert unattended_configured() is False
+    with pytest.raises(RenewalUnavailableError):
+        _renew(Validator("valid"))
+    assert sso.logins == []
+    assert _state(config_dir) is None
+
+
 def test_threads_share_one_sign_in(configured: CredentialStore, sso: FakeSSO) -> None:
     sso.delay = 0.2
     results: list[RenewalResult] = []

@@ -60,6 +60,7 @@ from .session_renewal import (
     renew_session,
     renewal_lock,
     store_authenticator,
+    unattended_supported,
 )
 from .totp import SECRET_ERROR_MESSAGES, TotpSecretError, parse_totp_secret
 
@@ -126,6 +127,7 @@ _SAFE_BROWSER_NETWORK_ERRORS = frozenset({
 _SIGN_IN_BUSY = "Another sign-in is in progress. Run the command again."
 _SIGN_IN_STORE = str(RenewalError("store"))
 _NO_SAVED_CREDENTIALS = "No saved credentials. Run: lighthouse auth login --save-credentials"
+_UNATTENDED_UNSUPPORTED = "Unattended sign-in needs a POSIX system such as Linux or macOS."
 _HIDDEN_INPUT_UNAVAILABLE = (
     "Cannot hide input on this terminal. Pipe the secret on stdin instead."
 )
@@ -179,6 +181,7 @@ _STORED_LOGIN_FAILURES = {
 _SAFE_FIXED_AUTH_MESSAGES = frozenset({
     _SIGN_IN_STORE,
     _NO_SAVED_CREDENTIALS,
+    _UNATTENDED_UNSUPPORTED,
     _HIDDEN_INPUT_UNAVAILABLE,
     _NO_MATCHING_AUTHENTICATOR,
     _INVALID_TOTP_MSG,
@@ -1105,6 +1108,8 @@ _MAX_SECRET_LINE = 4096
 
 def _stored_authenticator_matches(username: str) -> bool:
     """Whether a readable stored authenticator is bound to ``username``."""
+    if not unattended_supported():
+        return False
     try:
         stored = CredentialStore().load_totp()
     except CredentialStoreError as exc:
@@ -1183,6 +1188,8 @@ def cmd_auth_totp_setup(*, json_output: bool = False) -> int:
     The secret is bound to the saved username and sealed like the password.
     It is never printed, and neither is a code generated from it.
     """
+    if not unattended_supported():
+        return _auth_error(_UNATTENDED_UNSUPPORTED, json_output)
     ensure_config_dir()
     store = CredentialStore()
     store.preflight()

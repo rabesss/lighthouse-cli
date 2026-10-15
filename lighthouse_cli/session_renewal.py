@@ -4,7 +4,9 @@ When the D2L session expires, :func:`renew_session` signs in again through
 Microsoft SSO using the stored password and a generated authenticator
 (PhoneAppOTP) code, saves the new cookies and checks them.  Everything runs
 under one sign-in lock shared by threads and processes, so concurrent
-callers reuse a single renewal instead of each signing in.
+callers reuse a single renewal instead of each signing in.  Without ``fcntl``
+(not POSIX) the lock covers only threads, so stored-authenticator sign-in is
+off there.
 
 A circuit breaker in ``relogin_state.json`` (plaintext, never secret) stops
 automatic attempts after an authentication-class failure until a person signs
@@ -16,7 +18,6 @@ Nothing here prints.  Errors carry fixed text and a category from
 
 from __future__ import annotations
 
-import fcntl
 import hmac
 import json
 import os
@@ -31,6 +32,13 @@ from pathlib import Path
 from typing import Literal
 
 import requests
+
+try:
+    import fcntl
+except ImportError:  # not POSIX: other processes cannot be locked out
+    _HAS_FLOCK = False
+else:
+    _HAS_FLOCK = True
 
 from .config import COOKIE_NAMES, load_cookies, missing_cookie_names, save_cookies
 from .credential_store import (
@@ -176,9 +184,24 @@ def _flock_until(descriptor: int, deadline: float) -> None:
 
 
 @contextmanager
+def _process_lock(deadline: float) -> Iterator[None]:
+    if not _HAS_FLOCK:
+        # Stored-authenticator sign-in is off here, so only this process's
+        # cookie writes need serializing.
+        yield
+        return
+    descriptor = _open_lock_file(CredentialStore())
+    try:
+        _flock_until(descriptor, deadline)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
 def renewal_lock(*, timeout: float | None = None) -> Iterator[None]:
     """Hold the sign-in lock: a process-wide thread lock, then an exclusive
-    ``flock`` on ``<config_dir>/relogin.lock``.
+    ``flock`` on ``<config_dir>/relogin.lock`` where ``fcntl`` exists.
 
     One monotonic deadline (default ``LOCK_TIMEOUT_SECONDS``) covers both.
     Raises ``RenewalError("busy")`` on timeout and ``RenewalError("store")``
@@ -193,16 +216,12 @@ def renewal_lock(*, timeout: float | None = None) -> Iterator[None]:
     if not _THREAD_LOCK.acquire(timeout=max(0.0, timeout)):
         raise RenewalError("busy")
     try:
-        descriptor = _open_lock_file(CredentialStore())
-        try:
-            _flock_until(descriptor, deadline)
+        with _process_lock(deadline):
             _owner.held = True
             try:
                 yield
             finally:
                 _owner.held = False
-        finally:
-            os.close(descriptor)
     finally:
         _THREAD_LOCK.release()
 
@@ -343,14 +362,24 @@ def remove_authenticator() -> bool:
     return removed
 
 
+def unattended_supported() -> bool:
+    """Whether sign-ins can be kept one at a time across processes (POSIX)."""
+    return _HAS_FLOCK
+
+
 def unattended_configured(config_dir: Path | None = None) -> bool:
-    """Cheap check: a stored authenticator and saved credentials both exist.
+    """Cheap check: supported here, and a stored authenticator and saved
+    credentials both exist.
 
     No decryption and no network.
     """
     store = CredentialStore(config_dir=config_dir)
     try:
-        return store.authenticator_file.is_file() and store.credentials_file.is_file()
+        return (
+            unattended_supported()
+            and store.authenticator_file.is_file()
+            and store.credentials_file.is_file()
+        )
     except OSError:
         return False
 
@@ -547,10 +576,13 @@ def renew_session(
         persist_credentials: Save ``credentials`` after a validated sign-in.
 
     Raises:
-        RenewalUnavailableError: No stored authenticator matches the credentials;
-            nothing was attempted.
+        RenewalUnavailableError: No stored authenticator matches the credentials,
+            or this system cannot lock out other processes; nothing was
+            attempted.
         RenewalError: Fixed-text failure with a ``category``.
     """
+    if not unattended_supported():
+        raise RenewalUnavailableError()
     with renewal_lock():
         store = CredentialStore()
         state = _load_state(store)

@@ -1582,6 +1582,23 @@ def test_unreadable_stored_authenticator_warns_and_keeps_the_person_driven_flow(
     sso.login.assert_not_called()
 
 
+def test_without_flock_login_keeps_the_person_driven_flow(
+    cli_runner: CliRunner,
+    stored_authenticator: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sso, _probe = stored_authenticator
+    monkeypatch.setattr(session_renewal, "_HAS_FLOCK", False)
+
+    with _mock_sso() as (human_sso, _human_probe):
+        result = _invoke_login(cli_runner, ["--json"])
+
+    assert result.exit_code == 0
+    assert STORED_LOGIN_NOTICE not in result.stderr
+    human_sso.login.assert_called_once()
+    sso.login.assert_not_called()
+
+
 def test_valid_cookies_on_disk_do_not_skip_an_explicit_login(
     cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock],
 ) -> None:

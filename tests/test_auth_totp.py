@@ -259,6 +259,18 @@ def test_setup_without_saved_credentials_reads_nothing(runner: CliRunner, config
     assert not (config_dir / "authenticator.json").exists()
 
 
+def test_setup_without_flock_refuses_before_reading(
+    runner: CliRunner, saved: CredentialStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_renewal, "_HAS_FLOCK", False)
+
+    result = _setup(runner, _UnreadableStdin(), "--json")
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"success": False, "error": auth_mod._UNATTENDED_UNSUPPORTED}
+    assert saved.load_totp() is None
+
+
 def test_setup_busy_stores_nothing(
     runner: CliRunner, saved: CredentialStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -51,7 +51,9 @@ session.
 ## Setup
 
 You need an encryption key source (`LIGHTHOUSE_SECRETS_PASSPHRASE` or the OS
-keyring; see "Encryption key sources" in the README).
+keyring; see "Encryption key sources" in the README), and a POSIX system such
+as Linux or macOS, which can keep sign-ins one at a time across processes.
+Elsewhere `totp-setup` refuses and the other commands work as before.
 
 1. Sign in once and save your username and password:
 
