@@ -524,6 +524,7 @@ def _attempt(
     credentials: tuple[str, str] | None,
     persist_credentials: bool,
     state: _BreakerState,
+    on_sign_in: Callable[[], None] | None,
 ) -> RenewalResult:
     if automatic:
         reused = _reuse_existing(observed, validate)
@@ -543,6 +544,10 @@ def _attempt(
         # nor a process killed mid-sign-in lets every read send the password.
         now = _utc_now().isoformat()
         _write_state(store, _BreakerState(True, "unknown", now, now))
+    if on_sign_in is not None:
+        # A notice only; a closed stderr must not count as a failed sign-in.
+        with suppress(Exception):
+            on_sign_in()
     cookies = _sign_in(store, username, password, stored_totp)
     save_cookies(cookies)
     probe = validate(dict(cookies))
@@ -562,6 +567,7 @@ def renew_session(
     automatic: bool,
     credentials: tuple[str, str] | None = None,
     persist_credentials: bool = False,
+    on_sign_in: Callable[[], None] | None = None,
 ) -> RenewalResult:
     """Sign in with the stored authenticator under the sign-in lock.
 
@@ -574,6 +580,8 @@ def renew_session(
         credentials: The username/password ``auth login`` resolved; ``None``
             loads the saved pair.
         persist_credentials: Save ``credentials`` after a validated sign-in.
+        on_sign_in: Called once just before this call signs in; not called
+            when it reuses cookies, a gate refuses, or nothing is attempted.
 
     Raises:
         RenewalUnavailableError: No stored authenticator matches the credentials,
@@ -595,6 +603,7 @@ def renew_session(
                 credentials=credentials,
                 persist_credentials=persist_credentials,
                 state=state,
+                on_sign_in=on_sign_in,
             )
         except RenewalUnavailableError:
             raise

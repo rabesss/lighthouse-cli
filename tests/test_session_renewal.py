@@ -65,6 +65,7 @@ class FakeSSO:
     def __init__(self) -> None:
         self.logins: list[dict[str, Any]] = []
         self.codes: list[str] = []
+        self.events: list[str] = []
         self.closed = 0
         self.result: Callable[[], dict[str, str]] = lambda: _cookies("fresh")
         self.delay = 0.0
@@ -73,6 +74,7 @@ class FakeSSO:
         return self
 
     def login(self, username: str, password: str, **kwargs: Any) -> dict[str, str]:
+        self.events.append("login")
         self.logins.append({"username": username, "password": password, **kwargs})
         self.codes.append(kwargs["totp_provider"]())
         if self.delay:
@@ -234,6 +236,91 @@ def test_invalid_newer_cookies_fall_through_to_sign_in(configured: CredentialSto
     result = _renew(Validator("invalid", "valid"), observed_cookies=_cookies("stale"))
     assert result.signed_in is True
     assert len(sso.logins) == 1
+
+
+# ---------------------------------------------------------------------------
+# Sign-in notice
+# ---------------------------------------------------------------------------
+
+
+def test_sign_in_notice_comes_once_before_the_login(configured: CredentialStore, sso: FakeSSO) -> None:
+    result = _renew(on_sign_in=lambda: sso.events.append("notice"))
+    assert result.signed_in is True
+    assert sso.events == ["notice", "login"]
+
+
+def test_reusing_cookies_gives_no_sign_in_notice(configured: CredentialStore, sso: FakeSSO) -> None:
+    save_cookies(_cookies("other-caller"))
+    notices: list[str] = []
+    result = _renew(observed_cookies=_cookies("stale"), on_sign_in=lambda: notices.append("notice"))
+    assert result.signed_in is False
+    assert notices == []
+    assert sso.logins == []
+
+
+@pytest.mark.parametrize(
+    ("gate", "error"),
+    [
+        ("code_rejected", MicrosoftSSOError("x", category="code_rejected")),
+        ("network", requests.ConnectionError("down")),
+        ("pending_human_login", None),
+    ],
+)
+def test_a_refused_sign_in_gives_no_notice(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO, gate: str, error: Exception | None
+) -> None:
+    if error is None:
+        (config_dir / "mfa_pending.json").write_text("{}")
+    else:
+        _fail_with(sso, error)
+        with pytest.raises(RenewalError):
+            _renew()
+    logins = len(sso.logins)
+    notices: list[str] = []
+    with pytest.raises(RenewalError) as caught:
+        _renew(on_sign_in=lambda: notices.append("notice"))
+    assert caught.value.category == gate
+    assert notices == []
+    assert len(sso.logins) == logins
+
+
+def test_no_usable_pair_gives_no_sign_in_notice(configured: CredentialStore, sso: FakeSSO) -> None:
+    notices: list[str] = []
+    with pytest.raises(RenewalUnavailableError):
+        _renew(
+            automatic=False,
+            credentials=("other@example.edu", PASSWORD),
+            on_sign_in=lambda: notices.append("notice"),
+        )
+    assert notices == []
+    assert sso.logins == []
+
+
+def test_a_failing_notice_does_not_fail_the_sign_in(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO
+) -> None:
+    def broken_stderr() -> None:
+        raise ValueError("I/O operation on closed file.")
+
+    result = _renew(on_sign_in=broken_stderr)
+    assert result.signed_in is True
+    assert len(sso.logins) == 1
+    assert _state(config_dir) is None
+
+
+def test_an_interrupted_notice_blocks_without_signing_in(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO
+) -> None:
+    def interrupt() -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _renew(on_sign_in=interrupt)
+    assert sso.logins == []
+    state = _state(config_dir)
+    assert state is not None and (state["blocked"], state["category"]) == (True, "unknown")
+    with renewal_lock(timeout=0):
+        pass
 
 
 def test_unavailable_probe_on_reuse_records_network_cooldown(
@@ -410,11 +497,13 @@ def test_automatic_sign_in_needs_a_writable_breaker_first(
         raise error
 
     monkeypatch.setattr(sr, "atomic_write", fail_write)
+    notices: list[str] = []
     for _ in range(2):
         with pytest.raises(RenewalError) as caught:
-            _renew()
+            _renew(on_sign_in=lambda: notices.append("notice"))
         assert caught.value.category == "store"
     assert sso.logins == []
+    assert notices == []
     assert _state(config_dir) is None
 
 

@@ -314,6 +314,11 @@ def _session_expired(detail: str) -> SessionExpiredError:
     )
 
 
+def _announce_sign_in() -> None:
+    """Tell the user this process is signing in; a waiter that reuses cookies stays quiet."""
+    print("Session expired. Signing in again with the stored authenticator...", file=sys.stderr)
+
+
 def _is_login_redirect(location: object) -> bool:
     """Recognize supported login endpoints without substring false positives."""
     try:
@@ -570,10 +575,10 @@ class LighthouseClient:
     def _recover_session(self, *, browser_fallback: bool) -> None:
         """Replace expired cookies: stored authenticator first, then CDP."""
         if unattended_configured():
-            print("Session expired. Signing in again with the stored authenticator...", file=sys.stderr)
             try:
                 result = renew_session(
-                    observed_cookies=dict(self._cookies), validate=probe_cookies, automatic=True
+                    observed_cookies=dict(self._cookies), validate=probe_cookies, automatic=True,
+                    on_sign_in=_announce_sign_in,
                 )
             except RenewalUnavailableError:
                 pass

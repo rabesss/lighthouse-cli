@@ -10,6 +10,7 @@ import types
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1180,8 +1181,17 @@ def _jar(session: JarSession) -> dict[str, str]:
 @pytest.fixture
 def renewal(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Unattended sign-in is configured and signs in with fresh cookies."""
+
+    def sign_in(**kwargs: Any) -> RenewalResult:
+        result: RenewalResult = renew.return_value
+        if result.signed_in:
+            kwargs["on_sign_in"]()
+        return result
+
     monkeypatch.setattr(api, "unattended_configured", lambda: True)
-    renew = MagicMock(return_value=RenewalResult(dict(RENEWED_COOKIES), signed_in=True))
+    renew = MagicMock(
+        return_value=RenewalResult(dict(RENEWED_COOKIES), signed_in=True), side_effect=sign_in,
+    )
     monkeypatch.setattr(api, "renew_session", renew)
     return renew
 
@@ -1383,6 +1393,7 @@ def test_a_403_from_a_signed_out_session_signs_in_once_and_replays_once(
     assert session.urls == [RESOURCE_URL, WHOAMI_URL, RESOURCE_URL]
     renewal.assert_called_once_with(
         observed_cookies=SYNTHETIC_COOKIES, validate=api.probe_cookies, automatic=True,
+        on_sign_in=api._announce_sign_in,
     )
     browser.assert_not_called()
     assert client.renewed_session is True
@@ -1520,7 +1531,9 @@ def test_a_403_after_signing_in_for_a_401_does_not_sign_in_twice(
 def test_a_failed_sign_in_after_a_signed_out_403_records_its_category(
     renewal: MagicMock,
     browser: MagicMock,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # A refusal by the breaker: renew_session raises without signing in.
     renewal.side_effect = RenewalError("code_rejected")
     client, session = _jar_client([FakeResponse(403), FakeResponse(403)])
 
@@ -1530,6 +1543,7 @@ def test_a_failed_sign_in_after_a_signed_out_403_records_its_category(
     assert client.renewal_failure == "code_rejected"
     assert session.urls == [RESOURCE_URL, WHOAMI_URL]
     browser.assert_not_called()
+    assert "Signing in again" not in capsys.readouterr().err
 
 
 def test_a_signed_out_403_on_a_later_page_resumes_that_page_once(renewal: MagicMock) -> None:
@@ -1613,6 +1627,7 @@ def test_an_expired_session_signs_in_once_and_replays_once(
     assert session.calls == [method, method]
     renewal.assert_called_once_with(
         observed_cookies=SYNTHETIC_COOKIES, validate=api.probe_cookies, automatic=True,
+        on_sign_in=api._announce_sign_in,
     )
     browser.assert_not_called()
     assert client.renewed_session is True
@@ -1626,7 +1641,10 @@ def test_an_expired_session_signs_in_once_and_replays_once(
     assert "renewed-sentinel" not in captured.err
 
 
-def test_reusing_another_callers_sign_in_is_not_reported_as_renewed(renewal: MagicMock) -> None:
+def test_reusing_another_callers_sign_in_is_not_reported_as_renewed(
+    renewal: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     renewal.return_value = RenewalResult(dict(RENEWED_COOKIES), signed_in=False)
     client, _session = _jar_client([FakeResponse(401), FakeResponse(200)])
 
@@ -1634,6 +1652,7 @@ def test_reusing_another_callers_sign_in_is_not_reported_as_renewed(renewal: Mag
 
     assert client.renewed_session is False
     assert client.cookies == RENEWED_COOKIES
+    assert "Signing in again" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -1684,6 +1703,7 @@ def test_missing_cookies_sign_in_before_the_request_when_configured(
 
     renewal.assert_called_once_with(
         observed_cookies=stored or {}, validate=api.probe_cookies, automatic=True,
+        on_sign_in=api._announce_sign_in,
     )
     browser.assert_not_called()
     assert session.calls == ["GET"]
@@ -1706,6 +1726,7 @@ def test_missing_cookies_without_unattended_sign_in_fail_before_any_request(
 def test_missing_cookies_and_no_matching_authenticator_never_open_the_browser(
     renewal: MagicMock,
     browser: MagicMock,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     renewal.side_effect = RenewalUnavailableError()
     client, session = _jar_client([], cookies=None)
@@ -1716,6 +1737,7 @@ def test_missing_cookies_and_no_matching_authenticator_never_open_the_browser(
     assert session.calls == []
     renewal.assert_called_once()
     browser.assert_not_called()
+    assert "Signing in again" not in capsys.readouterr().err
 
 
 def test_expiry_with_no_matching_authenticator_falls_back_to_the_browser(

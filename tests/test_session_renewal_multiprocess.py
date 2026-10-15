@@ -145,7 +145,8 @@ def test_two_processes_share_one_unattended_sign_in(
 
     assert sorted(outcome for outcome, _ in results.values()) == ["reused", "signed_in"]
     assert sum(provider_calls for _, provider_calls in results.values()) == 1
-    assert counter_file.read_text(encoding="utf-8").splitlines() == ["login"]
+    # Only the process that signs in prints the notice; the other reuses its cookies.
+    assert counter_file.read_text(encoding="utf-8").splitlines() == ["notice", "login"]
     assert load_cookies(read_only=True) == FRESH_COOKIES
 
 
@@ -174,7 +175,7 @@ def test_blocked_breaker_prevents_second_process_and_totp_step_reuse(
         start_together=False,
     )
     assert second == {"blocked-worker": ("blocked:code_rejected", 0)}
-    assert counter_file.read_text(encoding="utf-8").splitlines() == ["login"]
+    assert counter_file.read_text(encoding="utf-8").splitlines() == ["notice", "login"]
 
     state = json.loads((config_dir / "relogin_state.json").read_text(encoding="utf-8"))
     assert state["blocked"] is True

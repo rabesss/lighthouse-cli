@@ -91,11 +91,16 @@ def renewal_worker(
             return "valid"
         return "unavailable"
 
+    def announce() -> None:
+        with Path(counter_file).open("a", encoding="utf-8") as counter:
+            counter.write("notice\n")
+
     try:
         result = sr.renew_session(
             observed_cookies=observed_cookies,
             validate=validate,
             automatic=True,
+            on_sign_in=announce,
         )
     except RenewalError as exc:
         outcome = f"blocked:{exc.category}" if failure_category is None else f"error:{exc.category}"
