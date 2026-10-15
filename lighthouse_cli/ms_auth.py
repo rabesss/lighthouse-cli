@@ -64,6 +64,7 @@ from lighthouse_cli.ms_errors import (
     MFA_METHOD_AUTO,
     MFA_METHOD_INSTRUCTIONS,
     MS_ERROR_CODES,
+    PASSWORD_EXPIRED_CODES,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
     MfaPendingError,
@@ -250,16 +251,18 @@ class ResponseSnapshot:
 class Transition(NamedTuple):
     """A pure routing decision for the interstitial walk.
 
-    ``kind`` is one of: ``saml`` (done), ``mfa`` (terminal — an MFA
-    verification page the caller must handle), ``sso_reload`` (re-POST the
-    echoed credential params), ``redirect``, ``hiddenform``, ``kmsi``,
-    ``samlrequest``, ``stop``.
+    ``kind`` is one of: ``saml`` (done), ``password_change`` (terminal — the
+    password has expired; ``error_code`` holds the AADSTS code), ``mfa``
+    (terminal — an MFA verification page the caller must handle),
+    ``sso_reload`` (re-POST the echoed credential params), ``redirect``,
+    ``hiddenform``, ``kmsi``, ``samlrequest``, ``stop``.
     """
 
     kind: str
     url: str = ""
     data: dict[str, str] | None = None
     saml_response: str | None = None
+    error_code: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +343,25 @@ def is_error_page(snapshot: ResponseSnapshot) -> bool:
     )
 
 
+
+def password_change_code(snapshot: ResponseSnapshot) -> int | None:
+    """The AADSTS code of a "change your password" page, else None.
+
+    Keyed on the page id, so an ``stsErrorCode`` on any other page is never
+    misread. The page itself means the password has expired: an absent or
+    unexpected code reports 50055.
+    """
+    cfg = _extract_config_json(snapshot.html) or {}
+    if cfg.get("pgid") != "ConvergedChangePassword":
+        return None
+    raw = cfg.get("stsErrorCode")
+    code = None
+    if isinstance(raw, (str, int)) and not isinstance(raw, bool):
+        with suppress(ValueError):
+            code = int(raw)
+    return code if code in PASSWORD_EXPIRED_CODES else 50055
+
+
 def describe_page_shape(snapshot: ResponseSnapshot) -> str:
     """One-line, secret-free summary of an unrecognized Microsoft page.
 
@@ -417,7 +439,7 @@ def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSS
         recovery = "This email is not associated with a Microsoft account in this tenant."
     elif code in (50056, 50133):
         recovery = "Password is incorrect. If you recently changed your password, try again."
-    elif code == 50055:
+    elif code in PASSWORD_EXPIRED_CODES:
         recovery = "Your password has expired. Reset it via the Microsoft portal."
     elif code == 50057:
         recovery = "Your account has been disabled. Contact IT support."
@@ -749,14 +771,20 @@ def classify_post_mfa(snapshot: ResponseSnapshot, base_url: str) -> Transition:
     """Pure router for one step of the interstitial walk.
 
     Order matters and mirrors the wire protocol: an extracted SAMLResponse
-    ends the walk; an MFA verification page is terminal for the caller to
-    handle; the sso_reload session-pull hop re-POSTs echoed credentials;
+    ends the walk; an expired-password page is terminal and checked before
+    the looser MFA heuristics; an MFA verification page is terminal for the
+    caller to handle; the sso_reload session-pull hop re-POSTs echoed
+    credentials;
     redirects are followed; then auto-submit forms (hiddenform, KMSI/CMSI);
     then the SAMLRequest JS redirect; otherwise stop.
     """
     saml = extract_saml_response(snapshot.html)
     if saml:
         return Transition(kind="saml", saml_response=saml)
+
+    expired_code = password_change_code(snapshot)
+    if expired_code is not None:
+        return Transition(kind="password_change", error_code=expired_code)
 
     if is_mfa_page(snapshot.html):
         return Transition(kind="mfa")
@@ -2160,7 +2188,7 @@ class MicrosoftSSOClient:
                 kmsi_checkpoint={"url": snap.url, "html": snap.html},
             )
 
-        if is_mfa_page(snap.html):
+        if is_mfa_page(snap.html) and password_change_code(snap) is None:
             raise MicrosoftSSOError(
                 "2FA verification failed: invalid or expired code.",
                 step="MFA",
@@ -2398,7 +2426,7 @@ class MicrosoftSSOClient:
                 mfa_data[key] = str(original_config[key])
 
         snap = ResponseSnapshot.from_response(self._post(mfa_url, data=mfa_data))
-        if is_mfa_page(snap.html):
+        if is_mfa_page(snap.html) and password_change_code(snap) is None:
             raise MicrosoftSSOError(
                 "2FA verification failed: invalid or expired code.",
                 step="MFA",
@@ -2425,12 +2453,20 @@ class MicrosoftSSOClient:
         (which continues inline through any interrupts before MFA).
 
         Terminal outcomes: a page carrying SAMLResponse, an MFA page, or an
-        unrecognized page returned to the caller. Exhausting either safety
-        budget raises a clean error.
+        unrecognized page returned to the caller. An expired-password page
+        raises without submitting anything; the post-MFA walk also drops the
+        MFA checkpoint, which could only lead back to the same page.
+        Exhausting either safety budget raises a clean error.
         """
         sso_reloads = 0
         for _ in range(_MAX_POST_MFA_HOPS):
             transition = classify_post_mfa(snapshot, base_url)
+            if transition.kind == "password_change":
+                if checkpoint_kmsi:
+                    from lighthouse_cli.config import clear_mfa_pending
+
+                    clear_mfa_pending()
+                raise build_sso_error(transition.error_code, None, "SSO interstitial walk")
             if transition.kind == "sso_reload":
                 if sso_reloads >= _MAX_SSO_RELOADS:
                     raise MicrosoftSSOError(

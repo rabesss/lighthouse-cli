@@ -164,7 +164,9 @@ ciphertext.
 
 Cleared after D2L cookies are extracted successfully. Recoverable post-EndAuth
 or KMSI failures retain their checkpoint for another `auth verify` attempt;
-other failures discard it so a stale flow cannot block a fresh login.
+other failures discard it so a stale flow cannot block a fresh login. An
+expired-password page after MFA also discards it: resuming could only reach
+the same page.
 
 ## Protocol details (why the payloads look this way)
 
@@ -203,6 +205,16 @@ After ProcessAuth, Microsoft may show “Stay signed in” (`CmsiInterrupt`). Th
 - `canary`, `hpgrequestid` (from `sessionId`), `login` / `loginfmt`
 
 Without `canary` and `hpgrequestid`, Azure returns `AADSTS165000` (missing user-context tokens).
+
+### Expired password (`ConvergedChangePassword`)
+
+When the password has expired, Microsoft answers ProcessAuth (or the
+credentials POST) with an “Update your password” page: `$Config.pgid`
+`ConvergedChangePassword`, `stsErrorCode` 50055 (50144 for an on-premises
+password), `urlPost` `/common/SSPR/End`, and no form. The walk stops there
+and reports the expired password; it never submits that page. A page without
+a readable code is reported as 50055. If `$Config` doesn't parse, the page
+isn't recognised and the old generic error is shown.
 
 ### SAML ACS
 

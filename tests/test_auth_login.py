@@ -31,7 +31,7 @@ from lighthouse_cli.auth import (
 from lighthouse_cli.cli import cli
 from lighthouse_cli.config import load_cookies, save_cookies, save_mfa_pending
 from lighthouse_cli.credential_store import CredentialStore, CredentialStoreError
-from lighthouse_cli.ms_auth import MicrosoftSSOError
+from lighthouse_cli.ms_auth import MicrosoftSSOError, build_sso_error
 from lighthouse_cli.ms_errors import RELOGIN_CATEGORIES, VALID_MFA_METHODS
 from lighthouse_cli.ms_mfa import MfaProbeResult, UserProof
 from lighthouse_cli.session_renewal import RenewalError, RenewalUnavailableError, renewal_lock
@@ -77,6 +77,20 @@ def test_first_party_auth_failures_keep_safe_actionable_categories(
     expected: str,
 ) -> None:
     assert auth_mod._safe_auth_error_message(message) == expected
+
+
+def _expired_password_message(code: int) -> str:
+    return (
+        f"Your Microsoft password has expired ({code}). "
+        "Change it in a browser, then sign in again with the new password."
+    )
+
+
+@pytest.mark.parametrize("code", [50055, 50144])
+def test_expired_password_error_keeps_fixed_message(code: int) -> None:
+    """The full rendered error (Step and Fix lines included) maps to a fixed text."""
+    rendered = str(build_sso_error(code, None, "SSO interstitial walk"))
+    assert auth_mod._safe_auth_error_message(rendered) == _expired_password_message(code)
 
 
 @pytest.fixture
@@ -725,6 +739,16 @@ def test_json_output_failure(cli_runner: CliRunner, creds_env: Path) -> None:
     assert "error" in data
 
 
+def test_json_login_reports_expired_password(cli_runner: CliRunner, creds_env: Path) -> None:
+    error = build_sso_error(50055, None, "SSO interstitial walk")
+    with _mock_sso(login_side_effect=error):
+        result = _invoke_login(cli_runner, ["--totp", "123456", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"success": False, "error": _expired_password_message(50055)}
+    assert result.stderr == f"Error: {_expired_password_message(50055)}\n"
+
+
 def test_auth_json_error_has_one_stdout_document_and_stderr_diagnostic(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -871,6 +895,28 @@ def test_verify_never_saves_credentials(
     assert (isolated_config / "cookies.json").exists()
     assert not (isolated_config / "credentials.json").exists()
     store_cls.return_value.save.assert_not_called()
+
+
+def test_json_verify_reports_expired_password(
+    cli_runner: CliRunner, isolated_config: Path,
+) -> None:
+    store_cls = MagicMock()
+    store_cls.return_value.preflight.return_value = "passphrase"
+
+    with patch.object(auth_mod, "load_mfa_pending", return_value={"mfa_method": "sms"}):
+        with patch.object(auth_mod, "MicrosoftSSOClient") as sso_cls:
+            sso_cls.return_value.complete_mfa_pending.side_effect = build_sso_error(
+                50055, None, "SSO interstitial walk"
+            )
+            with patch.object(auth_mod, "CredentialStore", store_cls):
+                result = cli_runner.invoke(
+                    cli, ["auth", "verify", "123456", "--json"],
+                    catch_exceptions=False,
+                )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"success": False, "error": _expired_password_message(50055)}
+    assert result.stderr == f"Error: {_expired_password_message(50055)}\n"
 
 
 def test_verify_without_pending_reports_usage_before_key_preflight(

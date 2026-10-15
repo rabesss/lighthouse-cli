@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from lighthouse_cli.config import COOKIE_NAMES, load_mfa_pending
+from lighthouse_cli.config import COOKIE_NAMES, load_mfa_pending, save_mfa_pending
 from lighthouse_cli.ms_auth import (
     _MAX_SSO_RELOADS,
     MfaPendingError,
@@ -30,8 +30,10 @@ from lighthouse_cli.ms_auth import (
     classify_post_mfa,
     describe_page_shape,
     is_error_page,
+    is_hiddenform_page,
     is_mfa_page,
     is_sso_reload_page,
+    password_change_code,
     sso_reload_transition,
 )
 from lighthouse_cli.ms_errors import MFA_METHOD_APP
@@ -210,6 +212,45 @@ def sso_reload_html(
         f'"oPostParams": {json.dumps(params)}\n'
         "};\n</script></body></html>"
     )
+
+
+# Microsoft's "Update your password" page (pgid ConvergedChangePassword,
+# AADSTS 50055) as ProcessAuth served it live in Oct 2026: no form, and a
+# $Config that targets the SSPR flow and echoes the credentials. Values are
+# sentinels; an override of OMIT drops the key.
+CHANGE_PASSWORD_FLOW_TOKEN = "CHANGE-PASSWORD-FLOW-TOKEN"  # pragma: allowlist secret
+OMIT = object()
+
+
+def change_password_html(body: str = "", **overrides: Any) -> str:
+    cfg: dict[str, Any] = {
+        "pgid": "ConvergedChangePassword",
+        "stsErrorCode": "50055",
+        "urlPost": "/common/SSPR/End",
+        "sFT": CHANGE_PASSWORD_FLOW_TOKEN,
+        "sPOST_Username": USERNAME,
+        "oPostParams": {"login": USERNAME, "passwd": PASSWORD, "flowToken": CHANGE_PASSWORD_FLOW_TOKEN},
+    }
+    for key, value in overrides.items():
+        if value is OMIT:
+            cfg.pop(key, None)
+        else:
+            cfg[key] = value
+    return (
+        "<html><head><title>Update your password</title></head><body><script>\n"
+        f"$Config = {json.dumps(cfg)};\n</script>{body}</body></html>"
+    )
+
+
+# Also satisfies the loose is_mfa_page heuristics.
+CHANGE_PASSWORD_MFA_LIKE_HTML = change_password_html(
+    body="<div>Enter code</div>",
+    arrUserProofs=[{"authMethodId": "OneWaySMS", "display": "SMS", "isDefault": True}],
+)
+# Also armed for the session-pull re-POST of the echoed credentials.
+CHANGE_PASSWORD_RELOAD_HTML = change_password_html(urlPost=SSO_RELOAD_URL_POST, iSessionPullType=2)
+# Also carries an auto-submit form that would be POSTed to its action.
+CHANGE_PASSWORD_HIDDENFORM_HTML = change_password_html(body=HIDDENFORM_HTML)
 
 
 # Same-host lookalikes origin pinning must refuse: plain http, a suffix-spoofed
@@ -1534,3 +1575,207 @@ class TestSsoReloadInterstitial:
         )
         assert not is_mfa_page(html)
         assert is_error_page(snap(html))
+
+
+# ---------------------------------------------------------------------------
+# Expired password (ConvergedChangePassword)
+# ---------------------------------------------------------------------------
+
+
+def change_password_at(url: str, html: str | None = None) -> FakeResponse:
+    return FakeResponse(200, html=html or change_password_html(), url=url)
+
+
+def assert_expired_password_error(
+    exc: pytest.ExceptionInfo[MicrosoftSSOError], scripted_session: ScriptedSession, code: int = 50055
+) -> None:
+    """The error names the code but echoes nothing from the page, and the
+    page's request was the last one: nothing is submitted to SSPR or re-POSTed."""
+    text = str(exc.value)
+    assert f"[{code}]" in text
+    for secret in (USERNAME, PASSWORD, CHANGE_PASSWORD_FLOW_TOKEN):
+        assert secret not in text
+    assert not any("SSPR" in url for _method, url in scripted_session.calls)
+
+
+class TestExpiredPassword:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            pytest.param("50055", 50055, id="string"),
+            pytest.param("50144", 50144, id="string-50144"),
+            pytest.param(50144, 50144, id="int-50144"),
+            # The page alone means the password expired: anything else is 50055.
+            pytest.param(OMIT, 50055, id="missing"),
+            pytest.param(True, 50055, id="bool"),
+            pytest.param("abc", 50055, id="non-numeric"),
+            pytest.param(50144.0, 50055, id="float"),
+            pytest.param([50144], 50055, id="list"),
+            pytest.param("50126", 50055, id="other-code"),
+        ],
+    )
+    def test_password_change_code_parses_strictly(self, raw: object, expected: int) -> None:
+        assert password_change_code(snap(change_password_html(stsErrorCode=raw))) == expected
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            pytest.param(change_password_html(pgid="ConvergedSignIn"), id="other-pgid"),
+            pytest.param(MYSTERY_HTML, id="no-config"),
+            pytest.param("<script>$Config = {\"pgid\": \"ConvergedChangePassword\",</script>", id="malformed-config"),
+        ],
+    )
+    def test_password_change_code_needs_the_page_id(self, html: str) -> None:
+        assert password_change_code(snap(html)) is None
+
+    @pytest.mark.parametrize(
+        ("html", "code"),
+        [
+            pytest.param(change_password_html(), 50055, id="plain"),
+            pytest.param(CHANGE_PASSWORD_MFA_LIKE_HTML, 50055, id="beats-mfa-heuristics"),
+            pytest.param(CHANGE_PASSWORD_RELOAD_HTML, 50055, id="beats-sso-reload"),
+            pytest.param(CHANGE_PASSWORD_HIDDENFORM_HTML, 50055, id="beats-hiddenform"),
+            pytest.param(change_password_html(stsErrorCode="50144"), 50144, id="code-50144"),
+        ],
+    )
+    def test_classify_post_mfa_stops_on_expired_password(self, html: str, code: int) -> None:
+        transition = classify_post_mfa(snap(html), MS_BASE)
+        assert transition.kind == "password_change"
+        assert transition.error_code == code
+
+    def test_variants_would_otherwise_route_elsewhere(self) -> None:
+        """Guards the variants above: each really trips the check it beats."""
+        assert is_mfa_page(CHANGE_PASSWORD_MFA_LIKE_HTML)
+        assert is_sso_reload_page(snap(CHANGE_PASSWORD_RELOAD_HTML))
+        assert is_hiddenform_page(CHANGE_PASSWORD_HIDDENFORM_HTML)
+
+    @pytest.mark.parametrize(
+        ("html", "kind"),
+        [
+            pytest.param(change_password_html(body=SAML_HTML), "saml", id="saml-response-wins"),
+            pytest.param(MYSTERY_HTML, "stop", id="no-config-unchanged"),
+        ],
+    )
+    def test_classify_post_mfa_precedence(self, html: str, kind: str) -> None:
+        assert classify_post_mfa(snap(html), MS_BASE).kind == kind
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            pytest.param(change_password_html(), id="plain"),
+            pytest.param(CHANGE_PASSWORD_MFA_LIKE_HTML, id="mfa-like"),
+            pytest.param(CHANGE_PASSWORD_HIDDENFORM_HTML, id="hiddenform-like"),
+        ],
+    )
+    def test_inline_login_after_process_auth(
+        self, scripted: ScriptedSession, isolated_config: Path, html: str
+    ) -> None:
+        scripted.enqueue(
+            *mfa_start("PhoneAppOTP"), begin_success(), end_success(), change_password_at(PROCESS_URL, html)
+        )
+        with pytest.raises(MicrosoftSSOError) as exc:
+            run_login(scripted, totp_code=TOTP_CODE)
+        assert_expired_password_error(exc, scripted)
+        assert scripted.calls[-1] == ("POST", PROCESS_URL)
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            pytest.param(change_password_html(), id="plain"),
+            pytest.param(CHANGE_PASSWORD_MFA_LIKE_HTML, id="mfa-like"),
+        ],
+    )
+    def test_legacy_form_mfa(self, scripted: ScriptedSession, isolated_config: Path, html: str) -> None:
+        scripted.enqueue(
+            *sso_start(),
+            FakeResponse(200, html=LEGACY_MFA_HTML, url=MFA_PAGE_URL),
+            change_password_at(PROCESS_URL, html),
+        )
+        with pytest.raises(MicrosoftSSOError) as exc:
+            run_login(scripted, totp_code=TOTP_CODE, mfa_method="app")
+        assert_expired_password_error(exc, scripted)
+        assert scripted.calls[-1] == ("POST", PROCESS_URL)
+
+    @staticmethod
+    def _defer_sms_login(scripted: ScriptedSession) -> None:
+        scripted.enqueue(*mfa_start("OneWaySMS", "SMS"), begin_success())
+        with pytest.raises(MfaPendingError):
+            run_login(scripted, defer_mfa_to_pending=True)
+
+    @pytest.mark.parametrize(
+        ("html", "code"),
+        [
+            pytest.param(change_password_html(), 50055, id="plain"),
+            pytest.param(CHANGE_PASSWORD_RELOAD_HTML, 50055, id="sso-reload-armed"),
+            pytest.param(change_password_html(stsErrorCode="50144"), 50144, id="code-50144"),
+        ],
+    )
+    def test_verify_clears_checkpoint(
+        self, scripted: ScriptedSession, isolated_config: Path, html: str, code: int
+    ) -> None:
+        """A checkpoint kept past EndAuth could only reach the same page again."""
+        self._defer_sms_login(scripted)
+
+        scripted.enqueue(end_success(), change_password_at(PROCESS_URL, html))
+        with pytest.raises(MicrosoftSSOError) as exc:
+            verify(scripted)
+        assert_expired_password_error(exc, scripted, code)
+        assert scripted.calls[-1] == ("POST", PROCESS_URL)
+        assert read_pending() is None
+
+    def test_verify_after_kmsi_in_walk_clears_checkpoint(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        self._defer_sms_login(scripted)
+
+        scripted.enqueue(
+            end_success(),
+            FakeResponse(200, html=kmsi_html("KmsiInterrupt"), url=PROCESS_URL),
+            change_password_at(f"{MS_BASE}/common/login"),
+        )
+        with pytest.raises(MicrosoftSSOError) as exc:
+            verify(scripted)
+        assert_expired_password_error(exc, scripted)
+        assert scripted.calls[-1] == ("POST", f"{MS_BASE}/common/login")
+        assert read_pending() is None
+
+    def test_kmsi_resume_clears_checkpoint(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        self._defer_sms_login(scripted)
+        scripted.enqueue(
+            end_success(),
+            FakeResponse(200, html=kmsi_html("KmsiInterrupt"), url=PROCESS_URL),
+            requests.ConnectionError("connection reset at kmsi"),
+        )
+        with pytest.raises(requests.ConnectionError):
+            verify(scripted)
+        pending = read_pending()
+        assert pending is not None
+        assert "kmsi_checkpoint" in pending
+
+        scripted.enqueue(change_password_at(f"{MS_BASE}/common/login"))
+        with pytest.raises(MicrosoftSSOError) as exc:
+            verify(scripted)
+        assert_expired_password_error(exc, scripted)
+        assert scripted.calls[-1] == ("POST", f"{MS_BASE}/common/login")
+        assert read_pending() is None
+
+    def test_login_after_credentials_post(self, scripted: ScriptedSession, isolated_config: Path) -> None:
+        scripted.enqueue(*sso_start(change_password_html()))
+        with pytest.raises(MicrosoftSSOError) as exc:
+            run_login(scripted)
+        assert_expired_password_error(exc, scripted)
+        assert scripted.calls[-1] == ("POST", CREDS_POST_URL)
+
+    def test_probe_after_credentials_post_keeps_checkpoint(
+        self, scripted: ScriptedSession, isolated_config: Path
+    ) -> None:
+        """The probe never owns the MFA checkpoint, so it leaves one alone."""
+        save_mfa_pending({"mfa_method": "sms", "created_at": "2026-10-15T00:00:00Z"})
+        checkpoint = read_pending()
+        assert checkpoint is not None
+        scripted.enqueue(*sso_start(change_password_html()))
+        with closing(make_client(scripted)) as client, pytest.raises(MicrosoftSSOError) as exc:
+            client.probe_mfa_methods(USERNAME, PASSWORD)
+        assert_expired_password_error(exc, scripted)
+        assert scripted.calls[-1] == ("POST", CREDS_POST_URL)
+        assert read_pending() == checkpoint
