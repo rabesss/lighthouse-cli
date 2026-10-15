@@ -38,12 +38,15 @@ factor.
 
 **What never signs in automatically:**
 
-- uploads and other writes (`submit`, quiz answers, any POST/PUT/DELETE);
+- write requests: uploads, quiz answers, any POST/PUT/DELETE;
 - reads marked unsafe to repeat, and the quiz-attempt flows;
 - connections other than the built-in Lighthouse one.
 
-These fail with "Session expired" as before. Run `lighthouse auth login`, or
-any read command, to sign in.
+These fail with "Session expired" as before, and a write is never sent twice.
+Run `lighthouse auth login`, or any read command, to sign in. The reads a write
+command makes first, such as `submit` looking up the course and folder, are
+ordinary reads: they can sign in, and the write then runs once with the new
+session.
 
 ## Setup
 

@@ -352,5 +352,5 @@ def test_login_help_explains_the_stored_authenticator(runner: CliRunner) -> None
 
     assert result.exit_code == 0
     text = " ".join(result.stdout.split())
-    assert "unless a stored authenticator is set up" in text
-    assert "With a stored authenticator (lighthouse auth totp-setup)" in text
+    assert "unless a stored authenticator is set up for that username" in text
+    assert "With a stored authenticator (lighthouse auth totp-setup) for the same username" in text
