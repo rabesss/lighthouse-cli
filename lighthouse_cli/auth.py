@@ -44,6 +44,7 @@ from .ms_errors import (
     MFA_METHOD_CHOOSE,
     MFA_METHOD_PUSH,
     MFA_METHOD_SMS,
+    PASSWORD_EXPIRED_CODES,
     VALID_MFA_METHODS,
     MfaPendingError,
     MicrosoftSSOError,
@@ -86,7 +87,7 @@ _AUTH_SECRET_FLAG_RE = re.compile(
     r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;{}\[\]]+"
 )
 _AUTH_CODE_RE = re.compile(r"(?:^|:\s*)\[(\d{3,8})\]\s*")
-_PASSWORD_EXPIRED_CODES = frozenset({"50055", "50144"})
+_PASSWORD_EXPIRED_CODES = frozenset(str(code) for code in PASSWORD_EXPIRED_CODES)
 _AUTH_UNSAFE_BRACKET_RE = re.compile(r"[{}]|\[(?!\d{3,8}\])|(?<!\])\]")
 _AUTH_SAFE_TYPE_RE = re.compile(r"^Unexpected error \([A-Za-z0-9_.]+\)\.")
 

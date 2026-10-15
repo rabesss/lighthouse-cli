@@ -64,6 +64,7 @@ from lighthouse_cli.ms_errors import (
     MFA_METHOD_AUTO,
     MFA_METHOD_INSTRUCTIONS,
     MS_ERROR_CODES,
+    PASSWORD_EXPIRED_CODES,
     SERVER_SENT_CODE_AUTH_IDS,
     VALID_MFA_METHODS,
     MfaPendingError,
@@ -341,8 +342,6 @@ def is_error_page(snapshot: ResponseSnapshot) -> bool:
     )
 
 
-_PASSWORD_EXPIRED_CODES = frozenset({50055, 50144})
-
 
 def password_change_code(snapshot: ResponseSnapshot) -> int | None:
     """The AADSTS code of a "change your password" page, else None.
@@ -359,7 +358,7 @@ def password_change_code(snapshot: ResponseSnapshot) -> int | None:
     if isinstance(raw, (str, int)) and not isinstance(raw, bool):
         with suppress(ValueError):
             code = int(raw)
-    return code if code in _PASSWORD_EXPIRED_CODES else 50055
+    return code if code in PASSWORD_EXPIRED_CODES else 50055
 
 
 def describe_page_shape(snapshot: ResponseSnapshot) -> str:
@@ -439,7 +438,7 @@ def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSS
         recovery = "This email is not associated with a Microsoft account in this tenant."
     elif code in (50056, 50133):
         recovery = "Password is incorrect. If you recently changed your password, try again."
-    elif code in _PASSWORD_EXPIRED_CODES:
+    elif code in PASSWORD_EXPIRED_CODES:
         recovery = "Your password has expired. Reset it via the Microsoft portal."
     elif code == 50057:
         recovery = "Your account has been disabled. Contact IT support."

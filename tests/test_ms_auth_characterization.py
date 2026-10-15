@@ -30,6 +30,7 @@ from lighthouse_cli.ms_auth import (
     classify_post_mfa,
     describe_page_shape,
     is_error_page,
+    is_hiddenform_page,
     is_mfa_page,
     is_sso_reload_page,
     password_change_code,
@@ -248,6 +249,8 @@ CHANGE_PASSWORD_MFA_LIKE_HTML = change_password_html(
 )
 # Also armed for the session-pull re-POST of the echoed credentials.
 CHANGE_PASSWORD_RELOAD_HTML = change_password_html(urlPost=SSO_RELOAD_URL_POST, iSessionPullType=2)
+# Also carries an auto-submit form that would be POSTed to its action.
+CHANGE_PASSWORD_HIDDENFORM_HTML = change_password_html(body=HIDDENFORM_HTML)
 
 
 # Same-host lookalikes origin pinning must refuse: plain http, a suffix-spoofed
@@ -1631,6 +1634,7 @@ class TestExpiredPassword:
             pytest.param(change_password_html(), 50055, id="plain"),
             pytest.param(CHANGE_PASSWORD_MFA_LIKE_HTML, 50055, id="beats-mfa-heuristics"),
             pytest.param(CHANGE_PASSWORD_RELOAD_HTML, 50055, id="beats-sso-reload"),
+            pytest.param(CHANGE_PASSWORD_HIDDENFORM_HTML, 50055, id="beats-hiddenform"),
             pytest.param(change_password_html(stsErrorCode="50144"), 50144, id="code-50144"),
         ],
     )
@@ -1640,9 +1644,10 @@ class TestExpiredPassword:
         assert transition.error_code == code
 
     def test_variants_would_otherwise_route_elsewhere(self) -> None:
-        """Guards the two variants above: each really trips the check it beats."""
+        """Guards the variants above: each really trips the check it beats."""
         assert is_mfa_page(CHANGE_PASSWORD_MFA_LIKE_HTML)
         assert is_sso_reload_page(snap(CHANGE_PASSWORD_RELOAD_HTML))
+        assert is_hiddenform_page(CHANGE_PASSWORD_HIDDENFORM_HTML)
 
     @pytest.mark.parametrize(
         ("html", "kind"),
@@ -1659,6 +1664,7 @@ class TestExpiredPassword:
         [
             pytest.param(change_password_html(), id="plain"),
             pytest.param(CHANGE_PASSWORD_MFA_LIKE_HTML, id="mfa-like"),
+            pytest.param(CHANGE_PASSWORD_HIDDENFORM_HTML, id="hiddenform-like"),
         ],
     )
     def test_inline_login_after_process_auth(

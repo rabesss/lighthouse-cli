@@ -177,6 +177,10 @@ MFA_METHOD_INSTRUCTIONS: dict[str, str] = {
     MFA_AUTH_VOICE_OFFICE: "Answer the office phone call and press # to approve the sign-in.",
 }
 
+# Expired-password codes: the cloud password (50055) or an on-premises one
+# synced to Entra (50144).  Both get the same recovery text.
+PASSWORD_EXPIRED_CODES = frozenset({50055, 50144})
+
 # Microsoft error codes and their meanings
 MS_ERROR_CODES: dict[int, str] = {
     50034: "User account does not exist in this tenant. Check your email address.",
