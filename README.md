@@ -81,14 +81,18 @@ graph TD
   with `--mfa-method app --totp <code>`. `auth mfa-methods` lists what the
   account supports without starting a challenge.
   See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
+- **Auth (unattended, opt-in):** with an authenticator-app secret stored by
+  `auth totp-setup`, an expired or missing session signs in again on the next
+  read, with no prompt. See [docs/auth-unattended.md](docs/auth-unattended.md).
 - **Auth (CDP — `auth refresh` only):** Session cookies
   (`d2lSecureSessionVal`, `d2lSessionVal`, `d2lSameSiteCanaryA`,
   `d2lSameSiteCanaryB`) can also be extracted from a running browser via
   Chrome DevTools Protocol through `browser-harness` or Python websockets.
 - **API:** D2L REST API — LE v1.93, LP v1.47.
 - **Secret storage:** All session secrets are encrypted at rest by
-  `CredentialStore` (Fernet): `cookies.json`, `mfa_pending.json`, and
-  `credentials.json` in `~/.config/lighthouse-cli/` (permissions `0600`;
+  `CredentialStore` (Fernet): `cookies.json`, `mfa_pending.json`,
+  `credentials.json`, and the opt-in `authenticator.json` in
+  `~/.config/lighthouse-cli/` (permissions `0600`;
   override the directory with `LIGHTHOUSE_CONFIG_DIR`). Only non-secret
   metadata (timestamps, MFA method) is stored unencrypted beside the
   ciphertext. See "Encryption key sources" below.
@@ -100,7 +104,8 @@ graph TD
   and deduplication.
 - **Session lifetime:** Cookies expire (typically when the browser session
   ends or D2L rotates them). Re-run `lighthouse auth refresh` or
-  `lighthouse auth login` when commands fail with "Session expired".
+  `lighthouse auth login` when commands fail with "Session expired", or set up
+  [unattended sign-in](docs/auth-unattended.md).
 
 ## Upgrade notes
 
@@ -124,7 +129,9 @@ stderr. `--help` remains human-readable.
 
 - **[READ-ONLY]:** `semesters`, `courses`, `content`, `grades`, `announcements`,
   `calendar`, `quizzes`, `quiz`, and `assignments` only read LMS data.
-- **[LOCAL WRITE]:** `auth` stores local session state, `config courses` writes
+- **[LOCAL WRITE]:** `auth` stores local session state (so do read commands
+  that sign in again under [unattended sign-in](docs/auth-unattended.md)),
+  `config courses` writes
   `course-config.json`, and `download`/`sync` write files and manifests under
   the local download root (`--output-dir`, default `~/Downloads/lighthouse`).
 - **[REMOTE WRITE]:** `submit` sends a file to Brightspace. Instructor
@@ -304,11 +311,14 @@ page. See [Brightspace assessment protocol notes](docs/quiz-protocol.md).
 
 ### `lighthouse auth status`
 
-Check whether the stored session cookies are still valid.
+Check whether the stored session cookies are still signed in. With
+[unattended sign-in](docs/auth-unattended.md) configured, an expired or missing
+session signs in again first, as for any read.
 
 **Flags:** `--json`
 
-**API call:** `GET /d2l/api/versions/` (lightweight ping)
+**API call:** `GET /d2l/api/lp/1.47/users/whoami` (the response body is checked
+and dropped)
 
 **Human output:**
 ```
@@ -319,9 +329,15 @@ Session valid. Cookies: d2lSameSiteCanaryA, d2lSameSiteCanaryB, d2lSecureSession
 ```json
 {
   "valid": true,
-  "cookies": ["d2lSameSiteCanaryA", "d2lSameSiteCanaryB", "d2lSecureSessionVal", "d2lSessionVal"]
+  "cookies": ["d2lSameSiteCanaryA", "d2lSameSiteCanaryB", "d2lSecureSessionVal", "d2lSessionVal"],
+  "renewed": false,
+  "unattended_login": {"configured": true, "blocked": false}
 }
 ```
+
+`renewed` is `true` when this command signed in again. On failure the document
+has `"valid": false`, an `error`, and, if automatic sign-in failed, its
+`category` (see [docs/auth-unattended.md](docs/auth-unattended.md)).
 
 ---
 
@@ -334,6 +350,12 @@ the request. The command saves and verifies the session, then shows useful next
 commands. Non-interactive runs use `auth verify <code|ok>` to resume the same
 saved challenge. See [docs/auth-microsoft-sso.md](docs/auth-microsoft-sso.md).
 Session cookies usually expire after ~5 days; re-run login when `auth status` fails.
+
+With saved credentials and a stored authenticator secret (`auth totp-setup`),
+`auth login` signs in with no prompt: it generates the authenticator-app code
+itself. That happens only when no `--totp` is given and `--mfa-method` is
+unset or `app`. Expired sessions then also sign in again unattended. See
+[docs/auth-unattended.md](docs/auth-unattended.md).
 
 **Credentials (pick one; do not commit secrets):**
 
@@ -355,7 +377,7 @@ lighthouse auth login
 | `--user` | — | Username (email) for Microsoft SSO (or `LIGHTHOUSE_USERNAME` env var) |
 | `--totp` | — | Offline `PhoneAppOTP` code, or `-` to read a fresh SMS code after BeginAuth; rejected for voice/push |
 | `--mfa-method` | `choose` in an interactive terminal; `auto` otherwise | `auto`, `sms`, `app`, `call` (voice), `push` (approve), or `choose` (account method list) |
-| `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days |
+| `--save-credentials` | — | Save email/password encrypted; cookies still expire ~5 days unless [unattended sign-in](docs/auth-unattended.md) is set up |
 | `--json` | — | Machine-readable output |
 
 **Authentication flow:**
@@ -391,6 +413,24 @@ Complete MFA using the pending session from `auth login` (same `BeginAuth` —
 do not run `login` again before verifying). Pass the SMS/WhatsApp code, or the
 literal `ok` after a codeless voice-call or push approval. Required for non-TTY
 / agent workflows.
+
+### `lighthouse auth totp-setup [--json]`
+
+Store the secret of an authenticator app registered on your Microsoft account,
+so expired sessions sign in again unattended. Requires saved credentials
+(`auth login --save-credentials`). The secret (base32 key or `otpauth://totp/`
+URI) is read from a hidden prompt in a terminal, or one line of stdin; there is
+no argument for it. The password and the second factor then share one sealed
+store. Read [docs/auth-unattended.md](docs/auth-unattended.md) before using it.
+
+**JSON output (`--json`):** `{"success": true, "configured": true}`
+
+### `lighthouse auth totp-remove [--json]`
+
+Delete the stored authenticator secret and the automatic sign-in state. Saved
+credentials and cookies stay. Also remove the app from Microsoft security info.
+
+**JSON output (`--json`):** `{"success": true, "removed": true}`
 
 ### `lighthouse auth mfa-methods [--user EMAIL] [--json]`
 
@@ -1223,7 +1263,9 @@ All endpoints are relative to `https://lighthouse.manipal.edu`.
 
 - **Cookie expiration:** Cookies expire. When they do, commands instruct you
   to run `lighthouse auth login` and exit with code 1. `auth refresh` only
-  extracts cookies from an already signed-in local browser CDP session.
+  extracts cookies from an already signed-in local browser CDP session. With
+  [unattended sign-in](docs/auth-unattended.md) configured, reads sign in
+  again once and retry; writes never do.
 - **GradeObjectIdentifier vs GradeObjectId:** The `myGradeValues` API returns
   `GradeObjectIdentifier` (a string), not `GradeObjectId` (an int). The merge
   logic in `cmd_grades` handles this by trying both field names.
@@ -1284,6 +1326,9 @@ programmatically. Here's the recommended workflow:
    OR use headless browser auth (no pre-running browser needed)
    $ lighthouse auth login
    -> {success: true, cookies: [...]}
+
+   With unattended sign-in set up (docs/auth-unattended.md), reads sign in
+   again by themselves; check "unattended_login" in auth status --json
 
 3. Use --json only on a leaf command that advertises it
    $ lighthouse courses --json

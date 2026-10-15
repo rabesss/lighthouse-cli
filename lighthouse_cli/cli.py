@@ -31,6 +31,8 @@ def _lazy_command(module: str, name: str) -> Callable[..., int]:
 cmd_auth_login = _lazy_command(".auth", "cmd_auth_login")
 cmd_auth_mfa_methods = _lazy_command(".auth", "cmd_auth_mfa_methods")
 cmd_auth_refresh = _lazy_command(".auth", "cmd_auth_refresh")
+cmd_auth_totp_remove = _lazy_command(".auth", "cmd_auth_totp_remove")
+cmd_auth_totp_setup = _lazy_command(".auth", "cmd_auth_totp_setup")
 cmd_auth_verify = _lazy_command(".auth", "cmd_auth_verify")
 cmd_auth_status = _lazy_command(".commands", "cmd_auth_status")
 cmd_content = _lazy_command(".commands", "cmd_content")
@@ -129,7 +131,8 @@ def auth_refresh(cdp_port: str | None, json_output: bool) -> None:
               help="Authenticator app code, or '-' to enter a fresh text code after it is sent.")
 @click.option("--mfa-method", type=click.Choice(["auto", "sms", "app", "call", "push", "choose"]), default=None,
               help=("MFA: sms, call, app, push, choose, or auto. A plain interactive login "
-                    "shows the methods Microsoft reports for your account."))
+                    "shows the methods Microsoft reports for your account, unless a stored "
+                    "authenticator is set up for that username."))
 @click.option("--save-credentials", "save_credentials", is_flag=True, default=False,
               help="Save email/password encrypted for future logins (session cookies still expire ~5 days).")
 @click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
@@ -148,6 +151,11 @@ def auth_login(username: str | None, totp: str | None, mfa_method: str | None, s
     Enter your email and password, choose from the verification methods Microsoft
     reports for your account, then enter the fresh code or approve the request.
     The command saves and verifies the session before showing useful next steps.
+
+    With a stored authenticator (lighthouse auth totp-setup) for the same
+    username, a login with no --totp and no --mfa-method, or with --mfa-method
+    app, uses it instead: no method chooser and no code prompt. Any other
+    --mfa-method, or a --totp, keeps the steps above.
 
     MFA flags remain available for scripts and explicit selection: auto, sms,
     call, app, push, or choose. Text codes may arrive via SMS or WhatsApp
@@ -203,6 +211,36 @@ def auth_mfa_methods(username: str | None, json_output: bool) -> None:
     TwoWayVoice* (call), PhoneAppOTP (app), and PhoneAppNotification (push).
     """
     raise SystemExit(cmd_auth_mfa_methods(username=username, password=None, json_output=json_output))
+
+
+@auth.command("totp-setup", cls=JsonOutputCommand)
+@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
+def auth_totp_setup(json_output: bool) -> None:
+    """Store an authenticator-app secret so expired sessions sign in again unattended.
+
+    First save credentials (lighthouse auth login --save-credentials). Then, in
+    Microsoft security info, add a sign-in method: Authenticator app, "Set up a
+    different authentication app", "Can't scan image?". Enter the secret key
+    here; input is hidden in a terminal, or pipe it on stdin. The secret is
+    never accepted as a command-line argument.
+
+    Trade-off: the password and the second factor then sit on this machine,
+    sealed with the same key source (LIGHTHOUSE_SECRETS_PASSPHRASE or the OS
+    keyring). Anyone who can unseal them can sign in as you. Undo with
+    lighthouse auth totp-remove and remove the app from Microsoft security info.
+    """
+    raise SystemExit(cmd_auth_totp_setup(json_output=json_output))
+
+
+@auth.command("totp-remove", cls=JsonOutputCommand)
+@click.option("--json", "json_output", is_flag=True, help="Output this command's JSON result.")
+def auth_totp_remove(json_output: bool) -> None:
+    """Delete the stored authenticator secret.
+
+    Saved credentials and cookies stay. Also remove the authenticator app from
+    Microsoft security info.
+    """
+    raise SystemExit(cmd_auth_totp_remove(json_output=json_output))
 
 
 # ---------------------------------------------------------------------------

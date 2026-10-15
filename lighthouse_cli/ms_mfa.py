@@ -167,6 +167,7 @@ def _select_user_proof(proofs: list[UserProof], preference: str) -> UserProof:
             f"Requested MFA method '{preference}' is not available. Options: {available}",
             step="MFA",
             recovery="Use --mfa-method auto, choose, or register the method in Microsoft security settings.",
+            category="method_unavailable",
         )
 
     # auto: tenant default, else first registered method

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -12,7 +15,7 @@ import pytest
 import requests
 from click.testing import CliRunner
 
-from lighthouse_cli import connection
+from lighthouse_cli import connection, session_renewal
 from lighthouse_cli.api import LighthouseClient, NetworkError, SessionExpiredError
 from lighthouse_cli.assessment_api import (
     AssessmentAPI,
@@ -280,6 +283,48 @@ def test_session_import_rejects_another_origin_without_writes(origin):
     assert result.exit_code == 1
     assert "SYNTHETIC_SESSION" not in result.output
     assert not CredentialStore().cookie_file.exists()
+
+
+@contextmanager
+def _sign_in_lock_held_elsewhere(monkeypatch) -> Iterator[None]:
+    """Hold the sign-in lock from another thread; waiters give up after 0.2 s."""
+    monkeypatch.setattr(session_renewal, "LOCK_TIMEOUT_SECONDS", 0.2)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with session_renewal.renewal_lock():
+            held.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert held.wait(5)
+        yield
+    finally:
+        release.set()
+        thread.join(5)
+
+
+def test_session_import_writes_nothing_while_a_sign_in_holds_the_lock(monkeypatch):
+    document = {"origin": "https://lighthouse.manipal.edu", "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION")}
+    with _sign_in_lock_held_elsewhere(monkeypatch):
+        result = CliRunner().invoke(cli, ["auth", "import-session", "--json"], input=json.dumps(document))
+    assert result.exit_code == 1
+    message = "Another sign-in is in progress. Run the command again."
+    assert json.loads(result.stdout) == {"imported": False, "error": message}
+    assert message in result.stderr
+    assert "SYNTHETIC_SESSION" not in result.output
+    assert not CredentialStore().cookie_file.exists()
+
+
+def test_override_session_import_does_not_wait_for_the_sign_in_lock(sandbox, monkeypatch):
+    document = {"origin": SANDBOX_ORIGIN, "cookies": dict.fromkeys(COOKIE_NAMES, "SYNTHETIC_SESSION")}
+    with _sign_in_lock_held_elsewhere(monkeypatch):
+        result = CliRunner().invoke(cli, ["auth", "import-session", "--json"], input=json.dumps(document))
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["imported"] is True
+    assert CredentialStore(config_dir=sandbox.cookie_dir).cookie_file.exists()
 
 
 def test_session_import_no_longer_accepts_a_site_option():

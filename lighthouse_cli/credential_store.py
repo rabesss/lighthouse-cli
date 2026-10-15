@@ -1,8 +1,8 @@
 """Encrypted storage for every lighthouse-cli session secret.
 
 Single owner of sealing/unsealing for ``credentials.json``, ``cookies.json``,
-and the MFA pending checkpoint.  Imports nothing from ``auth``, ``ms_auth``, or
-``config`` — no import cycles.
+``authenticator.json`` and the MFA pending checkpoint.  Imports nothing from
+``auth``, ``ms_auth``, or ``config`` — no import cycles.
 
 Key resolution (in order):
 
@@ -39,6 +39,7 @@ import binascii
 import json
 import os
 from contextlib import suppress
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,14 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from lighthouse_cli.totp import (
+    TOTP_ALGORITHM,
+    TOTP_DIGITS,
+    TOTP_PERIOD,
+    TotpParams,
+    TotpSecretError,
+    parse_totp_secret,
+)
 from lighthouse_cli.utils import _loads_strict_json, atomic_write
 
 SERVICE_NAME = "lighthouse-cli"
@@ -69,6 +78,18 @@ _ENVELOPE_KEYS = frozenset({"v", "key_source", "kdf_salt", "kdf_iterations", "ci
 # controls or other untrusted text supplied through the environment, and a
 # fixed message keeps this storage boundary safe for CLI diagnostics.
 _UNTRUSTED_PATH_MSG = "Credential storage path contains a symlink and cannot be used."
+
+#: Plaintext metadata of ``authenticator.json``; anything else is rejected.
+_TOTP_METADATA: dict[str, Any] = {
+    "kind": "totp",
+    "algorithm": TOTP_ALGORITHM,
+    "digits": TOTP_DIGITS,
+    "period": TOTP_PERIOD,
+}
+_TOTP_SECRET_KEYS = frozenset({"username", "secret", "last_step"})
+_INVALID_TOTP_MSG = (
+    "Stored authenticator data is invalid. Run: lighthouse auth totp-setup"
+)
 
 
 class CredentialStoreError(Exception):
@@ -252,6 +273,8 @@ class CredentialStore:
     - ``credentials.json`` — stored username/password
     - ``cookies.json`` — D2L session cookies
     - ``mfa_pending.json`` — in-progress MFA checkpoint
+    - ``authenticator.json`` — opt-in authenticator (TOTP) secret, the
+      username it belongs to, and the last time step used
 
     The config directory is resolved from ``LIGHTHOUSE_CONFIG_DIR`` at
     construction time.
@@ -264,6 +287,7 @@ class CredentialStore:
         self.credentials_file = self.config_dir / "credentials.json"
         self.cookie_file = self.config_dir / "cookies.json"
         self.mfa_pending_file = self.config_dir / "mfa_pending.json"
+        self.authenticator_file = self.config_dir / "authenticator.json"
 
     # -- preflight ------------------------------------------------------------
 
@@ -418,6 +442,74 @@ class CredentialStore:
                 f"Credentials file is corrupted ({exc.__class__.__name__})."
             ) from None
         return _credential_pair(data)
+
+    # -- stored authenticator ----------------------------------------------------
+
+    def save_totp(
+        self, username: str, params: TotpParams, *, last_step: int | None
+    ) -> None:
+        """Seal the authenticator secret bound to ``username``.
+
+        ``last_step`` is the newest RFC 6238 time step already used (or
+        None); codes are only ever generated for later steps.
+        """
+        if not isinstance(username, str) or not username.strip():
+            raise CredentialStoreError("Username cannot be empty")
+        if not isinstance(params, TotpParams) or not _valid_last_step(last_step):
+            raise CredentialStoreError(_INVALID_TOTP_MSG)
+        if (params.digits, params.period) != (TOTP_DIGITS, TOTP_PERIOD):
+            raise CredentialStoreError(_INVALID_TOTP_MSG)
+        self.write_artifact(
+            self.authenticator_file,
+            metadata=dict(_TOTP_METADATA),
+            secret={
+                "username": username,
+                "secret": params.secret_base32,
+                "last_step": last_step,
+            },
+        )
+
+    def load_totp(self) -> StoredTotp | None:
+        """Load the stored authenticator, or None when none is configured.
+
+        Raises:
+            CredentialStoreError: When the file cannot be opened, or with a
+                fixed message when any field fails strict validation.
+        """
+        artifact = self.read_artifact(self.authenticator_file)
+        if artifact is None:
+            return None
+        metadata, secret = artifact
+        return _stored_totp(metadata, secret)
+
+    def reserve_totp_step(self, step: int) -> None:
+        """Record ``step`` as used before a code for it is generated.
+
+        Steps strictly advance; a step at or below the stored one is refused.
+        """
+        stored = self.load_totp()
+        if stored is None or not _valid_last_step(step) or step is None:
+            raise CredentialStoreError(_INVALID_TOTP_MSG)
+        if stored.last_step is not None and step <= stored.last_step:
+            raise CredentialStoreError(
+                "The authenticator time step was already used."
+            )
+        self.save_totp(stored.username, stored.params, last_step=step)
+
+    def delete_totp(self) -> bool:
+        """Remove ``authenticator.json``; return whether a file was removed."""
+        _validate_credential_path(self.config_dir)
+        _validate_credential_path(self.authenticator_file)
+        try:
+            self.authenticator_file.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise CredentialStoreError(
+                f"{self.authenticator_file.name} could not be removed "
+                f"({exc.__class__.__name__})."
+            ) from None
+        return True
 
     def _load_and_migrate_legacy(self, blob: bytes) -> tuple[str, str]:
         """Decrypt legacy raw-Fernet credentials with the keyring key, then
@@ -592,6 +684,45 @@ def _credential_pair(data: object) -> tuple[str, str]:
     ):
         raise CredentialStoreError("Credentials file is corrupted.")
     return username, password
+
+
+@dataclass(frozen=True)
+class StoredTotp:
+    """A loaded authenticator binding.  ``repr`` shows only ``last_step``."""
+
+    username: str = field(repr=False)
+    params: TotpParams = field(repr=False)
+    last_step: int | None
+
+
+def _valid_last_step(value: object) -> bool:
+    """None, or a non-negative int that is not a bool."""
+    return value is None or (type(value) is int and value >= 0)
+
+
+def _stored_totp(metadata: dict[str, Any], secret: dict[str, Any]) -> StoredTotp:
+    """Strictly validate a decrypted authenticator document."""
+    if metadata.keys() != _TOTP_METADATA.keys() or any(
+        type(metadata[key]) is not type(value) or metadata[key] != value
+        for key, value in _TOTP_METADATA.items()
+    ):
+        raise CredentialStoreError(_INVALID_TOTP_MSG)
+    username, encoded, last_step = (
+        secret.get("username"), secret.get("secret"), secret.get("last_step"),
+    )
+    if (
+        secret.keys() != _TOTP_SECRET_KEYS
+        or not isinstance(username, str)
+        or not username.strip()
+        or not isinstance(encoded, str)
+        or not _valid_last_step(last_step)
+    ):
+        raise CredentialStoreError(_INVALID_TOTP_MSG)
+    try:
+        params = parse_totp_secret(encoded)
+    except TotpSecretError:
+        raise CredentialStoreError(_INVALID_TOTP_MSG) from None
+    return StoredTotp(username=username, params=params, last_step=last_step)
 
 
 def is_sealed_document(data: object) -> bool:

@@ -48,11 +48,16 @@ with `uv pip compile`. See the `contribution-toolchain` skill in
   `--json` vs human output).
 - `lighthouse_cli/api.py` — `LighthouseClient` (D2L REST client, cookie mgmt,
   course-id resolution, CDP cookie extraction for `auth refresh`).
-- `lighthouse_cli/auth.py` — `cmd_auth_login` / `cmd_auth_verify`.
+- `lighthouse_cli/auth.py` — `cmd_auth_login` / `cmd_auth_verify` /
+  `cmd_auth_totp_setup` / `cmd_auth_totp_remove`.
 - `lighthouse_cli/credential_store.py` — `CredentialStore`: single owner of
   secret sealing (Fernet envelopes; key from `LIGHTHOUSE_SECRETS_PASSPHRASE`
-  or the OS keyring) for `credentials.json`, `cookies.json`, and the MFA
-  pending checkpoint.
+  or the OS keyring) for `credentials.json`, `cookies.json`, the opt-in
+  `authenticator.json`, and the MFA pending checkpoint.
+- `lighthouse_cli/session_renewal.py` — unattended sign-in with the stored
+  authenticator: the cross-process `renewal_lock`, time-step reservation, and
+  the `relogin_state.json` circuit breaker.
+- `lighthouse_cli/totp.py` — RFC 6238 TOTP primitives (stdlib only).
 - **Microsoft SSO is split into focused modules** (do not re-monolithize):
   `ms_auth.py` (`MicrosoftSSOClient`), `ms_parse.py` (HTML/`$Config` parsing),
   `ms_session.py` (cookie/session helpers), `ms_mfa.py` (MFA proof selection),
@@ -79,7 +84,11 @@ with `uv pip compile`. See the `contribution-toolchain` skill in
   valid for `--mfa-method app`. `TwoWayVoice*` (answer and press #) and
   `PhoneAppNotification` (including number matching) are codeless approvals:
   poll EndAuth without `AdditionalAuthData`. Resume a pending MFA session only
-  when its saved method matches the requested method.
+  when its saved method matches the requested method. The stored authenticator
+  (`auth totp-setup`, `docs/auth-unattended.md`) is `PhoneAppOTP` only: its
+  code is generated after `BeginAuth`, submitted once (any rejection is final),
+  and never printed. Automatic sign-in runs only for replay-safe reads on the
+  built-in connection, never for writes or `read_only_auth` clients.
 - **Typing:** keep `from __future__ import annotations`; use `X | None` (not
   `Optional[X]`); never use a bare `Callable` (parameterize it).
 - **External processes:** wrap `subprocess`, Playwright, and CDP/websocket

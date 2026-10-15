@@ -72,6 +72,7 @@ from lighthouse_cli.ms_errors import (
     PlaywrightUnavailableError,
     safe_diagnostic_text,
     safe_upstream_text,
+    sso_error_category,
 )
 from lighthouse_cli.ms_mfa import (
     MfaProbeResult,
@@ -453,7 +454,42 @@ def build_sso_error(code: int | None, msg: str | None, step: str) -> MicrosoftSS
         f"Authentication failed: {description}",
         step=step,
         recovery=recovery,
+        category=sso_error_category(code) if code else None,
     )
+
+
+def _server_error(status: int, step: str) -> MicrosoftSSOError:
+    """Fixed ``network`` error for an HTTP 5xx; only the status is rendered."""
+    return MicrosoftSSOError(
+        f"The sign-in service returned a server error (HTTP {status}). Try again later.",
+        step=step,
+        recovery="Wait a few minutes, then retry.",
+        category="network",
+    )
+
+
+def _raise_for_server_error(resp: requests.Response, step: str) -> None:
+    """Raise a ``network`` error for a 5xx response, before any page parsing.
+
+    A short Microsoft or Lighthouse outage is then a transient failure
+    rather than an unrecognized page.
+    """
+    status = getattr(resp, "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and status >= 500:
+        raise _server_error(status, step)
+
+
+def _is_navigation_outage(exc: BaseException) -> bool:
+    """True when a Playwright ``goto`` could not reach the page at all.
+
+    The exception message is inspected only to classify; it is never shown.
+    """
+    api = sys.modules.get("playwright.sync_api")
+    timeout_cls = getattr(api, "TimeoutError", None)
+    error_cls = getattr(api, "Error", None)
+    if isinstance(timeout_cls, type) and isinstance(exc, timeout_cls):
+        return True
+    return isinstance(error_cls, type) and isinstance(exc, error_cls) and "net::ERR_" in str(exc)
 
 
 def build_password_form_data(
@@ -830,6 +866,9 @@ class MicrosoftSSOClient:
         # form field NAMES, page shape). Never request/response bodies, never
         # headers, cookies, tokens, or query strings.
         self._flow_log = flow_log or os.environ.get("LIGHTHOUSE_DEBUG_FLOW") or ""
+        # False only during a stored-authenticator login, which must never
+        # read, merge or delete a human's pending MFA checkpoint.
+        self._checkpoint_enabled = True
 
     def _new_session(self) -> requests.Session:
         session = requests.Session()
@@ -872,8 +911,12 @@ class MicrosoftSSOClient:
         except OSError:
             pass  # diagnostics must never break the login flow
 
-    def _get(self, url: str, **kwargs: Any) -> requests.Response:
-        """GET with timeout and allow_redirects=False."""
+    def _get(self, url: str, *, _best_effort: bool = False, **kwargs: Any) -> requests.Response:
+        """GET with timeout and allow_redirects=False.
+
+        A 5xx raises a ``network`` error unless ``_best_effort`` marks an
+        optional probe whose response is ignored.
+        """
         resp = self._session.get(
             url,
             allow_redirects=False,
@@ -881,10 +924,12 @@ class MicrosoftSSOClient:
             **kwargs,
         )
         self._record_flow("GET", url, resp.status_code)
+        if not _best_effort:
+            _raise_for_server_error(resp, f"GET {urlparse(url).hostname or 'request'}")
         return resp
 
-    def _post(self, url: str, **kwargs: Any) -> requests.Response:
-        """POST with timeout and allow_redirects=False."""
+    def _post(self, url: str, *, _best_effort: bool = False, **kwargs: Any) -> requests.Response:
+        """POST with timeout and allow_redirects=False (5xx handled as in ``_get``)."""
         data = kwargs.get("data")
         if isinstance(data, dict):
             self._record_flow("POST", url, field_names=sorted(data.keys()))
@@ -895,6 +940,8 @@ class MicrosoftSSOClient:
             **kwargs,
         )
         self._record_flow("POST", url, resp.status_code)
+        if not _best_effort:
+            _raise_for_server_error(resp, f"POST {urlparse(url).hostname or 'request'}")
         return resp
 
     def _post_with_redirects(self, url: str, **kwargs: Any) -> requests.Response:
@@ -963,6 +1010,8 @@ class MicrosoftSSOClient:
 
     def _checkpoint_mfa_pending(self, **updates: Any) -> None:
         """Persist in-progress MFA state so verify can resume after interruptions."""
+        if not self._checkpoint_enabled:
+            return
         from lighthouse_cli.config import update_mfa_pending
 
         updates.setdefault("cookies", _export_session_cookies(self._session))
@@ -1085,6 +1134,7 @@ class MicrosoftSSOClient:
         on_credentials_submitted: Callable[[], None] | None = None,
         read_totp_after_challenge: bool = False,
         defer_mfa_to_pending: bool = False,
+        totp_provider: Callable[[], str] | None = None,
     ) -> dict[str, str]:
         """Execute the full login flow and return D2L session cookies.
 
@@ -1098,6 +1148,10 @@ class MicrosoftSSOClient:
                 BeginAuth sends an SMS/OTP (used with ``--totp -``).
             defer_mfa_to_pending: If True, stop after BeginAuth and save session for
                 ``lighthouse auth verify`` (no second BeginAuth on verify).
+            totp_provider: Stored-authenticator mode.  Called once, after
+                BeginAuth, for the offline PhoneAppOTP code; EndAuth is then
+                submitted once.  Requires ``mfa_method="app"`` and no other
+                code source, and never touches the pending MFA checkpoint.
 
         Returns:
             Dict mapping cookie names (d2lSecureSessionVal, etc.) to values.
@@ -1111,12 +1165,51 @@ class MicrosoftSSOClient:
                 f"Invalid mfa_method {mfa_method!r}. Use: {', '.join(VALID_MFA_METHODS)}",
                 step="MFA",
             )
+        if totp_provider is not None and (
+            mfa_method != MFA_METHOD_APP
+            or totp_code is not None
+            or read_totp_after_challenge
+            or defer_mfa_to_pending
+        ):
+            raise MicrosoftSSOError(
+                "A stored authenticator requires --mfa-method app and no other code source.",
+                step="MFA",
+            )
 
+        self._checkpoint_enabled = totp_provider is None
+        try:
+            return self._login_flow(
+                username,
+                password,
+                totp_code,
+                mfa_method=mfa_method,
+                on_credentials_submitted=on_credentials_submitted,
+                read_totp_after_challenge=read_totp_after_challenge,
+                defer_mfa_to_pending=defer_mfa_to_pending,
+                totp_provider=totp_provider,
+            )
+        finally:
+            self._checkpoint_enabled = True
+
+    def _login_flow(
+        self,
+        username: str,
+        password: str,
+        totp_code: str | None,
+        *,
+        mfa_method: str,
+        on_credentials_submitted: Callable[[], None] | None,
+        read_totp_after_challenge: bool,
+        defer_mfa_to_pending: bool,
+        totp_provider: Callable[[], str] | None,
+    ) -> dict[str, str]:
+        """The :meth:`login` flow after argument validation."""
         # Starting a new login invalidates any previous BeginAuth checkpoint.
         # Resume uses ``complete_mfa_pending`` and never enters this method.
         from lighthouse_cli.config import clear_mfa_pending
 
-        clear_mfa_pending()
+        if self._checkpoint_enabled:
+            clear_mfa_pending()
 
         # Create a fresh session for each login attempt (safe reuse).
         self._session = self._new_session()
@@ -1155,6 +1248,7 @@ class MicrosoftSSOClient:
                 mfa_method=mfa_method,
                 read_totp_after_challenge=read_totp_after_challenge,
                 defer_mfa_to_pending=defer_mfa_to_pending,
+                totp_provider=totp_provider,
             )
             saml_response = extract_saml_response(snap.html)
         elif is_error_page(snap):
@@ -1182,7 +1276,8 @@ class MicrosoftSSOClient:
         # Step 6: Extract D2L cookies. Only after the complete inline flow has
         # produced a valid session do we remove a stale/recovery checkpoint.
         cookies = self._extract_d2l_cookies()
-        clear_mfa_pending()
+        if self._checkpoint_enabled:
+            clear_mfa_pending()
         return cookies
 
     def probe_mfa_methods(self, username: str, password: str) -> MfaProbeResult:
@@ -1395,6 +1490,7 @@ class MicrosoftSSOClient:
         self._record_flow("POST", url, field_names=["resultCode", "ssoDelay", "log"])
         self._post(
             url,
+            _best_effort=True,
             json={
                 "resultCode": 2,
                 "ssoDelay": 0,
@@ -1485,7 +1581,20 @@ class MicrosoftSSOClient:
                 if export_cookies:
                     context.add_cookies(export_cookies)
                 page = context.new_page()
-                page.goto(ms_url, wait_until="networkidle", timeout=60000)
+                try:
+                    nav = page.goto(ms_url, wait_until="networkidle", timeout=60000)
+                except Exception as exc:
+                    if _is_navigation_outage(exc):
+                        raise MicrosoftSSOError(
+                            "The Microsoft sign-in page could not be reached. Try again later.",
+                            step="prepare username",
+                            recovery="Check your connection, then retry.",
+                            category="network",
+                        ) from None
+                    raise
+                nav_status = getattr(nav, "status", None)
+                if isinstance(nav_status, int) and not isinstance(nav_status, bool) and nav_status >= 500:
+                    raise _server_error(nav_status, "prepare username")
                 login_input = page.query_selector('input[name="loginfmt"]')
                 if login_input:
                     page.fill('input[name="loginfmt"]', username)
@@ -1556,6 +1665,7 @@ class MicrosoftSSOClient:
 
         self._get(
             "https://login.live.com/Me.htm?v=3",
+            _best_effort=True,
             headers={"Referer": referer},
         )
 
@@ -1563,14 +1673,18 @@ class MicrosoftSSOClient:
             "https://autologon.microsoftazuread-sso.com/"
             f"{tenant_id}/winauth/ssoprobe?client-request-id={client_request_id}"
         )
-        self._get(ssoprobe_url, headers={"Referer": referer})
+        self._get(ssoprobe_url, _best_effort=True, headers={"Referer": referer})
 
         canary_hdr = str(config.get("apiCanary") or config.get("canary") or "")
         self._post_dsso_status(config, canary_hdr)
 
         updated = self._step_get_credential_type(config, username)
 
-        self._get(f"{ssoprobe_url}&_={int(time.time() * 1000)}", headers={"Referer": referer})
+        self._get(
+            f"{ssoprobe_url}&_={int(time.time() * 1000)}",
+            _best_effort=True,
+            headers={"Referer": referer},
+        )
 
         post_gct_canary = str(updated.get("apiCanary") or canary_hdr)
         self._post_dsso_status(updated, post_gct_canary)
@@ -1667,6 +1781,7 @@ class MicrosoftSSOClient:
             resp.status_code,
             field_names=gct_keys,
         )
+        _raise_for_server_error(resp, "prepare username")
         if resp.status_code != 200 or not isinstance(data, dict):
             return config
 
@@ -1865,6 +1980,7 @@ class MicrosoftSSOClient:
         mfa_method: str = MFA_METHOD_AUTO,
         read_totp_after_challenge: bool = False,
         defer_mfa_to_pending: bool = False,
+        totp_provider: Callable[[], str] | None = None,
     ) -> ResponseSnapshot:
         """Step 4: Handle MFA — ConvergedTFA SAS API or legacy form fallback."""
         mfa_config = _extract_config_json(mfa_snap.html) or {}
@@ -1878,6 +1994,7 @@ class MicrosoftSSOClient:
                 mfa_method=mfa_method,
                 read_totp_after_challenge=read_totp_after_challenge,
                 defer_mfa_to_pending=defer_mfa_to_pending,
+                totp_provider=totp_provider,
             )
         return self._step_handle_mfa_legacy_form(
             mfa_snap,
@@ -1885,6 +2002,7 @@ class MicrosoftSSOClient:
             totp_code,
             mfa_config=mfa_config,
             mfa_method=mfa_method,
+            totp_provider=totp_provider,
         )
 
     def _step_handle_mfa_converged(
@@ -1897,9 +2015,17 @@ class MicrosoftSSOClient:
         mfa_method: str,
         read_totp_after_challenge: bool = False,
         defer_mfa_to_pending: bool = False,
+        totp_provider: Callable[[], str] | None = None,
     ) -> ResponseSnapshot:
         """Handle ConvergedTFA via BeginAuth → EndAuth → ProcessAuth."""
         selected = _select_user_proof(proofs, mfa_method)
+        if totp_provider is not None and selected.auth_method_id != MFA_AUTH_APP_OTP:
+            raise MicrosoftSSOError(
+                "The account offers no authenticator-app code method.",
+                step="MFA",
+                recovery="Register an authenticator app, then run: lighthouse auth totp-setup",
+                category="method_unavailable",
+            )
         is_codeless = selected.auth_method_id in CODELESS_APPROVAL_AUTH_IDS
         if totp_code is not None and selected.auth_method_id != MFA_AUTH_APP_OTP:
             raise MicrosoftSSOError(
@@ -1948,7 +2074,8 @@ class MicrosoftSSOClient:
             )
 
         code_sent_on_begin = selected.auth_method_id in SERVER_SENT_CODE_AUTH_IDS
-        self._print_mfa_phase_banner(proofs, selected, code_sent_on_begin=code_sent_on_begin)
+        if totp_provider is None:
+            self._print_mfa_phase_banner(proofs, selected, code_sent_on_begin=code_sent_on_begin)
 
         if defer_mfa_to_pending:
             from lighthouse_cli.config import save_mfa_pending
@@ -1996,23 +2123,28 @@ class MicrosoftSSOClient:
                 recovery="Run: lighthouse auth verify <code>  (use the code from this message)",
             )
 
-        if not is_codeless:
+        if totp_provider is not None:
+            # Generated only now, after BeginAuth, so a slow username step
+            # cannot age the code.
+            totp_code = totp_provider()
+        elif not is_codeless:
             totp_code = self._collect_totp_after_challenge(
                 selected,
                 totp_code,
                 read_totp_after_challenge=read_totp_after_challenge,
                 code_sent_on_begin=code_sent_on_begin,
             )
-            if not totp_code:
-                raise MicrosoftSSOError(
-                    "2FA code is required but was empty.",
-                    step="MFA",
-                    recovery="Provide a code when prompted or use: lighthouse auth verify <code>",
-                )
+        if not is_codeless and not totp_code:
+            raise MicrosoftSSOError(
+                "2FA code is required but was empty.",
+                step="MFA",
+                recovery="Provide a code when prompted or use: lighthouse auth verify <code>",
+            )
 
         return self._mfa_finish_after_begin(
             mfa_snap.url, mfa_config, selected, begin_data, totp_code or "",
             str(mfa_config.get("sPOST_Username") or ""),
+            single_submission=totp_provider is not None,
         )
 
     def _mfa_finish_after_begin(
@@ -2027,6 +2159,7 @@ class MicrosoftSSOClient:
         skip_end_auth: bool = False,
         end_auth_flow: str | None = None,
         end_auth_ctx: str | None = None,
+        single_submission: bool = False,
     ) -> ResponseSnapshot:
         """EndAuth + ProcessAuth after a successful BeginAuth."""
         process_url = mfa_config.get("urlPost") or "/common/SAS/ProcessAuth"
@@ -2042,6 +2175,7 @@ class MicrosoftSSOClient:
             skip_end_auth=skip_end_auth,
             end_auth_flow=end_auth_flow,
             end_auth_ctx=end_auth_ctx,
+            single_submission=single_submission,
         )
 
         # ProcessAuth: EndAuth already consumed the OTP; only pass tokens (saml2aws pattern).
@@ -2074,8 +2208,13 @@ class MicrosoftSSOClient:
         skip_end_auth: bool = False,
         end_auth_flow: str | None = None,
         end_auth_ctx: str | None = None,
+        single_submission: bool = False,
     ) -> tuple[str, str, dict[str, Any]]:
         """Poll the EndAuth API until MFA verification succeeds.
+
+        With ``single_submission`` (stored-authenticator mode) the code is
+        submitted once: any non-success response, including ``Retry``, raises
+        a fixed ``code_rejected`` error and nothing is resubmitted.
 
         Returns:
             Tuple of (flow_token, ctx, end_data) for use in ProcessAuth.
@@ -2139,6 +2278,15 @@ class MicrosoftSSOClient:
                     end_auth_ctx=str(end_data.get("Ctx") or end_ctx),
                 )
                 break
+            if single_submission:
+                # Raised before the AuthenticationPreviouslyCompleted handler,
+                # which would read another flow's pending checkpoint.
+                raise MicrosoftSSOError(
+                    "The authenticator code was rejected.",
+                    step="MFA",
+                    recovery="Run: lighthouse auth login",
+                    category="code_rejected",
+                )
             if not end_data.get("Retry"):
                 err_code = end_data.get("ErrCode")
                 result = str(end_data.get("ResultValue") or end_data.get("Message") or "")
@@ -2159,11 +2307,14 @@ class MicrosoftSSOClient:
                         step="MFA verify",
                         recovery="If login succeeded but cookies were not saved, run verify again once.",
                     )
+                # Only a known code is rendered, never an arbitrary number.
                 detail = safe_upstream_text(
                     result,
                     fallback=(
                         str(err_code)
-                        if isinstance(err_code, int) and not isinstance(err_code, bool)
+                        if isinstance(err_code, int)
+                        and not isinstance(err_code, bool)
+                        and err_code in MS_ERROR_CODES
                         else "unknown error"
                     ),
                 )
@@ -2216,9 +2367,20 @@ class MicrosoftSSOClient:
         *,
         mfa_config: dict[str, Any],
         mfa_method: str,
+        totp_provider: Callable[[], str] | None = None,
     ) -> ResponseSnapshot:
         """Legacy MFA form POST (older Microsoft pages without arrUserProofs)."""
         import getpass as _getpass
+
+        if totp_provider is not None:
+            # The form carries no proof identity, so it cannot be confirmed
+            # as an offline authenticator code: fail closed.
+            raise MicrosoftSSOError(
+                "This sign-in page cannot use the stored authenticator.",
+                step="MFA",
+                recovery="Run: lighthouse auth login",
+                category="method_unavailable",
+            )
 
         if totp_code is not None and mfa_method != MFA_METHOD_APP:
             raise MicrosoftSSOError(
