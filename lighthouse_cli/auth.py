@@ -145,7 +145,9 @@ _STORED_LOGIN_FAILURES = {
     ),
     "clock_skew": (
         "No fresh authenticator time step is available. "
-        "Check the system clock, then run: lighthouse auth login"
+        "Check the system clock, then run: lighthouse auth login. "
+        "If this repeats with the clock right, run lighthouse auth totp-remove "
+        "and lighthouse auth totp-setup first."
     ),
     "interrupt": (
         "Microsoft sign-in stopped at a page that needs a person. "

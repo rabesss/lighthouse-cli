@@ -121,26 +121,16 @@ def test_setup_reserves_the_current_step(runner: CliRunner, saved: CredentialSto
     assert stored.last_step == STEP0 == time_step(T0, 30)
 
 
-def test_setup_with_the_same_key_keeps_a_newer_step(runner: CliRunner, saved: CredentialStore) -> None:
-    saved.save_totp(USERNAME.upper(), parse_totp_secret(SECRET), last_step=STEP0 + 2)
+@pytest.mark.parametrize("ahead", [2, 100])
+def test_setup_with_the_same_key_keeps_a_newer_step(runner: CliRunner, saved: CredentialStore, ahead: int) -> None:
+    """Even a step a fast clock reserved: forgetting it could resend an accepted code."""
+    saved.save_totp(USERNAME.upper(), parse_totp_secret(SECRET), last_step=STEP0 + ahead)
 
     assert _setup(runner, f"{SECRET}\n", "--json").exit_code == 0
 
     stored = saved.load_totp()
     assert stored is not None
-    assert stored.last_step == STEP0 + 2
-
-
-def test_setup_with_the_same_key_drops_a_step_from_a_fast_clock(
-    runner: CliRunner, saved: CredentialStore,
-) -> None:
-    saved.save_totp(USERNAME, parse_totp_secret(SECRET), last_step=STEP0 + 3)
-
-    assert _setup(runner, f"{SECRET}\n", "--json").exit_code == 0
-
-    stored = saved.load_totp()
-    assert stored is not None
-    assert stored.last_step == STEP0
+    assert stored.last_step == STEP0 + ahead
 
 
 def test_setup_with_a_new_key_starts_from_the_current_step(runner: CliRunner, saved: CredentialStore) -> None:

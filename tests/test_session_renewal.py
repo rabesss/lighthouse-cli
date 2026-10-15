@@ -314,6 +314,93 @@ def test_store_failures_are_not_recorded(configured: CredentialStore, config_dir
     assert state is None or (state["blocked"], state["category"]) == (False, None)
 
 
+def test_store_failure_restores_the_previous_state(configured: CredentialStore, config_dir: Path, sso: FakeSSO) -> None:
+    cooldown = {
+        "v": 1, "blocked": False, "category": "network",
+        "since": "2027-01-01T00:00:00+00:00", "last_attempt": "2027-01-01T00:00:00+00:00",
+    }
+    (config_dir / "relogin_state.json").write_text(json.dumps(cooldown))
+    _fail_with(sso, CredentialStoreError("disk"))
+    with pytest.raises(RenewalError) as caught:
+        _renew()
+    assert caught.value.category == "store"
+    assert _state(config_dir) == cooldown
+
+
+def _only_first_state_write_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes = 0
+    real_write = sr.atomic_write
+
+    def write_once(*args: Any, **kwargs: Any) -> None:
+        nonlocal writes
+        writes += 1
+        if writes > 1:
+            raise PermissionError("read-only")
+        real_write(*args, **kwargs)
+
+    monkeypatch.setattr(sr, "atomic_write", write_once)
+
+
+def test_store_failure_stays_blocked_if_the_state_cannot_be_restored(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _only_first_state_write_succeeds(monkeypatch)
+    _fail_with(sso, CredentialStoreError("disk"))
+    with pytest.raises(RenewalError) as caught:
+        _renew()
+    assert caught.value.category == "store"
+    state = _state(config_dir)
+    assert state is not None and (state["blocked"], state["category"]) == (True, "unknown")
+
+
+def test_a_failure_that_cannot_be_recorded_stays_blocked(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _only_first_state_write_succeeds(monkeypatch)
+    _fail_with(sso, MicrosoftSSOError("x", category="credentials_rejected"))
+    with pytest.raises(RenewalError) as caught:
+        _renew()
+    assert caught.value.category == "store"
+    with pytest.raises(RenewalError) as caught:
+        _renew()
+    assert caught.value.category == "unknown"
+    assert len(sso.logins) == 1
+
+
+def test_automatic_sign_in_is_recorded_as_blocked_while_it_runs(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO
+) -> None:
+    seen: list[dict[str, Any] | None] = []
+
+    def observe() -> dict[str, str]:
+        seen.append(_state(config_dir))
+        return _cookies("fresh")
+
+    sso.result = observe
+    assert _renew().signed_in is True
+    assert seen == [{
+        "v": 1, "blocked": True, "category": "unknown",
+        "since": "2027-01-15T08:00:15+00:00", "last_attempt": "2027-01-15T08:00:15+00:00",
+    }]
+    assert _state(config_dir) is None
+
+
+def test_an_interrupted_sign_in_blocks_the_next_automatic_one(
+    configured: CredentialStore, config_dir: Path, sso: FakeSSO
+) -> None:
+    """A process killed while Microsoft has the password never sends it again unattended."""
+    _fail_with(sso, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        _renew()
+    sso.result = lambda: _cookies("fresh")
+    with pytest.raises(RenewalError) as caught:
+        _renew()
+    assert caught.value.category == "unknown"
+    assert len(sso.logins) == 1
+    assert _renew(automatic=False).signed_in is True
+    assert _state(config_dir) is None
+
+
 @pytest.mark.parametrize("error", [PermissionError("read-only"), CredentialStoreError("unsafe")])
 def test_automatic_sign_in_needs_a_writable_breaker_first(
     configured: CredentialStore, config_dir: Path, sso: FakeSSO,
@@ -573,18 +660,32 @@ def test_provider_reports_clock_skew_when_no_fresh_step(
     assert state is not None and state["category"] == "clock_skew"
 
 
-def test_setup_again_recovers_from_a_step_reserved_by_a_fast_clock(
+def test_remove_then_setup_recovers_from_a_step_reserved_by_a_fast_clock(
     configured: CredentialStore, config_dir: Path, sso: FakeSSO, clock: Clock
 ) -> None:
     configured.reserve_totp_step(STEP0 + 100)
+    sr.store_authenticator(USERNAME, parse_totp_secret(SECRET))
     with pytest.raises(RenewalError) as caught:
         _renew(automatic=False)
     assert caught.value.category == "clock_skew"
+    assert sr.remove_authenticator() is True
     sr.store_authenticator(USERNAME, parse_totp_secret(SECRET))
     assert _state(config_dir) is None
     assert _renew().signed_in is True
     key = parse_totp_secret(SECRET).key
     assert sso.codes == [totp_code(key, for_time=(STEP0 + 1) * 30)]
+
+
+def test_setup_after_a_clock_rollback_never_replays_an_accepted_step(
+    configured: CredentialStore, sso: FakeSSO, clock: Clock
+) -> None:
+    assert _renew().signed_in is True
+    clock.now = T0 - 3 * 30
+    sr.store_authenticator(USERNAME, parse_totp_secret(SECRET))
+    clock.now = T0
+    assert _renew(automatic=False).signed_in is True
+    key = parse_totp_secret(SECRET).key
+    assert sso.codes == [totp_code(key, for_time=T0), totp_code(key, for_time=(STEP0 + 1) * 30)]
 
 
 def test_provider_reports_clock_skew_after_clock_rolls_back_during_wait(

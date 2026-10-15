@@ -50,9 +50,6 @@ LOCK_TIMEOUT_SECONDS = 120.0
 NETWORK_COOLDOWN_SECONDS = 300.0
 _LOCK_POLL_SECONDS = 0.25
 _STEP_MARGIN_SECONDS = 0.05
-#: Setup keeps a used step at most this far ahead of the clock.  A step further
-#: ahead came from a clock running fast, so its code was rejected.
-_MAX_FUTURE_STEPS = 2
 _LOCK_FILE = "relogin.lock"
 _STATE_FILE = "relogin_state.json"
 _STATE_VERSION = 1
@@ -312,8 +309,8 @@ def store_authenticator(username: str, params: TotpParams) -> None:
 
     The current time step counts as used, so the code just typed to register
     the app is never sent again.  Re-storing the same key keeps a newer
-    recorded step, unless a fast clock left it more than ``_MAX_FUTURE_STEPS``
-    ahead: setup is how a person recovers from that.
+    recorded step, even one a fast clock reserved: only ``totp-remove``
+    forgets used steps.
     """
     with renewal_lock():
         store = CredentialStore()
@@ -327,7 +324,6 @@ def store_authenticator(username: str, params: TotpParams) -> None:
             and previous.last_step is not None
             and previous.username.casefold() == username.casefold()
             and hmac.compare_digest(previous.params.key, params.key)
-            and previous.last_step <= last_step + _MAX_FUTURE_STEPS
         ):
             last_step = max(last_step, previous.last_step)
         store.save_totp(username, params, last_step=last_step)
@@ -509,9 +505,10 @@ def _attempt(
         raise _UnrecordedError(exc) from None
     username, password, stored_totp = _usable_pair(credentials, stored)
     if automatic:
-        # Prove the breaker is writable before Microsoft sees the password, so
-        # a failure that could not be recorded is not repeated on every read.
-        _write_state(store, state)
+        # Block until the outcome is known, so neither an unwritable breaker
+        # nor a process killed mid-sign-in lets every read send the password.
+        now = _utc_now().isoformat()
+        _write_state(store, _BreakerState(True, "unknown", now, now))
     cookies = _sign_in(store, username, password, stored_totp)
     save_cookies(cookies)
     probe = validate(dict(cookies))
@@ -568,7 +565,12 @@ def renew_session(
             raise exc.error from None
         except Exception as exc:  # every failure maps to a category
             error = _as_renewal_error(exc)
-            _record_failure(store, state, error.category)
+            if error.category not in _UNRECORDED_CATEGORIES:
+                _record_failure(store, state, error.category)
+            elif automatic:
+                # Undo the in-flight block; if that fails, it stays blocked.
+                with suppress(RenewalError):
+                    _write_state(store, state)
             raise error from None
         if result.signed_in:
             clear_breaker()

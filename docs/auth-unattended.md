@@ -121,12 +121,12 @@ Session expired; automatic sign-in failed (<category>). Run: lighthouse auth log
 | Category | Meaning | Effect | Fix |
 |----------|---------|--------|-----|
 | `credentials_rejected` | Microsoft rejected the saved username or password | Blocked | See "Password change" below |
-| `code_rejected` | Microsoft rejected the generated code | Blocked | Check the clock. If it was wrong, fix it, run `auth totp-setup` again, then `auth login`. If it is right, register the app again and run `auth totp-setup` |
+| `code_rejected` | Microsoft rejected the generated code | Blocked | Check the clock. If it was wrong, see "Clock" below. If it is right, register the app again and run `auth totp-setup` |
 | `method_unavailable` | The account offers no authenticator-app code method | Blocked | Register the app, then `auth totp-setup` |
-| `clock_skew` | No unused time step is available (the clock went backwards) | Blocked | Fix the clock, run `auth totp-setup` again with the same secret, then `auth login`. It can report `clock_skew` for up to 90 seconds more |
+| `clock_skew` | No unused time step is available (the clock went back, or a fast clock used the steps ahead) | Blocked | See "Clock" below |
 | `interrupt` | Microsoft showed a page that needs a person (for example a security-info prompt) | Blocked | Sign in once in a browser, then `auth login` |
-| `unknown` | Anything else, including a corrupt state file | Blocked | `auth login --mfa-method choose` |
-| `network` | Microsoft or D2L could not be reached | 5-minute wait between automatic attempts | Retry later |
+| `unknown` | Anything else, including a corrupt state file or an automatic sign-in that was interrupted (it counts as failed until it finishes) | Blocked | `auth login` |
+| `network` | Microsoft or D2L could not be reached | 5-minute wait between automatic attempts | Retry later, or run `auth login` now. A clock that was fast when it failed stretches the wait by as much |
 | `busy`, `store`, `pending_human_login` | Another sign-in is running; local files unreadable, or the config directory not writable (checked before contacting Microsoft); a two-step `auth login` is waiting for `auth verify` | Not recorded | Retry; check the key source and the config directory permissions; finish with `auth verify` |
 
 **While blocked**, automatic sign-in is refused without contacting Microsoft.
@@ -144,9 +144,14 @@ A login by SMS, call or push gives you a session but leaves the block in place.
 Codes depend on the system clock. Keep it synced with NTP (for example
 `timedatectl set-ntp true`, `systemd-timesyncd` or `chrony`). A clock that is
 more than about 30 seconds off gives `code_rejected`. A clock that goes back
-past the last step used gives `clock_skew`. Both block automatic sign-in until
-you fix the clock, run `auth totp-setup` again, and sign in. Setup forgets a
-step that a fast clock left more than a minute ahead.
+past the last step used gives `clock_skew`. Both block automatic sign-in.
+
+To recover, fix the clock, then run `auth login`. A time step is never used
+twice, even after `auth totp-setup` with the same secret. So if a fast clock
+used steps ahead, `auth login` keeps giving `clock_skew` until the clock
+reaches them. To skip the wait, run `auth totp-remove`, then `auth totp-setup`
+and `auth login`. Do that only once the clock is right: removing forgets which
+steps were used.
 
 ## Password change
 
