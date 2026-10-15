@@ -130,7 +130,7 @@ Session expired; automatic sign-in failed (<category>). Run: lighthouse auth log
 | `interrupt` | Microsoft showed a page that needs a person (for example a security-info prompt) | Blocked | Sign in once in a browser, then `auth login` |
 | `unknown` | Anything else, including a corrupt state file or an automatic sign-in that was interrupted (it counts as failed until it finishes) | Blocked | `auth login` |
 | `network` | Microsoft or D2L could not be reached | 5-minute wait between automatic attempts | Retry later, or run `auth login` now. A clock that was fast when it failed stretches the wait by as much |
-| `busy`, `store`, `pending_human_login` | Another sign-in is running; local files unreadable, or the config directory not writable (checked before contacting Microsoft); a two-step `auth login` is waiting for `auth verify` | Not recorded | Retry; check the key source and the config directory permissions; finish with `auth verify` |
+| `busy`, `store`, `pending_human_login` | Another sign-in is running; local files unreadable, or the config directory not writable (checked before contacting Microsoft); a two-step `auth login` is waiting for `auth verify` | Not recorded. A `store` failure during an automatic sign-in can leave it blocked as `unknown` | Retry; check the key source and the config directory permissions; finish with `auth verify` |
 
 **While blocked**, automatic sign-in is refused without contacting Microsoft.
 These clear the block:

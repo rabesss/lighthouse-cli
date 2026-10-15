@@ -169,7 +169,9 @@ _STORED_LOGIN_FAILURES = {
     ),
     "unknown": (
         "Sign-in with the stored authenticator failed unexpectedly. "
-        "Run: lighthouse auth login --mfa-method choose"
+        "Run: lighthouse auth login. If it fails again, use "
+        "lighthouse auth login --mfa-method choose; automatic sign-in stays "
+        "blocked until lighthouse auth login works with the stored authenticator."
     ),
 }
 # First-party fixed messages shown verbatim: the generic filter below would

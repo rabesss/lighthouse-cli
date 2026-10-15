@@ -1647,6 +1647,14 @@ def test_every_category_has_a_stored_login_message() -> None:
     assert set(auth_mod._STORED_LOGIN_FAILURES) == RELOGIN_CATEGORIES
 
 
+def test_unknown_stored_login_failure_names_the_login_that_clears_the_block() -> None:
+    """A chooser login signs in but leaves automatic sign-in blocked."""
+    message = auth_mod._STORED_LOGIN_FAILURES["unknown"]
+
+    assert "Run: lighthouse auth login." in message
+    assert "automatic sign-in stays blocked until lighthouse auth login works with the stored authenticator" in message
+
+
 @pytest.mark.parametrize("category", sorted(RELOGIN_CATEGORIES))
 def test_stored_login_failure_renders_one_fixed_document(
     cli_runner: CliRunner, stored_authenticator: tuple[MagicMock, MagicMock], category: str,
