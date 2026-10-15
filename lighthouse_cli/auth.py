@@ -86,6 +86,7 @@ _AUTH_SECRET_FLAG_RE = re.compile(
     r"(?i)--(?:pass(?:word)?|token|secret)\s+[^\s,;{}\[\]]+"
 )
 _AUTH_CODE_RE = re.compile(r"(?:^|:\s*)\[(\d{3,8})\]\s*")
+_PASSWORD_EXPIRED_CODES = frozenset({"50055", "50144"})
 _AUTH_UNSAFE_BRACKET_RE = re.compile(r"[{}]|\[(?!\d{3,8}\])|(?<!\])\]")
 _AUTH_SAFE_TYPE_RE = re.compile(r"^Unexpected error \([A-Za-z0-9_.]+\)\.")
 
@@ -146,6 +147,11 @@ def _safe_mfa_recovery(value: object) -> str | None:
 def _safe_auth_category(text: str, code: str | None) -> str:
     """Map an auth error to a fixed, non-upstream diagnostic."""
     lowered = text.casefold()
+    if lowered.startswith("authentication failed") and code in _PASSWORD_EXPIRED_CODES:
+        return (
+            f"Your Microsoft password has expired ({code}). "
+            "Change it in a browser, then sign in again with the new password."
+        )
     if lowered.startswith("authentication failed"):
         return f"Authentication failed ({code})." if code else _AUTH_ERROR_FALLBACK
     if lowered.startswith("login completed but session verification failed"):

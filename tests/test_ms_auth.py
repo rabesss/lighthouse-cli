@@ -602,6 +602,10 @@ class TestBuildSsoError:
         for needle in needles:
             assert needle in rendered
 
+    @pytest.mark.parametrize("code", [50055, 50144])
+    def test_expired_password_recovery(self, code: int) -> None:
+        assert "expired" in (build_sso_error(code, None, "SSO interstitial walk").recovery or "")
+
     def test_mfa_required_recovery_does_not_assume_code_channel(self) -> None:
         err = build_sso_error(50076, None, "POST credentials")
         recovery = err.recovery or ""
