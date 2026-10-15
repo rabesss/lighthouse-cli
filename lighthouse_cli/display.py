@@ -494,7 +494,9 @@ _RENEWAL_FAILURE_CATEGORIES = frozenset({
     "credentials_rejected", "code_rejected", "method_unavailable", "clock_skew",
     "interrupt", "network", "store", "busy", "pending_human_login", "unknown",
 })
-_RENEWAL_FAILURE_RE = re.compile(r"\(automatic sign-in failed: ([a-z_]{1,32})\)")
+# The raw "(automatic sign-in failed: X)" or this formatter's own
+# "automatic sign-in failed (X)", so formatting twice keeps the category.
+_RENEWAL_FAILURE_RE = re.compile(r"automatic sign-in failed(?:: | \()([a-z_]{1,32})\)")
 
 _STATUS_CATEGORIES = {
     401: "Session expired", 403: "Permission denied", 404: "Not found", 429: "Rate limited",

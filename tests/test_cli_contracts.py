@@ -606,6 +606,13 @@ def test_format_user_error_names_the_automatic_sign_in_failure(category: str) ->
     )
 
 
+@pytest.mark.parametrize("category", sorted(RELOGIN_CATEGORIES))
+def test_formatting_a_sign_in_failure_twice_keeps_its_category(category: str) -> None:
+    once = format_user_error(_session_expired(f"automatic sign-in failed: {category}"))
+
+    assert format_user_error(once) == once
+
+
 @pytest.mark.parametrize(
     "raw",
     [
