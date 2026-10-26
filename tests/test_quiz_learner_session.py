@@ -71,9 +71,9 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
 ACTIVE = {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1,
           "operation": None, "timer": None}
 # Back to page 1 from VIEW2, and back from a frame opened on page 2.
-VIEW_BACK = dataclasses.replace(VIEW2, state=PageState(1, POSTED_SCOPES, 4242, "1", 2, "0"))
+VIEW_BACK = dataclasses.replace(VIEW2, state=PageState(1, POSTED_SCOPES, 4242, 2, "0"))
 FRAME2 = AttemptView(10, 20, 30, 2, TAB, "true")
-FRAME2_BACK = dataclasses.replace(FRAME2, state=PageState(1, POSTED_SCOPES, 4242, "0", 2, None))
+FRAME2_BACK = dataclasses.replace(FRAME2, state=PageState(1, POSTED_SCOPES, 4242, 2, None))
 VIEW_KEYS = ("tab_id", "frame_page", "show_incorrect_only", "page_state")
 
 
@@ -241,6 +241,23 @@ def test_an_unknown_start_is_settled_only_by_starting_again(remote):
     assert_refused(workflow, "Run attempt start", ("page", "next", "previous", "answer"))
     start(workflow, open_page(1), resumed=True)
     assert workflow.status()["status"] == "active"
+
+
+def test_an_unknown_start_submitted_elsewhere_is_closed_by_verify(remote):
+    workflow = LearnerWorkflow(10, 20)
+
+    def unknown(client, *, on_identity, **kwargs):
+        on_identity(30, 1, TAB)
+        raise LearnerStartUnknownError(attempt_id=30, page=1)
+    with patch(f"{SESSION}.start_learner", side_effect=unknown):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+    # The learner finished it in the browser: the cursor keeps only its tab and frame.
+    with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
+        workflow.verify()
+        assert workflow.verify() == RECEIPT
+    assert verify.call_args.kwargs["frame_page"] == 1
+    assert workflow.status() == {**ACTIVE, "status": "submitted"}
 
 
 def test_an_unknown_start_without_an_identity_is_kept(remote):
@@ -946,6 +963,27 @@ def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote):
     assert (saved(workflow)["tab_id"], saved(workflow)["frame_page"]) == (TAB, 1)
     assert_refused(workflow, "Run attempt start", ("page",))
     # Starting again only continues that attempt, in its tab, and reads its limit again.
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
+            patch(f"{SESSION}.start_learner", return_value=opened(timer=timed(200))) as again:
+        assert workflow.start()["timer"]["limit_seconds"] == 240
+    assert again.call_args.kwargs["continue_only"] is True
+    assert again.call_args.kwargs["known_tab_id"] == TAB
+
+
+def test_a_session_expiry_reading_the_limit_says_so_and_keeps_the_attempt(remote):
+    workflow = LearnerWorkflow(10, 20)
+    expired = SessionExpiredError("Session expired.")
+
+    def limit_expired(client, *, on_identity, **kwargs):
+        on_identity(30, 1, TAB)
+        raise LearnerStartUnknownError(attempt_id=30, page=1, timer=True, expired=expired)
+    with patch(f"{SESSION}.start_learner", side_effect=limit_expired):
+        with pytest.raises(SessionExpiredError) as exc_info:
+            workflow.start()
+    assert exc_info.value is expired
+    assert workflow.status() == {**ACTIVE, "status": "uncertain", "operation": "start"}
+    assert (saved(workflow)["tab_id"], saved(workflow)["frame_page"]) == (TAB, 1)
+    # Signed in again, starting only continues that attempt, in its tab.
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", return_value=opened(timer=timed(200))) as again:
         assert workflow.start()["timer"]["limit_seconds"] == 240

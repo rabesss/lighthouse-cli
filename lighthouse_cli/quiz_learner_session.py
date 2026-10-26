@@ -38,8 +38,9 @@ from .quiz_attempt_page import (
     LearnerPage,
     PageSnapshot,
     PreviewRefusedError,
+    valid_tab_id,
 )
-from .quiz_learner_browser import AttemptView, PageState, identity, plan_page_change, valid_tab_id
+from .quiz_learner_browser import AttemptView, PageState, identity, plan_page_change
 from .quiz_learner_finish import (
     LearnerNotSubmittedError,
     LearnerSubmitUnknownError,
@@ -293,9 +294,10 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_INVALID) from None
         # Cursors from before the CLI opened attempts as the browser does
         # have none of the view; a start whose page is unverified has only
-        # its tab and frame.
+        # its tab and frame, kept once verify finds that attempt submitted.
         keys = tuple(key for key in _VIEW_KEYS if key in state)
-        if keys not in ((), _TAB_KEYS, _VIEW_KEYS) or (keys == _TAB_KEYS and state["operation"] != "start") or (
+        if keys not in ((), _TAB_KEYS, _VIEW_KEYS) or (
+                keys == _TAB_KEYS and state["operation"] != "start" and state["status"] != "submitted") or (
                 keys and (state.get("attempt_id") is None or not valid_tab_id(state["tab_id"])
                           or type(state["frame_page"]) is not int or not 0 < state["frame_page"] < 10**6)):
             raise LearnerWorkflowError(_INVALID)
@@ -451,7 +453,10 @@ class LearnerWorkflow:
                                         continue_only=kept is not None, known_tab_id=kept.get("tab_id", "") if kept else "",
                                         on_identity=seal, summary=summary)
             except LearnerStartUnknownError as exc:
-                if exc.timer:  # the cursor stays uncertain, naming the attempt
+                # The cursor stays uncertain, naming the attempt.
+                if exc.expired is not None:
+                    raise exc.expired from None
+                if exc.timer:
                     raise LearnerWorkflowError(_TIMER) from None
                 raise
             except Exception:

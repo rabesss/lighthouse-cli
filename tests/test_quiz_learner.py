@@ -37,6 +37,7 @@ from lighthouse_cli.quiz_attempt_page import (
     parse_learner_page,
     rpc_script,
     unanswered_questions,
+    valid_tab_id,
 )
 from lighthouse_cli.quiz_learner_browser import (
     ATTEMPT_ROUTE,
@@ -62,7 +63,6 @@ from lighthouse_cli.quiz_learner_browser import (
     tab_id_of,
     timer_path,
     valid_scopes,
-    valid_tab_id,
 )
 from lighthouse_cli.quiz_learner_finish import (
     LearnerNotSubmittedError,
@@ -117,8 +117,8 @@ ENCODED_SCOPES = "%7B%221%22%3A%5B%22pagenum%22%5D,%222%22%3A%5B%22lcs%22%5D,%22
 PAGE1 = learner_page_path(10, 20, 30, 1)
 FRAME1 = attempt_frame_path(10, 20, 30, 1)
 VIEW = AttemptView(10, 20, 30, 1, TAB, "true")
-VIEW2 = replace(VIEW, state=PageState(2, POSTED_SCOPES, 4242, "0", 1, None))
-VIEW3 = replace(VIEW, state=PageState(3, POSTED_SCOPES, 4242, "1", 2, "0"))
+VIEW2 = replace(VIEW, state=PageState(2, POSTED_SCOPES, 4242, 1, None))
+VIEW3 = replace(VIEW, state=PageState(3, POSTED_SCOPES, 4242, 2, "0"))
 FORM_HEADERS = {"Origin": BASE, "Upgrade-Insecure-Requests": "1", "Cache-Control": "max-age=0"}
 
 
@@ -346,15 +346,18 @@ def test_an_autosave_posts_every_control_of_the_page_in_document_order():
 
 
 def test_the_previous_control_map_lists_controls_in_javascript_key_order():
-    # A JavaScript object lists integer-like keys first, ascending.
-    page = parse(body(questions(), extra=LEARNER_BUTTONS + '<input type="hidden" name="z_q" value="x">' + NEXT,
-                      controls={"7": ["z_q", "Hidden", [], {}, 0, 1]}))
+    # A JavaScript object lists integer-like keys first, ascending; the page
+    # script keeps each key as the control map has it.
+    extra = '<input type="hidden" name="z_q" value="x"><input type="hidden" name="z_m" value="">'
+    page = parse(body(questions(), extra=LEARNER_BUTTONS + extra + NEXT,
+                      controls={"7": ["z_q", "Hidden", [], {}, 0, 1], "MyControl": ["z_m", "Hidden", [], {}, 0, 1]}))
     fields = dict(page.snapshot().autosave_fields(101, page._protection, TAB))
     assert json.loads(fields["d2l_controlMapPrev"]) == {
         "ID": {"7": "z_q", "hd_savedquestions": "z_c", "hdn_resp_101": "z_r101", "hdn_resp_102": "z_r102",
-               "hdn_resp_103": "z_r103", "hdn_resp_104": "z_r104"},
+               "hdn_resp_103": "z_r103", "hdn_resp_104": "z_r104", "MyControl": "z_m"},
         "SID": {"lblatom": {"ctl_2": "z_l"}, "btn_next": {"ctl_1": "z_x"}}}
     assert fields["d2l_controlMapPrev"].startswith('{"ID":{"7":"z_q","hd_savedquestions"')
+    assert '"MyControl":"z_m"' in fields["d2l_controlMapPrev"]
     assert fields["z_q"] == "x"
 
 
@@ -538,14 +541,12 @@ def test_tab_ids_are_the_process_pages_digits():
 
 
 @pytest.mark.parametrize("state", [
-    (2, POSTED_SCOPES, 4242, "1", 1, None),  # from the frame form, d2l_change is 0
-    (3, POSTED_SCOPES, 4242, "0", 1, None),
-    (2, POSTED_SCOPES, 4242, "0", 1, "0"),
-    (2, POSTED_SCOPES, 4242, "0", 1, "2"),
-    (2, '{"1": ["pagenum"]}', 4242, "0", 1, None),  # not as the page script posts it
-    (2, POSTED_SCOPES, True, "0", 1, None),
-    (2, POSTED_SCOPES, 10**9, "0", 1, None),
-    (0, POSTED_SCOPES, 4242, "0", 1, None),
+    (3, POSTED_SCOPES, 4242, 1, None),
+    (2, POSTED_SCOPES, 4242, 1, "2"),
+    (2, '{"1": ["pagenum"]}', 4242, 1, None),  # not as the page script posts it
+    (2, POSTED_SCOPES, True, 1, None),
+    (2, POSTED_SCOPES, 10**9, 1, None),
+    (0, POSTED_SCOPES, 4242, 1, None),
 ])
 def test_an_invalid_page_state_is_rejected(state):
     with pytest.raises(ValueError):
@@ -554,7 +555,7 @@ def test_an_invalid_page_state_is_rejected(state):
 
 @pytest.mark.parametrize("change", [
     {"tab_id": "12a"}, {"show_incorrect_only": "1"}, {"state": "page 2"},
-    {"state": PageState(3, POSTED_SCOPES, 4242, "0", 2, None)},  # loaded from a frame form on another page
+    {"state": PageState(3, POSTED_SCOPES, 4242, 2, None)},  # loaded from a frame form on another page
     {"frame_page": 0},
 ])
 def test_an_invalid_attempt_view_is_rejected(change):
@@ -581,15 +582,15 @@ NEXT_POST = SAVE_PATH + "?cfql=0&fromQB=0&d2l_body_type=3&ou=10"
 
 
 def test_next_is_planned_from_its_button_script():
-    assert plan(extra=LEARNER_BUTTONS + NEXT) == PageChange(2, NEXT_POST, VIEW2)
-    assert plan(extra=LEARNER_BUTTONS + NEXT, forward_only=False) == PageChange(2, NEXT_POST, VIEW2)
-    assert plan(SECOND, page=2, view=VIEW2, extra=LEARNER_BUTTONS + NEXT) == PageChange(3, NEXT_POST, VIEW3)
+    assert plan(extra=LEARNER_BUTTONS + NEXT) == PageChange(NEXT_POST, VIEW2)
+    assert plan(extra=LEARNER_BUTTONS + NEXT, forward_only=False) == PageChange(NEXT_POST, VIEW2)
+    assert plan(SECOND, page=2, view=VIEW2, extra=LEARNER_BUTTONS + NEXT) == PageChange(NEXT_POST, VIEW3)
     preview_flag = plan(extra=LEARNER_BUTTONS + NEXT, next_handler="GoNextPage(false, 1,2,5);;return false;")
     assert preview_flag.post_path == SAVE_PATH + "?cfql=0&fromQB=5&d2l_body_type=3&ou=10"
     # Two Next buttons running the same script are one move.
     twice = LEARNER_BUTTONS + NEXT + '<button type="button" id="z_w">Next Page</button>'
     same = {"btn_next2": ["z_w", "Button", ["GoNextPage(false, 1,2,0);;return false;"], {}, 0, 0]}
-    assert plan(extra=twice, controls=same).target == 2
+    assert plan(extra=twice, controls=same).view.page == 2
 
 
 @pytest.mark.parametrize("race, query", [
@@ -638,8 +639,8 @@ def test_a_next_the_cli_cannot_send_as_the_browser_does_is_refused(kwargs):
 ])
 def test_previous_is_planned_from_its_button_script(handler, query):
     change = plan(SECOND, page=2, view=VIEW2, forward=False, extra=LEARNER_BUTTONS + PREVIOUS, previous_handler=handler)
-    assert change == PageChange(1, f"{SAVE_PATH}?{query}d2l_body_type=3&ou=10",
-                                replace(VIEW, state=PageState(1, POSTED_SCOPES, 4242, "1", 2, "0")))
+    assert change == PageChange(f"{SAVE_PATH}?{query}d2l_body_type=3&ou=10",
+                                replace(VIEW, state=PageState(1, POSTED_SCOPES, 4242, 2, "0")))
 
 
 @pytest.mark.parametrize("handler", [
@@ -666,7 +667,7 @@ def test_page_changes_need_their_controls_and_the_views_page():
 
 def test_a_page_change_the_browser_would_post_instead_of_load_is_refused():
     room = 2000 - len(goself(2, "0"))
-    assert plan(extra=LEARNER_BUTTONS + NEXT, origin="x" * (room - 1)).target == 2
+    assert plan(extra=LEARNER_BUTTONS + NEXT, origin="x" * (room - 1)).view.page == 2
     with pytest.raises(PreviewRefusedError, match=re.escape(REFUSE_LEARNER_FORM)):
         plan(extra=LEARNER_BUTTONS + NEXT, origin="x" * room)
 
@@ -1105,6 +1106,16 @@ def test_an_attempt_frame_that_cannot_be_read_is_unknown_with_the_attempt_identi
     client._request.assert_called_once()
 
 
+def test_a_session_expiry_reading_the_timer_is_kept_with_the_attempt_identity():
+    expired = SessionExpiredError("Session expired.")
+    client = start_client(summary(), header=expired)
+    with pytest.raises(LearnerStartUnknownError) as exc_info:
+        start_learner(client, course_id=10, quiz_id=20)
+    assert (exc_info.value.attempt_id, exc_info.value.page, exc_info.value.timer) == (30, 1, True)
+    assert exc_info.value.expired is expired
+    client._request.assert_called_once()
+
+
 @pytest.mark.parametrize("kwargs", [{"known_tab_id": "12a"}, {"known_tab_id": None}, {"continue_only": 1}])
 def test_invalid_start_settings_send_nothing(kwargs):
     client = start_client(summary())
@@ -1471,7 +1482,7 @@ def test_previous_posts_the_page_and_loads_the_one_before():
     client = write_client(body(ANSWERED, extra=LEARNER_BUTTONS + NEXT), posts=[response])
     page, view = retreat_learner(client, VIEW2, current=second_page())
     assert page.page == 1 and page.questions[0]["selected_choice_ids"] == ["o2"]
-    assert view == replace(VIEW, state=PageState(1, POSTED_SCOPES, 4242, "1", 2, "0"))
+    assert view == replace(VIEW, state=PageState(1, POSTED_SCOPES, 4242, 2, "0"))
     call = client._request.call_args
     assert call.args == ("POST", BASE + NEXT_POST)
     assert call.kwargs["headers"] == {**FORM_HEADERS, "Referer": BASE + goself(2, "0")}

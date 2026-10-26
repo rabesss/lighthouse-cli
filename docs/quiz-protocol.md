@@ -297,7 +297,9 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
   `DoConfirmSubmitAuto` function, so the CLI parses the calls in that block
   rather than searching for names. A cleared answer's reply was not
   recorded: for one the CLI accepts that question marked unsaved, or no
-  ids at all.
+  ids at all. With no ids the page keeps the question's flag, so if the
+  readback shows it unsaved the save is reported unknown and `attempt page`
+  settles it.
 - Next: the `btn_next` handler in `d2l_controlMap` is
   `GoNextPage(true, 1,2,0);;return false;` (`return false;` on the last
   page), and the page script's `GoNextPage` posts `2,<page + 1>,<page>` to
@@ -313,7 +315,9 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
   `d2l_statePageId` and `d2l_change`, Referer the page left. `d2l_change`
   is the current URL's flipped, starting at `0`, so it alternates `0`, `1`,
   `0`... Once the URL reaches 2000 characters the page script would post a
-  form instead (not recorded), so the CLI refuses then.
+  form instead (not recorded), so the CLI refuses then. Every page of the
+  recorded attempt had the same scopes and page id, so the CLI rebuilds the
+  page a page change left from the current page's.
 - Previous was not recorded (the quiz was forward-only). The CLI accepts
   only `GoPreviousPage(<page - 1>, <page>, <n>);;return false;`, posting to
   `?cfql=0&fromQB=<n>&d2l_body_type=3&ou`, or the inline `NavInfo` the

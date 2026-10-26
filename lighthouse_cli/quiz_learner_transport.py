@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, unquote, urldefrag, urlparse
 
 from bs4 import BeautifulSoup
 
-from .api import LighthouseClient, NetworkError, _close_response
+from .api import LighthouseClient, NetworkError, SessionExpiredError, _close_response
 from .quiz_attempt_page import (
     MAX_PAGE_BYTES,
     REFUSE_NO_ANSWERS,
@@ -35,6 +35,7 @@ from .quiz_attempt_page import (
     process_frame_src,
     start_frame_src,
     started_attempt,
+    valid_tab_id,
 )
 from .quiz_learner_browser import (
     ATTEMPT_ROUTE,
@@ -52,18 +53,20 @@ from .quiz_learner_browser import (
     summary_path,
     tab_id_of,
     timer_path,
-    valid_tab_id,
 )
 from .request_protection import FormProtection, form_protection_from_homepage
 
 
 class LearnerStartUnknownError(NetworkError):
-    """``timer`` is set when the attempt opened but its timer frame could not be read."""
+    """``timer`` is set when the attempt opened but its timer frame could not be read, and ``expired`` when that
+    was because the session expired."""
 
-    def __init__(self, *, attempt_id: int | None = None, page: int | None = None, timer: bool = False) -> None:
+    def __init__(self, *, attempt_id: int | None = None, page: int | None = None, timer: bool = False,
+                 expired: SessionExpiredError | None = None) -> None:
         self.attempt_id = attempt_id
         self.page = page
         self.timer = timer
+        self.expired = expired
         super().__init__("Quiz start could not be verified. Read the quiz state before starting again.")
 
 
@@ -457,6 +460,8 @@ def _open_attempt(
         header, headers = _get_page(client, timer_path(course_id, quiz_id, attempt_id), _document_headers(client, frame_path))
         timer = _timer(header, headers, sent, quiz_id=quiz_id, attempt_id=attempt_id)
         view = AttemptView(course_id, quiz_id, attempt_id, page, tab_id, show_incorrect_only(header))
+    except SessionExpiredError as exc:
+        raise LearnerStartUnknownError(attempt_id=attempt_id, page=page, timer=True, expired=exc) from None
     except Exception:
         raise LearnerStartUnknownError(attempt_id=attempt_id, page=page, timer=True) from None
     return LearnerStart(_read_page(client, view, reload=False), view, timer)
@@ -600,7 +605,7 @@ def _change_page(
 ) -> tuple[LearnerPage, AttemptView]:
     """Send one page change once, then load its page as the reply has the browser do; any surprise after sending is unknown."""
     try:
-        check_reload_marker(_post_page(client, change.post_path, fields, view.page_path()), change.target)
+        check_reload_marker(_post_page(client, change.post_path, fields, view.page_path()), change.view.page)
         return _read_page(client, change.view, reload=False), change.view
     except Exception:
         raise LearnerAdvanceUnknownError() from None

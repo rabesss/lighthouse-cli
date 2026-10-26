@@ -24,13 +24,13 @@ from .quiz_attempt_page import (
     PreviewRefusedError,
     form_state,
     valid_scopes,
+    valid_tab_id,
 )
 
 ATTEMPT_ROUTE = "/d2l/lms/quizzing/user/attempt/"
 SAVE_PATH = ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l"
 # Browsers load a page change as a GET only below this length.
 _MAX_GET_URL = 2000
-_TAB_ID = re.compile(r"[0-9]{0,20}")
 # The characters the page script's URL encoder changes, as encodeURIComponent
 # does, except that it leaves every comma raw.
 _ENCODED = {"{": "%7B", "}": "%7D", '"': "%22", ":": "%3A", "[": "%5B", "]": "%5D", "+": "%2B", "=": "%3D", "/": "%2F"}
@@ -39,11 +39,6 @@ _ENCODED = {"{": "%7B", "}": "%7D", '"': "%22", ":": "%3A", "[": "%5B", "]": "%5
 def identity(*values: int) -> None:
     if any(type(value) is not int or not 0 < value < 10**18 for value in values):
         raise ValueError("Invalid quiz attempt identity.")
-
-
-def valid_tab_id(value: object) -> bool:
-    """Whether ``value`` is a browser tab id as the attempt's process page sets it (empty when it set none)."""
-    return isinstance(value, str) and _TAB_ID.fullmatch(value) is not None
 
 
 def d2l_encode(value: str) -> str:
@@ -117,16 +112,18 @@ class PageState:
     page: int
     scopes: str
     page_id: int
-    change: str
     from_page: int
     from_change: str | None
 
     def __post_init__(self) -> None:
         identity(self.page, self.from_page)
         if (not valid_scopes(self.scopes) or type(self.page_id) is not int or not 0 <= self.page_id < 10**9
-                or abs(self.page - self.from_page) != 1 or self.from_change not in (None, "0", "1")
-                or self.change != _change(self.from_change)):
+                or abs(self.page - self.from_page) != 1 or self.from_change not in (None, "0", "1")):
             raise ValueError("Invalid quiz page state.")
+
+    @property
+    def change(self) -> str:
+        return _change(self.from_change)
 
 
 @dataclass(frozen=True)
@@ -182,7 +179,6 @@ class AttemptView:
 class PageChange:
     """A planned Next or Previous: where its form posts, and the view of the page it loads."""
 
-    target: int
     post_path: str
     view: AttemptView
 
@@ -251,10 +247,10 @@ def plan_page_change(page: LearnerPage, view: AttemptView, *, forward: bool, for
         target = page.page - 1
     scopes, page_id = form_state(page._body)
     current = None if view.state is None else view.state.change
-    moved = replace(view, state=PageState(target, scopes, page_id, _change(current), page.page, current))
+    moved = replace(view, state=PageState(target, scopes, page_id, page.page, current))
     if len(origin + moved.page_path()) >= _MAX_GET_URL:
         raise PreviewRefusedError(REFUSE_LEARNER_FORM)
-    return PageChange(target, f"{SAVE_PATH}?{query}d2l_body_type=3&ou={view.course_id}", moved)
+    return PageChange(f"{SAVE_PATH}?{query}d2l_body_type=3&ou={view.course_id}", moved)
 
 
 def autosave_path(course_id: int) -> str:

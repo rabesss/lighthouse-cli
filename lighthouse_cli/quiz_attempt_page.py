@@ -337,6 +337,11 @@ def valid_scopes(text: object) -> bool:
         return False
 
 
+def valid_tab_id(value: object) -> bool:
+    """Whether ``value`` is a browser tab id as the attempt's process page sets it (empty when it set none)."""
+    return isinstance(value, str) and _TAB_ID.fullmatch(value) is not None
+
+
 def _page_state(soup: BeautifulSoup, state_value: str) -> tuple[str, int]:
     """The posted ``d2l_stateScopes`` and the page id, from ``d2l_state`` and the page's scripts."""
     state = _strict_json(state_value)
@@ -438,7 +443,7 @@ def browser_form(
         raise _refuse()
     # An attempt page posts its form only while its fetch transport is off.
     flags = [match[1] for script in soup.find_all("script") for match in _FETCH_FLAG.finditer(script.get_text())]
-    if tab_id is not None and (_TAB_ID.fullmatch(tab_id) is None or flags != ["false"]):
+    if tab_id is not None and (not valid_tab_id(tab_id) or flags != ["false"]):
         raise _refuse()
     cm0, cm1 = _control_map(hidden["d2l_controlMap"])
     previous = {"ID": {name: item[0] for name, item in _js_order(cm0).items()},
