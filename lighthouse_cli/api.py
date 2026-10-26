@@ -14,7 +14,7 @@ import re
 import sys
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from typing import Any, TypeVar, cast
 from urllib.parse import unquote, unquote_to_bytes, urlparse
@@ -395,6 +395,16 @@ def _submission_response_result(
 # HTTP client
 # ---------------------------------------------------------------------------
 
+def _no_redirects(*_args: Any, **_kwargs: Any) -> Iterator[requests.Response]:
+    """Stands in for ``Session.resolve_redirects``, so a redirect is never followed or read.
+
+    ``_request`` already sends ``allow_redirects=False``, yet ``requests``
+    still builds ``Response.next`` by reading the whole 3xx body, even for a
+    streamed request. Nothing reads ``Response.next``.
+    """
+    return iter(())
+
+
 class LighthouseClient:
     """Stateful HTTP client wrapping requests.Session with D2L auth cookies.
 
@@ -411,6 +421,7 @@ class LighthouseClient:
         self.api_le = self.connection.api_le
         self.cookie_host = self.connection.host
         self._session = requests.Session()
+        self._session.resolve_redirects = _no_redirects  # type: ignore[method-assign]
         self._cookies: dict[str, str] = {}
         self._loaded = False
         self._cache: dict[str, Any] = {}

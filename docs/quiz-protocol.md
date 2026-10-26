@@ -91,9 +91,10 @@ posts:
    Neither HTTP 200 nor that call proves which value was stored; read the
    page back and check the selected choices and the saved marker.
    The hidden "Save All Responses" action, `d2l_actionparam=1,<page>` with
-   the whole page form, stores every answer of the page in one request, so
-   a client sends one save per page instead of one per question. A
-   question whose answer is cleared reads back as not saved.
+   the whole page form, stores every answer of the page in one request, but
+   a browser never sends it: a learner client sends one `3,...` save per
+   changed question, as the page does (see "Learner attempts on
+   Lighthouse"). A question whose answer is cleared reads back as not saved.
 4. Forward navigation: the same save endpoint with
    `d2l_actionparam=2,<new page>,<current page>` and the whole page form,
    as the preview driver sends. A learner's `2,2,1` was followed by the
@@ -144,7 +145,7 @@ posts:
    For a learner `isPreview` is `false` and, with no can-be-graded checkbox
    on the confirmation page, `canBeGraded` is `true`. A learner's browser
    posted to the attempt frame's own URL, which kept `pg=1` after a move to
-   page 2. In the four `QuizDone` results seen, the third argument was `'1'`
+   page 2 (on Lighthouse too, after nine moves). In the four `QuizDone` results seen, the third argument was `'1'`
    for previews and `'0'` for learners, and the fourth was `'1'` after a
    time-up submit and `'0'` after a manual one.
 6. Recovery: for a forward-only attempt on page 2, requesting page 1 returns
@@ -229,6 +230,117 @@ with one question on each of two pages, forward-only) added:
 - Attempt numbers (the REST `AttemptNumber`, "Attempt 1" on the summary)
   restarted at 1 for learner attempts, apart from the preview attempts;
   the attempt ids continued after the preview attempts' ids.
+
+### Learner attempts on Lighthouse
+
+A graded attempt was recorded in a browser on Lighthouse (Brightspace
+20.26.10): ten pages, one single-choice question on each, forward-only. The
+CLI's learner commands send the same requests, fields and Referers. Values
+here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
+
+- Start: the summary is `quiz_summary.d2l?qi=2002&ou=1001`, and the start
+  POST goes to the same URL plus `&cfql=0&inProgress=false` (`true` to
+  continue), Referer the summary, answered with a 302. The start-frame GET
+  after it sends the summary as Referer too. Besides
+  `GoToAttemptQuizAuto( 3003,1,0 )`, the process page runs
+  `sessionStorage.setItem( 'D2L_BROWSER_TAB_ID', '1234567890123' )`: the
+  browser tab id, which every attempt form sends as `QuizTabId`. The CLI
+  keeps it in the cursor. Whether a continued attempt's process page sets a
+  new one was not recorded, so the CLI takes a new one if set and otherwise
+  keeps the kept attempt's.
+- Attempt frame: the process page opens
+  `attempt/quiz_attempt_iframe_auto.d2l?qi&ai&isprv=&dnb=0&drc=&pg=1&cfql=0&rldbsv=1&fromQB=0&cft=&d2l_body_type=1&ou`
+  (Referer the start's second frame). Its frames load with the frame URL as
+  Referer: the header (timer) frame `quiz_attempt_top_auto.d2l`, which also
+  sets `QuizAttemptViewState.showIncorrectOnly = true;`, and the page at
+  `quiz_attempt_page_auto.d2l?ou&isprv=&impcf=&pg=1&qi&ai&dnb=0&cfql=0&fromQB=0&showIncorrectOnly=1&cft=&d2l_body_type=3`.
+  The CLI loads the frame and checks that its `pageFrame` and `headerFrame`
+  sources are those two URLs, then reads the timer from that header and the
+  page from that URL.
+- Form fields: every successful control in document order (the checked
+  radio between two hidden inputs), `d2l_action`, `d2l_actionparam` and
+  `d2l_hitCode` filled in place, `d2l_controlMapPrev` (empty in the page)
+  filled with compact JSON `{"ID":{...},"SID":{...}}` built from
+  `d2l_controlMap`, then four fields appended: `d2l_multiedit={"Controls":[]}`,
+  `d2l_stateScopes` (the page's `d2l_state[0]`, compact, keys in JavaScript
+  order: integer-like keys ascending, then the rest as written),
+  `d2l_stateGroups` empty, and `d2l_statePageId` (the second value of the
+  page's `JsonDeserializerMin.Deserialize([...])`: 336 on attempt pages,
+  327 on the summary). The summary form has no `QuizTabId`. The CLI
+  refuses, with nothing sent, a page whose form it cannot fill this way.
+- Answer: each change is one autosave, a multipart POST to
+  `quiz_attempt_save_auto.d2l?d2l_body_type=3&ou=1001&fromQB=0` with
+  `3,<page>,<tid>,<tvid>,<question number>` and the whole page form,
+  Referer the page's URL, and `Origin`, `Upgrade-Insecure-Requests: 1` and
+  `Cache-Control: max-age=0`, as every form POST sends. Save All was never
+  sent. Changing one answer twice sent two autosaves.
+  The CLI sends one autosave per question whose answer changes (or is set
+  but not marked saved), in page order, one at a time, and reads the page
+  back after each. It builds each form from the page as loaded, with the
+  answers set so far and the bookkeeping below, never from a readback. A
+  surprise after the first POST is unknown, and nothing is retried.
+- Bookkeeping: `hd_savedquestions` holds how many questions of the attempt
+  are saved, and `hdn_resp_<question id>` is `1` for a saved question and
+  `0` otherwise. They change only when the page script runs
+  `UpdateSaved(saved, unsaved, ...)`: each saved id at `0` becomes `1` and
+  the count goes up by one, each unsaved id at `1` becomes `0` and the
+  count goes down by one. The next POST from the page, and the next page,
+  carry the new values. The CLI applies the same update and requires the
+  readback to render it.
+- Replies: each save reply runs its calls from
+  `function d2l_Onload() { D2L.WebComponentsReady.then(function() { UI.OnPageLoad().Trigger(); <calls> }); }`.
+  An autosave's calls were `parent.infoFrame.UpdateSaved('4001','');` and
+  `parent.pageFrame.UpdateSaved('4001','', '','true');`, a Next's
+  `parent.infoFrame.DoReload(2);` and `parent.pageFrame.DoReload(2,'','true');`,
+  and the finish save's `parent.infoFrame.UpdateSaved('4001','');` and
+  `DoConfirmSubmitAuto(2002,3003,10,'',0);`. The reply also defines a
+  `DoConfirmSubmitAuto` function, so the CLI parses the calls in that block
+  rather than searching for names. A cleared answer's reply was not
+  recorded: for one the CLI accepts that question marked unsaved, or no
+  ids at all.
+- Next: the `btn_next` handler in `d2l_controlMap` is
+  `GoNextPage(true, 1,2,0);;return false;` (`return false;` on the last
+  page), and the page script's `GoNextPage` posts `2,<page + 1>,<page>` to
+  `quiz_attempt_save_auto.d2l?cfql=0&fromQB=undefined&d2l_body_type=3&ou`
+  on a forward-only quiz. With its
+  `isForwardOnlyDialogRaceConditionFlagEnabled` true it sends
+  `fromQB=<the handler's last argument>&isFONav=1` instead, and on a quiz
+  that is not forward-only `fromQB=<that argument>`. The CLI reads the handler and that flag from the page, and
+  refuses any other handler before sending.
+- Page change: page script then loads the next page with a GET to the
+  current page's URL with `pg` and `showIncorrectOnly` (the header's
+  `true` or `false`) replaced, plus `d2l_stateScopes`, `d2l_stateGroups`,
+  `d2l_statePageId` and `d2l_change`, Referer the page left. `d2l_change`
+  is the current URL's flipped, starting at `0`, so it alternates `0`, `1`,
+  `0`... Once the URL reaches 2000 characters the page script would post a
+  form instead (not recorded), so the CLI refuses then.
+- Previous was not recorded (the quiz was forward-only). The CLI accepts
+  only `GoPreviousPage(<page - 1>, <page>, <n>);;return false;`, posting to
+  `?cfql=0&fromQB=<n>&d2l_body_type=3&ou`, or the inline `NavInfo` the
+  sandbox used, posting to `?d2l_body_type=3&ou`, and refuses any other
+  handler.
+- Submit: the finish save goes to
+  `?dnb=0&cfql=0&fromQB=0&d2l_body_type=3&ou` with `5,<page>`, then the
+  confirmation page loads with that save's URL as Referer. The RPC posts
+  to the attempt frame's own URL (its `pg` is the page the attempt opened
+  on, here `1` from page 10) plus `&d2l_rh=rpc&d2l_rt=call`, Referer the
+  frame URL, with the body urlencoded in the order `d2l_rf`, `params`,
+  `d2l_referrer`, `d2l_hitcode`, `d2l_action=rpc`. The receipt then loads
+  with the frame URL as Referer.
+- Encoding: every comma stays raw, in the page-change URL's
+  `d2l_stateScopes` and in the RPC's `params`
+  (`%7B%22param1%22%3A%222002%22,%22param2%22%3A%223003%22,...%7D`), while
+  `{ } " : [ ]` are percent-encoded. A form library's default encoding
+  writes `%2C`, so the CLI encodes these values itself.
+- Reloads: the CLI also reads pages a browser does not request again (each
+  command's first read of the cursor's page, a readback after a save,
+  `verify`'s reads). It sends those as a reload does: the page's own URL
+  and Referer, with `Cache-Control: max-age=0`.
+- Cursor: the tab id, the frame's page, `showIncorrectOnly` and the
+  current page URL's state fields are kept with the attempt. A cursor saved
+  by an older CLI version still reads pages and images and runs `verify`;
+  `answer`, `next`, `previous` and `submit` refuse until `attempt start`
+  continues the attempt.
 
 Preview has no resume, as each Start creates a new attempt with a fresh
 timer.
@@ -319,7 +431,8 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
   minutes" until the attempt ended; the server submitted it 148 seconds
   after the original limit. The next attempt's frame had `timeLimit=480`.
 - The CLI reads a learner attempt's timer frame once, when `start` opens or
-  continues it: `quiz_attempt_top_auto.d2l?ou=<ou>&isprv=&impcf=&qi=<qi>&ai=<ai>&dnb=0&cfql=0&fromQB=0&cft=&d2l_body_type=3`.
+  continues it, as the attempt frame loads it (Referer the frame URL):
+  `quiz_attempt_top_auto.d2l?ou=<ou>&isprv=&impcf=&qi=<qi>&ai=<ai>&dnb=0&cfql=0&fromQB=0&cft=&d2l_body_type=3`.
   An untimed attempt's frame declares the same variables, with
   `enforceTimeLimit=false` (and `timeLimit=7200` in the sandbox), so the
   frame decides, not the quiz's settings: special access can time one

@@ -231,6 +231,33 @@ def test_skip_raise_preserves_non_login_redirect_for_submission_handler() -> Non
     assert response.closed is False
 
 
+class _UnreadRedirect(requests.adapters.BaseAdapter):
+    """Answers every request with a 302 whose body must not be read."""
+
+    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
+        response = requests.Response()
+        response.status_code = 302
+        response.headers["Location"] = "/d2l/lms/quizzing/user/next.d2l"
+        response.request, response.url = request, request.url
+        response.raw = MagicMock(read=MagicMock(side_effect=AssertionError("read")),
+                                 stream=MagicMock(side_effect=AssertionError("read")))
+        return response
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_redirect_is_returned_without_reading_its_body() -> None:
+    # requests builds Response.next by reading a 3xx body, even when streamed.
+    client = LighthouseClient()
+    _authenticate(client)
+    client._session.mount("https://", _UnreadRedirect())
+
+    response = client._do_request("POST", BASE_URL + "/d2l/x", True, 30, stream=True)
+    assert response.status_code == 302 and response.next is None
+    response.raw.read.assert_not_called()
+
+
 def _paged_client(*pages: object) -> LighthouseClient:
     client = LighthouseClient()
     client.get_json = MagicMock(side_effect=list(pages))

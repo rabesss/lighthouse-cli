@@ -7,7 +7,6 @@ learner's submissions list, which marks an unsubmitted attempt "In progress".
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -23,11 +22,16 @@ from .quiz_attempt_page import (
     rpc_script,
     unanswered_questions,
 )
-from .quiz_learner_transport import (
+from .quiz_learner_browser import (
     ATTEMPT_ROUTE,
-    current_learner_page,
-    learner_page_path,
+    AttemptView,
+    attempt_frame_path,
+    check_finish_marker,
+    finish_path,
+    identity,
+    rpc_body,
 )
+from .quiz_learner_transport import _document_headers, _post_page, current_learner_page
 from .request_protection import FormProtection
 
 REFUSE_QUIZ_UNANSWERED = ("The quiz has unanswered questions, so it was not submitted. "
@@ -62,7 +66,7 @@ class LearnerUnansweredError(ValueError):
 
 
 def receipt_path(course_id: int, quiz_id: int, attempt_id: int) -> str:
-    learner_page_path(course_id, quiz_id, attempt_id, 1)
+    identity(course_id, quiz_id, attempt_id)
     return "/d2l/lms/quizzing/user/quiz_submissions_attempt.d2l?" + urlencode({
         "qi": quiz_id, "ai": attempt_id, "isInPopup": 0, "isTimeUp": 0, "isprv": 0, "dnb": 0,
         "cfql": 0, "cft": "", "fromQB": 0, "d2l_body_type": 1, "ou": course_id,
@@ -84,23 +88,33 @@ def _attempt_row(body: bytes, *, course_id: int, quiz_id: int, attempt_id: int) 
     return rows[0]
 
 
-def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int) -> dict[str, Any]:
+def verify_learner_submission(
+    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, frame_page: int | None = None,
+) -> dict[str, Any]:
     """Read-only: whether this attempt is submitted, from its list row and receipt.
 
     Raises ``LearnerNotSubmittedError`` when the list shows the attempt in
     progress (its receipt is then not read), and ``LearnerSubmitUnknownError``
     unless both pages agree it was submitted. The points and percentage are
-    reported only when the quiz shows them to learners.
+    reported only when the quiz shows them to learners. The receipt loads
+    as from the attempt frame opened on ``frame_page``, when the CLI has
+    opened one, as the browser loads it once the quiz is submitted.
     """
     try:
+        identity(course_id, quiz_id, attempt_id)
+        if frame_page is None:
+            receipt_headers = _document_headers(client, reload=True)
+        else:
+            receipt_headers = _document_headers(client, attempt_frame_path(course_id, quiz_id, attempt_id, frame_page))
         listing, _ = client.get_raw("/d2l/lms/quizzing/user/quiz_submissions.d2l?" + urlencode({"ou": course_id, "qi": quiz_id}),
-                                    max_bytes=MAX_PAGE_BYTES, _replay_safe=False, headers={"Cache-Control": "no-cache"})
+                                    max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
+                                    headers=_document_headers(client, reload=True))
         link, row = _attempt_row(listing, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
         if "in progress" in " ".join(row.get_text(" ", strip=True).split()).casefold():
             raise LearnerNotSubmittedError()
         number = re.fullmatch(r"Attempt ([0-9]{1,6})", link.get_text(" ", strip=True))
         body, _ = client.get_raw(receipt_path(course_id, quiz_id, attempt_id), max_bytes=MAX_PAGE_BYTES,
-                                 _replay_safe=False, headers={"Cache-Control": "no-cache"})
+                                 _replay_safe=False, headers=receipt_headers)
         soup = BeautifulSoup(body, "html.parser")
         if (number is None or not any(h.get_text(" ", strip=True) == _RECEIPT_HEADING for h in soup.find_all("h2"))
                 or "still in progress" in soup.get_text(" ", strip=True).casefold()):
@@ -120,14 +134,15 @@ def verify_learner_submission(client: LighthouseClient, *, course_id: int, quiz_
         raise LearnerSubmitUnknownError() from None
 
 
-def _confirmation(client: LighthouseClient, protection: FormProtection, *, course_id: int, quiz_id: int,
-                  attempt_id: int, page: int) -> tuple[dict[str, str], list[dict[str, int]]]:
-    """The confirmation page's fields and the quiz's unanswered questions."""
+def _confirmation(client: LighthouseClient, protection: FormProtection, view: AttemptView,
+                  referer: str) -> tuple[dict[str, str], list[dict[str, int]]]:
+    """The confirmation page the finish save's reply opens, its fields and the quiz's unanswered questions."""
     path = ATTEMPT_ROUTE + "quiz_confirm_submit_auto.d2l?" + urlencode({
-        "qi": quiz_id, "ai": attempt_id, "isprv": "", "drc": "", "impcf": "", "dnb": 0, "cfql": 0,
-        "btlp": page, "fromQB": 0, "cft": "", "d2l_body_type": 3, "ou": course_id,
+        "qi": view.quiz_id, "ai": view.attempt_id, "isprv": "", "drc": "", "impcf": "", "dnb": 0, "cfql": 0,
+        "btlp": view.page, "fromQB": 0, "cft": "", "d2l_body_type": 3, "ou": view.course_id,
     })
-    body, _ = client.get_raw(path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False)
+    body, _ = client.get_raw(path, max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
+                             headers=_document_headers(client, referer))
     form, fields = hidden_form(body)
     # A learner's page has no can-be-graded checkbox (that is preview-only),
     # and a secure-browser attempt is never submitted over plain HTTP.
@@ -136,60 +151,48 @@ def _confirmation(client: LighthouseClient, protection: FormProtection, *, cours
             or fields.get("d2l_referrer") != protection.csrf_token
             or fields.get("HDN_isUsingRldb") != "0"):
         raise LearnerSubmitUnknownError()
-    return fields, unanswered_questions(form, quiz_id=quiz_id, attempt_id=attempt_id)
+    return fields, unanswered_questions(form, quiz_id=view.quiz_id, attempt_id=view.attempt_id)
 
 
 def submit_learner(
-    client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, page: int,
-    allow_unanswered: bool = False, current: LearnerPage | None = None,
+    client: LighthouseClient, view: AttemptView, *, allow_unanswered: bool = False, current: LearnerPage | None = None,
 ) -> dict[str, Any]:
     """Submit from the last page, once, and verify the receipt and list row.
 
     The confirmation page lists every unanswered question of the quiz; any
     are refused before the final request unless ``allow_unanswered`` is set.
     A refusal here sent only the page's answers, as the browser's save does.
+    The final request is the attempt frame's own submission call.
     """
     if type(allow_unanswered) is not bool:
         raise ValueError("Invalid quiz submission settings.")
-    current, protection = current_learner_page(client, current, course_id=course_id, quiz_id=quiz_id,
-                                               attempt_id=attempt_id, page=page)
-    fields = current.finish_fields(protection)
+    current, protection = current_learner_page(client, current, view)
+    fields = current.snapshot().finish_fields(protection, view.tab_id)
+    # Its encoding is checked before anything is sent.
+    rpc_body(view.quiz_id, view.attempt_id, rldb=False, token=protection.csrf_token, hit_code="0")
     response = None
     try:
-        save_url = ATTEMPT_ROUTE + "quiz_attempt_save_auto.d2l?" + urlencode(
-            {"dnb": 0, "cfql": 0, "fromQB": 0, "d2l_body_type": 3, "ou": course_id})
-        response = client._request("POST", client.canonical_url(save_url),
-                                   files=[(key, (None, value)) for key, value in fields.items()],
-                                   headers={"Referer": client.canonical_url(learner_page_path(course_id, quiz_id, attempt_id, page))})
-        if response.status_code != 200:
-            raise LearnerSubmitUnknownError()
-        _close_response(response)
-        response = None
-        confirmation, unanswered = _confirmation(client, protection, course_id=course_id, quiz_id=quiz_id,
-                                                 attempt_id=attempt_id, page=page)
+        finish = finish_path(view.course_id)
+        check_finish_marker(_post_page(client, finish, fields, view.page_path()), current)
+        confirmation, unanswered = _confirmation(client, protection, view, finish)
         if unanswered and not allow_unanswered:
             raise LearnerUnansweredError(unanswered)
-        context = {"qi": quiz_id, "ai": attempt_id, "isprv": "", "dnb": 0, "drc": "", "pg": page,
-                   "cfql": 0, "rldbsv": 1, "fromQB": 0, "cft": "", "d2l_body_type": 1, "ou": course_id}
-        frame = ATTEMPT_ROUTE + "quiz_attempt_iframe_auto.d2l"
-        # isPreview, canBeGraded, isRldbUse (the browser's Boolean() of a
-        # non-empty string), shouldAutoSubmit and cameFromTab, as observed.
-        params = {"param1": str(quiz_id), "param2": str(attempt_id), "param3": False, "param4": True,
-                  "param5": bool(confirmation.get("HDN_isRldbUse", "")), "param6": False, "param7": ""}
-        response = client._request("POST", client.canonical_url(frame + "file?" + urlencode({**context, "d2l_rh": "rpc", "d2l_rt": "call"})),
-                                   stream=True,
-                                   data={"d2l_rf": "ProcessQuizSubmission", "params": json.dumps(params, separators=(",", ":")),
-                                         "d2l_referrer": protection.csrf_token, "d2l_hitcode": protection.next_hit_code(),
-                                         "d2l_action": "rpc"},
-                                   headers={"Referer": client.canonical_url(frame + "?" + urlencode(context))})
-        expected = f"parent.QuizDone({quiz_id},{attempt_id},'0','0','0','gotoSv','')"
+        # isRldbUse is the browser's Boolean() of a non-empty string.
+        body = rpc_body(view.quiz_id, view.attempt_id, rldb=bool(confirmation.get("HDN_isRldbUse", "")),
+                        token=protection.csrf_token, hit_code=protection.next_hit_code())
+        rpc = attempt_frame_path(view.course_id, view.quiz_id, view.attempt_id, view.frame_page, rpc=True)
+        response = client._request("POST", client.canonical_url(rpc), stream=True, data=body,
+                                   headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": client.base_url,
+                                            "Referer": client.canonical_url(view.frame_path())})
+        expected = f"parent.QuizDone({view.quiz_id},{view.attempt_id},'0','0','0','gotoSv','')"
         if response.status_code != 200 or rpc_script(response.iter_content(chunk_size=8192)) != expected:
             raise LearnerSubmitUnknownError()
         _close_response(response)
         response = None
         # Still listed in progress after the final request: unknown, not
         # "not submitted", as the request was sent.
-        return verify_learner_submission(client, course_id=course_id, quiz_id=quiz_id, attempt_id=attempt_id)
+        return verify_learner_submission(client, course_id=view.course_id, quiz_id=view.quiz_id,
+                                         attempt_id=view.attempt_id, frame_page=view.frame_page)
     except (LearnerUnansweredError, LearnerSubmitUnknownError):
         raise
     except Exception:  # sent once: a session expiry is unknown too
