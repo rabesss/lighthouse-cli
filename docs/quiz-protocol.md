@@ -241,7 +241,8 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
 - Start: the summary is `quiz_summary.d2l?qi=2002&ou=1001`, and the start
   POST goes to the same URL plus `&cfql=0&inProgress=false` (`true` to
   continue), Referer the summary, answered with a 302. The start-frame GET
-  after it sends the summary as Referer too. Besides
+  after it sends the summary as Referer too, with `Cache-Control:
+  max-age=0` as the recorded browser did. Besides
   `GoToAttemptQuizAuto( 3003,1,0 )`, the process page runs
   `sessionStorage.setItem( 'D2L_BROWSER_TAB_ID', '1234567890123' )`: the
   browser tab id, which every attempt form sends as `QuizTabId`. The CLI
@@ -336,10 +337,12 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
   (`%7B%22param1%22%3A%222002%22,%22param2%22%3A%223003%22,...%7D`), while
   `{ } " : [ ]` are percent-encoded. A form library's default encoding
   writes `%2C`, so the CLI encodes these values itself.
-- Reloads: the CLI also reads pages a browser does not request again (each
-  command's first read of the cursor's page, a readback after a save,
-  `verify`'s reads). It sends those as a reload does: the page's own URL
-  and Referer, with `Cache-Control: max-age=0`.
+- Reloads: the CLI also reads pages a browser does not request again (the
+  summary, each command's first read of the cursor's page, a readback after
+  a save, `verify`'s reads). It sends those as a reload does: the page's own
+  URL and the Referer it was loaded with, with `Cache-Control: max-age=0`.
+  The summary, the submissions list and, with a cursor from an older CLI
+  version, the receipt go without one.
 - Cursor: the tab id, the frame's page, `showIncorrectOnly` and the
   current page URL's state fields are kept with the attempt. A cursor saved
   by an older CLI version still reads pages and images and runs `verify`;
