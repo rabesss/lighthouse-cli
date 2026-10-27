@@ -1731,6 +1731,14 @@ def test_verification_reports_the_grade_only_as_the_list_shows_it(grade, points,
     assert (receipt.args[0], receipt.kwargs["headers"]) == (RECEIPT_PATH, document(reload=True))
 
 
+def test_a_later_verification_reloads_the_receipt_from_the_attempt_frame():
+    client = LighthouseClient(read_only_auth=True)
+    client.get_raw = Mock(side_effect=[(listing(), {}), (RECEIPT, {})])
+    assert verify_learner_submission(client, **IDENTITY, frame_page=1)["submitted"]
+    receipt = client.get_raw.call_args
+    assert (receipt.args[0], receipt.kwargs["headers"]) == (RECEIPT_PATH, document(FRAME1, reload=True))
+
+
 @pytest.mark.parametrize("submissions", [
     listing(state="<label> (In progress)</label>"), listing(state="<label> (IN PROGRESS)</label>"),
     # An attempt Brightspace is still submitting after its time ran out.

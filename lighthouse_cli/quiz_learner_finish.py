@@ -90,6 +90,7 @@ def _attempt_row(body: bytes, *, course_id: int, quiz_id: int, attempt_id: int) 
 
 def verify_learner_submission(
     client: LighthouseClient, *, course_id: int, quiz_id: int, attempt_id: int, frame_page: int | None = None,
+    reload: bool = True,
 ) -> dict[str, Any]:
     """Read-only: whether this attempt is submitted, from its list row and receipt.
 
@@ -98,14 +99,16 @@ def verify_learner_submission(
     unless both pages agree it was submitted. The points and percentage are
     reported only when the quiz shows them to learners. The receipt loads
     as from the attempt frame opened on ``frame_page``, when the CLI has
-    opened one, as the browser loads it once the quiz is submitted.
+    opened one: as the browser loads it once the quiz is submitted, or,
+    with ``reload``, as a reload of that page.
     """
     try:
         identity(course_id, quiz_id, attempt_id)
         if frame_page is None:
             receipt_headers = _document_headers(client, reload=True)
         else:
-            receipt_headers = _document_headers(client, attempt_frame_path(course_id, quiz_id, attempt_id, frame_page))
+            receipt_headers = _document_headers(client, attempt_frame_path(course_id, quiz_id, attempt_id, frame_page),
+                                                reload=reload)
         listing, _ = client.get_raw("/d2l/lms/quizzing/user/quiz_submissions.d2l?" + urlencode({"ou": course_id, "qi": quiz_id}),
                                     max_bytes=MAX_PAGE_BYTES, _replay_safe=False,
                                     headers=_document_headers(client, reload=True))
@@ -192,7 +195,7 @@ def submit_learner(
         # Still listed in progress after the final request: unknown, not
         # "not submitted", as the request was sent.
         return verify_learner_submission(client, course_id=view.course_id, quiz_id=view.quiz_id,
-                                         attempt_id=view.attempt_id, frame_page=view.frame_page)
+                                         attempt_id=view.attempt_id, frame_page=view.frame_page, reload=False)
     except (LearnerUnansweredError, LearnerSubmitUnknownError):
         raise
     except Exception:  # sent once: a session expiry is unknown too
