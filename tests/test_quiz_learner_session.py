@@ -28,6 +28,7 @@ from lighthouse_cli.quiz_attempt_page import (
     PreviewPageError,
     PreviewRefusedError,
 )
+from lighthouse_cli.quiz_learner_browser import AttemptView, PageState
 from lighthouse_cli.quiz_learner_finish import (
     LearnerNotSubmittedError,
     LearnerSubmitUnknownError,
@@ -45,11 +46,23 @@ from lighthouse_cli.quiz_learner_transport import (
     REFUSE_START_UNAVAILABLE,
     LearnerAdvanceUnknownError,
     LearnerSaveUnknownError,
+    LearnerStart,
     LearnerStartUnknownError,
     LearnerTimer,
 )
 from tests.test_quiz_attempt_page import LEARNER_BUTTONS
-from tests.test_quiz_learner import ANSWERED, NEXT, PREVIOUS, body, parse, questions
+from tests.test_quiz_learner import (
+    ANSWERED,
+    NEXT,
+    POSTED_SCOPES,
+    PREVIOUS,
+    TAB,
+    VIEW,
+    VIEW2,
+    body,
+    parse,
+    questions,
+)
 
 SESSION = "lighthouse_cli.quiz_learner_session"
 QUIZ = {"Name": "Week 3", "PreventMovingBackwards": False, "SubmissionTimeLimit": {"IsEnforced": False},
@@ -57,6 +70,11 @@ QUIZ = {"Name": "Week 3", "PreventMovingBackwards": False, "SubmissionTimeLimit"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
 ACTIVE = {"mode": "learner", "status": "active", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1,
           "operation": None, "timer": None}
+# Back to page 1 from VIEW2, and back from a frame opened on page 2.
+VIEW_BACK = dataclasses.replace(VIEW2, state=PageState(1, POSTED_SCOPES, 4242, 2, "0"))
+FRAME2 = AttemptView(10, 20, 30, 2, TAB, "true")
+FRAME2_BACK = dataclasses.replace(FRAME2, state=PageState(1, POSTED_SCOPES, 4242, 2, None))
+VIEW_KEYS = ("tab_id", "frame_page", "show_incorrect_only", "page_state")
 
 
 def summary_state(*, resumed: bool = False, processing: int | None = None) -> Mock:
@@ -67,6 +85,17 @@ def summary_state(*, resumed: bool = False, processing: int | None = None) -> Mo
 def open_page(number: int = 1, *, next_control: bool = True, content: str | None = None):
     content = questions(page=number) if content is None else content
     return parse(body(content, page=number, extra=LEARNER_BUTTONS + (NEXT if next_control else "")), page=number)
+
+
+def opened(page=None, timer: LearnerTimer | None = None) -> LearnerStart:
+    """A start on ``page``, in an attempt frame opened on it."""
+    page = open_page() if page is None else page
+    return LearnerStart(page, AttemptView(10, 20, page.attempt_id, page.page, TAB, "true"), timer)
+
+
+def saved_answers(page):
+    """A save's reply: the page read back, and the page as the browser holds it."""
+    return page, page.snapshot()
 
 
 @pytest.fixture
@@ -86,10 +115,9 @@ def saved(workflow):
     return workflow.store.read_artifact(workflow.path)[1]
 
 
-def start(workflow, page=None, *, resumed: bool = False):
-    page = open_page() if page is None else page
+def start(workflow, page=None, *, resumed: bool = False, timer: LearnerTimer | None = None):
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=resumed)), \
-            patch(f"{SESSION}.start_learner", return_value=page) as started:
+            patch(f"{SESSION}.start_learner", return_value=opened(page, timer)) as started:
         result = workflow.start()
     started.assert_called_once()
     return result
@@ -101,11 +129,6 @@ def workflow(remote):
     workflow = LearnerWorkflow(10, 20)
     start(workflow)
     return workflow
-
-
-def seal_and_open(client, *, on_identity, **kwargs):
-    on_identity(30, 1)
-    return open_page()
 
 
 def assert_refused(workflow, message, actions=("page", "next", "submit", "images", "answer")):
@@ -132,16 +155,22 @@ def test_start_records_its_intent_first_and_reports_the_quiz(remote):
 
     def fake_start(client, *, on_identity, **kwargs):
         seen.update(saved(workflow))
-        on_identity(30, 1)
+        on_identity(30, 1, TAB)
         seen["sealed"] = saved(workflow)
-        return open_page()
+        return opened()
     with patch(f"{SESSION}.read_learner_summary", return_value=summary), \
             patch(f"{SESSION}.start_learner", side_effect=fake_start) as started:
         result = workflow.start()
     assert seen["status"] == "uncertain" and seen["operation"] == "start" and seen["attempt_id"] is None
-    assert seen["sealed"]["attempt_id"] == 30 and seen["sealed"]["page"] == 1
+    assert not set(VIEW_KEYS) & set(seen)
+    # Sealed with the attempt and the tab it opened in, before its page is read.
+    assert {key: seen["sealed"].get(key) for key in ("attempt_id", "page", *VIEW_KEYS)} == {
+        "attempt_id": 30, "page": 1, "tab_id": TAB, "frame_page": 1, "show_incorrect_only": None, "page_state": None}
     # The summary just read is reused rather than requested again.
     assert started.call_args.kwargs["summary"] is summary
+    assert started.call_args.kwargs["known_tab_id"] == ""
+    assert {key: saved(workflow)[key] for key in VIEW_KEYS} == {
+        "tab_id": TAB, "frame_page": 1, "show_incorrect_only": "true", "page_state": None}
     assert result["attempt_id"] == 30 and result["resumed"] is False
     assert result["quiz"] == {"name": "Week 3", "forward_only": False, "attempts_allowed": 2, "time_limit_minutes": None}
     assert result["timer"] is None
@@ -202,7 +231,7 @@ def test_an_unknown_start_is_settled_only_by_starting_again(remote):
     workflow = LearnerWorkflow(10, 20)
 
     def unknown(client, *, on_identity, **kwargs):
-        on_identity(30, 1)
+        on_identity(30, 1, TAB)
         raise LearnerStartUnknownError(attempt_id=30, page=1)
     with patch(f"{SESSION}.start_learner", side_effect=unknown):
         with pytest.raises(LearnerStartUnknownError):
@@ -214,6 +243,23 @@ def test_an_unknown_start_is_settled_only_by_starting_again(remote):
     assert workflow.status()["status"] == "active"
 
 
+def test_an_unknown_start_submitted_elsewhere_is_closed_by_verify(remote):
+    workflow = LearnerWorkflow(10, 20)
+
+    def unknown(client, *, on_identity, **kwargs):
+        on_identity(30, 1, TAB)
+        raise LearnerStartUnknownError(attempt_id=30, page=1)
+    with patch(f"{SESSION}.start_learner", side_effect=unknown):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+    # The learner finished it in the browser: the cursor keeps only its tab and frame.
+    with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
+        workflow.verify()
+        assert workflow.verify() == RECEIPT
+    assert verify.call_args.kwargs["frame_page"] == 1
+    assert workflow.status() == {**ACTIVE, "status": "submitted"}
+
+
 def test_an_unknown_start_without_an_identity_is_kept(remote):
     workflow = LearnerWorkflow(10, 20)
     with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
@@ -222,9 +268,10 @@ def test_an_unknown_start_without_an_identity_is_kept(remote):
     status = workflow.status()
     assert (status["status"], status["attempt_id"], status["page"]) == ("uncertain", None, None)
     # No attempt is known to exist, so starting again may start one.
-    with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
+    with patch(f"{SESSION}.start_learner", return_value=opened()) as started:
         workflow.start()
     assert started.call_args.kwargs["continue_only"] is False
+    assert started.call_args.kwargs["known_tab_id"] == ""
 
 
 @pytest.mark.parametrize("change", [
@@ -236,9 +283,11 @@ def test_the_clis_unsubmitted_attempt_is_only_continued(workflow, change):
     assert_refused(workflow, "no new attempt was started", ("start",))
     assert saved(workflow) == before
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
-            patch(f"{SESSION}.start_learner", return_value=open_page(2)) as started:
+            patch(f"{SESSION}.start_learner", return_value=opened(open_page(2))) as started:
         workflow.start()
+    # Continued in the browser tab it was opened in.
     assert started.call_args.kwargs["continue_only"] is True
+    assert started.call_args.kwargs["known_tab_id"] == TAB
     assert (workflow.status()["status"], workflow.status()["page"]) == ("active", 2)
 
 
@@ -260,16 +309,26 @@ def test_another_accounts_unverified_change_is_never_replaced(remote, workflow):
 
 def test_answers_are_saved_from_the_page_just_read_then_next_uses_the_readback(workflow):
     current, answered, following = open_page(), open_page(content=ANSWERED), open_page(2)
+    held = answered.snapshot()
     with patch(f"{SESSION}.read_learner_page", return_value=current) as read, \
-            patch(f"{SESSION}.save_learner_answers", return_value=answered) as save, \
-            patch(f"{SESSION}.advance_learner", return_value=following) as advance:
+            patch(f"{SESSION}.save_learner_answers", return_value=(answered, held)) as save, \
+            patch(f"{SESSION}.advance_learner", return_value=(following, VIEW2)) as advance:
         result = workflow.answer({101: "o2", 102: ["o11", "o13"], 103: ["four", "six"]}, advance=True)
     read.assert_called_once()
-    assert save.call_args.kwargs["current"] is current
+    assert read.call_args.args[1:] == (VIEW,)
+    assert save.call_args.args[1:] == (VIEW,) and save.call_args.kwargs["current"] is current
     assert save.call_args.kwargs["answers"] == {101: "o2", 102: ["o11", "o13"], 103: ["four", "six"]}
-    assert advance.call_args.kwargs["current"] is answered
-    assert advance.call_args.kwargs["page"] == 1
+    # Next is sent from the page read back, as the browser holds it after the saves.
+    assert advance.call_args.args[1:] == (VIEW,)
+    assert advance.call_args.kwargs == {"allow_unanswered": False, "forward_only": False, "current": answered,
+                                        "snapshot": held}
     assert result["page"] == 2 and workflow.status()["page"] == 2
+    assert {key: saved(workflow)[key] for key in VIEW_KEYS} == {
+        "tab_id": TAB, "frame_page": 1, "show_incorrect_only": "true", "page_state": dataclasses.asdict(VIEW2.state)}
+    # The next command reads the page where the page script loaded it.
+    with patch(f"{SESSION}.read_learner_page", return_value=following) as read:
+        workflow.page()
+    assert read.call_args.args[1:] == (VIEW2,)
 
 
 @pytest.mark.parametrize(("current", "answers", "allow", "message"), [
@@ -290,7 +349,7 @@ def test_answer_and_next_is_checked_before_anything_is_saved(workflow, current, 
 
 def test_a_next_refused_after_the_save_keeps_the_saved_answers(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
-            patch(f"{SESSION}.save_learner_answers", return_value=open_page(content=ANSWERED)) as save, \
+            patch(f"{SESSION}.save_learner_answers", return_value=saved_answers(open_page(content=ANSWERED))) as save, \
             patch(f"{SESSION}.advance_learner", side_effect=PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)):
         with pytest.raises(PreviewRefusedError):
             workflow.answer({101: "o2"}, advance=True, allow_unanswered=True)
@@ -300,8 +359,8 @@ def test_a_next_refused_after_the_save_keeps_the_saved_answers(workflow):
 
 def test_unanswered_questions_can_be_left_explicitly(workflow):
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
-            patch(f"{SESSION}.save_learner_answers", return_value=open_page()), \
-            patch(f"{SESSION}.advance_learner", return_value=open_page(2)) as advance:
+            patch(f"{SESSION}.save_learner_answers", return_value=saved_answers(open_page())), \
+            patch(f"{SESSION}.advance_learner", return_value=(open_page(2), VIEW2)) as advance:
         workflow.answer({101: "o2"}, advance=True, allow_unanswered=True)
     assert advance.call_args.kwargs["allow_unanswered"] is True
 
@@ -315,7 +374,7 @@ def test_an_unverified_save_is_settled_by_reading_the_page(workflow):
     assert_refused(workflow, "Run attempt page", ("next", "previous", "submit", "images", "answer"))
     with patch(f"{SESSION}.read_learner_page", return_value=open_page(content=ANSWERED)) as read:
         result = workflow.page()
-    assert read.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1}
+    assert read.call_args.args[1:] == (VIEW,) and read.call_args.kwargs == {}
     assert result["questions"][0]["saved"] is True
     assert workflow.status()["status"] == "active"
 
@@ -341,14 +400,15 @@ def test_previous_moves_back_from_the_page_just_read_and_commits_the_readback(re
     current, before = back_page(), open_page(content=ANSWERED)
     seen = {}
 
-    def retreat(client, **kwargs):
+    def retreat(client, view, **kwargs):
         seen.update(saved(workflow))  # the intent is durable before the write
-        return before
+        return before, FRAME2_BACK
     with patch(f"{SESSION}.read_learner_page", return_value=current) as read, \
             patch(f"{SESSION}.retreat_learner", side_effect=retreat) as retreat_call:
         result = workflow.previous()
-    assert read.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 2}
-    assert retreat_call.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 2, "current": current}
+    assert read.call_args.args[1:] == (FRAME2,)
+    assert retreat_call.call_args.args[1:] == (FRAME2,) and retreat_call.call_args.kwargs == {"current": current}
+    assert saved(workflow)["page_state"] == dataclasses.asdict(FRAME2_BACK.state)
     assert (seen["status"], seen["operation"], seen["page"]) == ("uncertain", "previous", 2)
     assert result == {**before.public_data(), "timer": None}
     assert result["page"] == 1 and result["has_next_control"] is True and result["has_previous_control"] is False
@@ -452,9 +512,26 @@ TIMER_STATE = {"limit_seconds": 240, "ends_at": 1.0, "clock_offset": 0.0, "auto_
     *({"timer": {**TIMER_STATE, **timer}} for timer in (
         {"limit_seconds": 0}, {"ends_at": "soon"}, {"auto_submit": 1}, {"ends_at": 1e18}, {"ends_at": 10**400},
         {"ends_at": -1.0}, {"ends_at": 0}, {"clock_offset": 1e18}, {"clock_offset": None}, {"grace_seconds": 60})),
+    {"tab_id": "12a"}, {"tab_id": 1}, {"tab_id": "1" * 21}, {"frame_page": 0}, {"frame_page": True},
+    {"frame_page": 10**6}, {"show_incorrect_only": "yes"}, {"page_state": "x"}, {"page_state": {"page": 1}},
+    {"page_state": dataclasses.asdict(VIEW2.state)},  # a page other than the cursor's
 ])
 def test_a_tampered_cursor_is_rejected(workflow, change):
     workflow._save({**saved(workflow), **change})
+    with pytest.raises(LearnerWorkflowError, match="invalid"):
+        workflow.status()
+
+
+@pytest.mark.parametrize(("dropped", "change"), [
+    (("show_incorrect_only",), {}), (("tab_id", "frame_page"), {}),
+    (("show_incorrect_only", "page_state"), {}),  # only an unverified start lacks how its page is shown
+    ((), {"status": "uncertain", "operation": "start", "attempt_id": None, "page": None}),
+])
+def test_a_cursor_with_part_of_its_attempt_frame_is_rejected(workflow, dropped, change):
+    state = {**saved(workflow), **change}
+    for key in dropped:
+        del state[key]
+    workflow._save(state)
     with pytest.raises(LearnerWorkflowError, match="invalid"):
         workflow.status()
 
@@ -504,15 +581,15 @@ def test_submit_records_its_intent_then_closes_the_attempt(workflow):
     last = open_page(next_control=False)
     seen = {}
 
-    def fake_submit(client, **kwargs):
+    def fake_submit(client, view, **kwargs):
         seen.update(saved(workflow))
         return RECEIPT
     with patch(f"{SESSION}.read_learner_page", return_value=last), \
             patch(f"{SESSION}.submit_learner", side_effect=fake_submit) as submit:
         assert workflow.submit(allow_unanswered=True) == RECEIPT
     assert (seen["status"], seen["operation"]) == ("uncertain", "submit")
-    assert submit.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "page": 1,
-                                       "allow_unanswered": True, "current": last}
+    assert submit.call_args.args[1:] == (VIEW,)
+    assert submit.call_args.kwargs == {"allow_unanswered": True, "current": last}
     assert workflow.status() == {**ACTIVE, "status": "submitted"}
     assert_refused(workflow, "has been submitted")
 
@@ -544,7 +621,7 @@ def test_an_unverified_submission_is_settled_only_by_its_receipt(workflow):
         assert workflow.status()["status"] == "uncertain"
     with patch(f"{SESSION}.verify_learner_submission", return_value=RECEIPT) as verify:
         assert workflow.verify() == RECEIPT
-    assert verify.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
+    assert verify.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "frame_page": 1}
     assert (workflow.status()["status"], workflow.status()["operation"]) == ("submitted", None)
 
 
@@ -555,9 +632,10 @@ def test_other_cursors_never_restrict_a_new_attempt(remote, workflow, change, ac
     _, state, _ = remote
     workflow._save({**saved(workflow), **change})
     state["actor"] = actor
-    with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
+    with patch(f"{SESSION}.start_learner", return_value=opened()) as started:
         workflow.start()
     assert started.call_args.kwargs["continue_only"] is False
+    assert started.call_args.kwargs["known_tab_id"] == ""
     assert workflow.status()["status"] == "active"
 
 
@@ -601,13 +679,14 @@ def test_another_attempt_in_progress_is_not_taken_over(workflow):
     other = dataclasses.replace(open_page(), attempt_id=31)
 
     def continued(client, *, on_identity, **kwargs):
-        on_identity(31, 1)
-        return other
+        on_identity(31, 1, "999")
+        return opened(other)
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
             patch(f"{SESSION}.start_learner", side_effect=continued):
         with pytest.raises(LearnerWorkflowError, match="different attempt in progress"):
             workflow.start()
     assert (workflow.status()["status"], workflow.status()["attempt_id"]) == ("uncertain", 30)
+    assert saved(workflow)["tab_id"] == TAB  # nor its tab
     assert_refused(workflow, "Run attempt start", ("page",))
     # Once the CLI's record is dropped, start continues the attempt in progress.
     workflow.forget()
@@ -623,10 +702,9 @@ def timed(seconds_left: float, *, auto_submit: bool = True) -> LearnerTimer:
 
 
 def start_timed(workflow, timer):
-    with patch(f"{SESSION}.read_learner_timer", return_value=timer) as read:
-        result = start(workflow)
-    read.assert_called_once()
-    assert read.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
+    with patch(f"{SESSION}.read_learner_timer") as read:
+        result = start(workflow, timer=timer)
+    read.assert_not_called()  # the start read it, with the attempt frame
     return result
 
 
@@ -661,13 +739,13 @@ def test_a_timed_start_keeps_its_limit_and_every_page_reports_the_time_left(remo
         with patch(f"{SESSION}.read_learner_page", return_value=open_page()):
             assert workflow.page()["timer"]["limit_seconds"] == 240
         with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
-                patch(f"{SESSION}.save_learner_answers", return_value=open_page()):
+                patch(f"{SESSION}.save_learner_answers", return_value=saved_answers(open_page())):
             assert workflow.answer({101: "o1", 102: ["o1"], 103: "x"}, allow_unanswered=True)["timer"]["auto_submit"]
         with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
-                patch(f"{SESSION}.advance_learner", return_value=back_page()):
+                patch(f"{SESSION}.advance_learner", return_value=(back_page(), VIEW2)):
             assert workflow.next(allow_unanswered=True)["timer"]["limit_seconds"] == 240
         with patch(f"{SESSION}.read_learner_page", return_value=back_page()), \
-                patch(f"{SESSION}.retreat_learner", return_value=open_page()):
+                patch(f"{SESSION}.retreat_learner", return_value=(open_page(), VIEW_BACK)):
             assert workflow.previous()["timer"]["limit_seconds"] == 240
     read.assert_not_called()
 
@@ -718,7 +796,7 @@ def test_while_brightspace_submits_an_attempt_start_without_its_cursor_sends_not
     assert (workflow.path.read_bytes() if workflow.path.exists() else None) == before  # not even rewritten
     assert workflow.status()["status"] == ("submitted" if cursor == "submitted" else "absent")
     # Once Brightspace has submitted it, start begins a new attempt.
-    with patch(f"{SESSION}.start_learner", return_value=open_page()) as started:
+    with patch(f"{SESSION}.start_learner", return_value=opened()) as started:
         workflow.start()
     assert started.call_args.kwargs["continue_only"] is False
 
@@ -764,7 +842,7 @@ def test_time_that_runs_out_during_a_command_stops_its_next_write(remote):
 
     def save(*args, **kwargs):
         clock[0] += 200  # the save outlasts the time left
-        return open_page()
+        return saved_answers(open_page())
     with patch(f"{SESSION}.time", Mock(time=lambda: clock[0])), \
             patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
             patch(f"{SESSION}.save_learner_answers", side_effect=save), \
@@ -772,6 +850,28 @@ def test_time_that_runs_out_during_a_command_stops_its_next_write(remote):
         with pytest.raises(LearnerWorkflowError, match=TIME_UP):
             workflow.answer({101: "o2"}, advance=True, allow_unanswered=True)
     advance.assert_not_called()
+    assert (saved(workflow)["status"], saved(workflow)["operation"]) == ("active", None)
+
+
+def test_time_that_runs_out_between_two_answers_stops_the_second(remote):
+    workflow = LearnerWorkflow(10, 20)
+    start_timed(workflow, timed(100))
+    clock = [time.time()]
+    sent = []
+
+    def save(client, view, *, before_post, **kwargs):
+        for answer in ("first", "second"):  # each answer is its own request
+            before_post()
+            sent.append(answer)
+            clock[0] += 200  # the first outlasts the time left
+        return saved_answers(open_page())
+    with patch(f"{SESSION}.time", Mock(time=lambda: clock[0])), \
+            patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
+            patch(f"{SESSION}.save_learner_answers", side_effect=save):
+        with pytest.raises(LearnerWorkflowError, match=TIME_UP):
+            workflow.answer({101: "o2", 102: ["o11"]}, allow_unanswered=True)
+    assert sent == ["first"]
+    # The first was read back before the second was sent.
     assert (saved(workflow)["status"], saved(workflow)["operation"]) == ("active", None)
 
 
@@ -815,7 +915,7 @@ def test_once_time_is_up_verify_reads_the_timer_again(remote, refreshed, message
             patch(f"{SESSION}.read_learner_timer", **read) as timer:
         with pytest.raises((LearnerWorkflowError, LearnerNotSubmittedError), match=message):
             workflow.verify()
-    assert timer.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30}
+    assert timer.call_args.kwargs == {"course_id": 10, "quiz_id": 20, "attempt_id": 30, "frame_page": 1}
     if message == "still in progress":  # extra time, or a clock set right: the attempt goes on
         with patch(f"{SESSION}.read_learner_page", return_value=open_page()):
             workflow.page()
@@ -832,11 +932,11 @@ def test_without_auto_submit_the_attempt_stays_open_past_its_limit(remote):
             workflow.verify()
     # Answers are still saved, and the attempt moved on, back, on again and submitted.
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
-            patch(f"{SESSION}.save_learner_answers", return_value=open_page()) as save:
+            patch(f"{SESSION}.save_learner_answers", return_value=saved_answers(open_page())) as save:
         workflow.answer({101: "o1"}, allow_unanswered=True)
     with patch(f"{SESSION}.read_learner_page", return_value=open_page()), \
-            patch(f"{SESSION}.advance_learner", return_value=open_page(2, next_control=False)) as advance, \
-            patch(f"{SESSION}.retreat_learner", return_value=open_page()) as retreat:
+            patch(f"{SESSION}.advance_learner", return_value=(open_page(2, next_control=False), VIEW2)) as advance, \
+            patch(f"{SESSION}.retreat_learner", return_value=(open_page(), VIEW_BACK)) as retreat:
         workflow.next(allow_unanswered=True)
         assert workflow.previous()["page"] == 1
         workflow.next(allow_unanswered=True)
@@ -849,35 +949,55 @@ def test_without_auto_submit_the_attempt_stays_open_past_its_limit(remote):
     submit.assert_called_once()
 
 
-@pytest.mark.parametrize(("failure", "raised"), [
-    (PreviewPageError(), LearnerWorkflowError), (NetworkError("no"), LearnerWorkflowError),
-    (SessionExpiredError("expired"), SessionExpiredError),
-])
-def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote, failure, raised):
+def limit_unread(client, *, on_identity, **kwargs):
+    on_identity(30, 1, TAB)
+    raise LearnerStartUnknownError(attempt_id=30, page=1, timer=True)
+
+
+def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote):
     workflow = LearnerWorkflow(10, 20)
-    with patch(f"{SESSION}.start_learner", side_effect=seal_and_open), \
-            patch(f"{SESSION}.read_learner_timer", side_effect=failure):
-        with pytest.raises(raised, match="time limit could not be read" if raised is LearnerWorkflowError else None):
+    with patch(f"{SESSION}.start_learner", side_effect=limit_unread):
+        with pytest.raises(LearnerWorkflowError, match="time limit could not be read"):
             workflow.start()
     assert workflow.status() == {**ACTIVE, "status": "uncertain", "operation": "start"}
+    assert (saved(workflow)["tab_id"], saved(workflow)["frame_page"]) == (TAB, 1)
     assert_refused(workflow, "Run attempt start", ("page",))
-    # Starting again only continues that attempt and reads its limit again.
+    # Starting again only continues that attempt, in its tab, and reads its limit again.
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
-            patch(f"{SESSION}.start_learner", return_value=open_page()) as again, \
-            patch(f"{SESSION}.read_learner_timer", return_value=timed(200)):
+            patch(f"{SESSION}.start_learner", return_value=opened(timer=timed(200))) as again:
         assert workflow.start()["timer"]["limit_seconds"] == 240
     assert again.call_args.kwargs["continue_only"] is True
+    assert again.call_args.kwargs["known_tab_id"] == TAB
+
+
+def test_a_session_expiry_opening_the_attempt_says_so_and_keeps_the_attempt(remote):
+    workflow = LearnerWorkflow(10, 20)
+    expired = SessionExpiredError("Session expired.")
+
+    def limit_expired(client, *, on_identity, **kwargs):
+        on_identity(30, 1, TAB)
+        raise LearnerStartUnknownError(attempt_id=30, page=1, expired=expired)
+    with patch(f"{SESSION}.start_learner", side_effect=limit_expired):
+        with pytest.raises(SessionExpiredError) as exc_info:
+            workflow.start()
+    assert exc_info.value is expired
+    assert workflow.status() == {**ACTIVE, "status": "uncertain", "operation": "start"}
+    assert (saved(workflow)["tab_id"], saved(workflow)["frame_page"]) == (TAB, 1)
+    # Signed in again, starting only continues that attempt, in its tab.
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
+            patch(f"{SESSION}.start_learner", return_value=opened(timer=timed(200))) as again:
+        assert workflow.start()["timer"]["limit_seconds"] == 240
+    assert again.call_args.kwargs["continue_only"] is True
+    assert again.call_args.kwargs["known_tab_id"] == TAB
 
 
 def test_a_recovery_start_that_finds_the_time_up_refuses_the_attempt(remote):
     workflow = LearnerWorkflow(10, 20)
-    with patch(f"{SESSION}.start_learner", side_effect=seal_and_open), \
-            patch(f"{SESSION}.read_learner_timer", side_effect=NetworkError("no")):
+    with patch(f"{SESSION}.start_learner", side_effect=limit_unread):
         with pytest.raises(LearnerWorkflowError, match="time limit could not be read"):
             workflow.start()
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
-            patch(f"{SESSION}.start_learner", return_value=open_page()), \
-            patch(f"{SESSION}.read_learner_timer", return_value=timed(-5)):
+            patch(f"{SESSION}.start_learner", return_value=opened(timer=timed(-5))):
         with pytest.raises(LearnerWorkflowError, match=TIME_UP):
             workflow.start()
     assert (saved(workflow)["status"], saved(workflow)["timer"]["limit_seconds"]) == ("active", 240)
@@ -905,11 +1025,36 @@ def test_a_cursor_from_before_previous_still_goes_back_by_the_page(remote):
     del state["forward_only"]
     workflow._save(state)
     with patch(f"{SESSION}.read_learner_page", return_value=back_page()), \
-            patch(f"{SESSION}.retreat_learner", return_value=open_page()):
+            patch(f"{SESSION}.retreat_learner", return_value=(open_page(), FRAME2_BACK)):
         assert workflow.previous()["page"] == 1
     workflow._save({**saved(workflow), "forward_only": 1})
     with pytest.raises(LearnerWorkflowError, match="invalid"):
         workflow.status()
+
+
+def test_a_cursor_from_before_the_browsers_requests_is_read_but_never_written_from(workflow, tmp_path):
+    state = saved(workflow)
+    for key in VIEW_KEYS:
+        del state[key]
+    workflow._save(state)
+    assert workflow.status() == ACTIVE
+    # Read as the attempt frame first shows the page, in a tab without an id.
+    with patch(f"{SESSION}.read_learner_page", return_value=image_page()) as read, \
+            patch(f"{SESSION}.read_quiz_image", return_value=(PNG, "image/png")):
+        workflow.page()
+        workflow.images(question_id=102, directory=tmp_path)
+    assert [call.args[1:] for call in read.call_args_list] == [(AttemptView(10, 20, 30, 1, "", "true"),)] * 2
+    assert_refused(workflow, "older CLI version", ("answer", "next", "previous", "submit"))
+    with patch(f"{SESSION}.verify_learner_submission", side_effect=LearnerNotSubmittedError()) as verify:
+        with pytest.raises(LearnerNotSubmittedError):
+            workflow.verify()
+    assert verify.call_args.kwargs["frame_page"] is None
+    # Starting again opens it as the browser does.
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
+            patch(f"{SESSION}.start_learner", return_value=opened()) as started:
+        workflow.start()
+    assert started.call_args.kwargs["known_tab_id"] == ""
+    assert saved(workflow)["tab_id"] == TAB
 
 
 def test_a_cursor_from_before_timed_quizzes_reads_as_untimed(workflow):

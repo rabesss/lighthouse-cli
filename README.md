@@ -245,7 +245,7 @@ of a quiz, timed or not, a page at a time:
 # Continue the attempt in progress, or start a new one (uses one of your attempts):
 lighthouse student attempt start COURSE_ID QUIZ_ID --yes --json
 lighthouse student attempt page COURSE_ID QUIZ_ID --json
-# Save every answer on the page in one request; --next then moves on:
+# Save the page's answers, one request per changed answer; --next then moves on:
 lighthouse student attempt answer COURSE_ID QUIZ_ID --answers '{"101": "CHOICE_ID", "102": ["OPTION_ID"], "103": ["blank text"]}' --next --yes --json
 lighthouse student attempt next COURSE_ID QUIZ_ID --yes --json
 # Back a page, where the quiz allows moving back:

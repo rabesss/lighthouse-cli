@@ -111,7 +111,7 @@ def page(course_id: int, quiz_id: int, json_output: bool) -> None:
 @WRITE_OPTIONS
 def answer(course_id: int, quiz_id: int, answers: str, advance: bool, allow_unanswered: bool,
            yes: bool, dry_run: bool, json_output: bool) -> None:
-    """Save answers on the current page in one request, keeping the others.
+    """Save answers on the current page, one request per changed answer, keeping the others.
 
     With --next, everything Next needs is checked before anything is saved.
     """

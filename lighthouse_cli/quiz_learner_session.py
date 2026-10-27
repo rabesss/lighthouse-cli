@@ -12,6 +12,7 @@ keeps the limit read at the start, so the time left is known without asking.
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import json
 import math
@@ -32,12 +33,14 @@ from .connection import active_connection
 from .credential_store import CredentialStore, CredentialStoreError, _validate_credential_path
 from .quiz_attempt_page import (
     REFUSE_LEARNER_FIRST_PAGE,
-    REFUSE_LEARNER_LAST_PAGE,
     REFUSE_LEARNER_NOT_ON_PAGE,
     REFUSE_LEARNER_UNANSWERED,
     LearnerPage,
+    PageSnapshot,
     PreviewRefusedError,
+    valid_tab_id,
 )
+from .quiz_learner_browser import AttemptView, PageState, identity, plan_page_change
 from .quiz_learner_finish import (
     LearnerNotSubmittedError,
     LearnerSubmitUnknownError,
@@ -50,7 +53,6 @@ from .quiz_learner_transport import (
     LearnerStartUnknownError,
     LearnerTimer,
     advance_learner,
-    learner_page_path,
     read_learner_page,
     read_learner_summary,
     read_learner_timer,
@@ -94,6 +96,7 @@ _TIMER = ("The attempt is open, but its time limit could not be read. "
 _TIME_UP = ("Time is up for this attempt, and the CLI sends nothing more to it: Brightspace submits it by itself. "
             "Run attempt verify to check the submission.")
 _AWAITING_SUBMIT = "Time is up, and Brightspace has not submitted this attempt yet. Run attempt verify again in a minute."
+_OLDER_CURSOR = "This attempt was opened by an older CLI version. Run attempt start to continue it."
 _ANSWERS = ('Answers must be a JSON object mapping each question id to a choice id, '
             'a list of option ids, or a list of blank texts, e.g. {"101": "o2"}.')
 _IMAGE_FAILED = "The image could not be downloaded."
@@ -101,6 +104,12 @@ _IMAGE_NOT_SAVED = "The image could not be saved."
 _IMAGE_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 # A Unix time in the year 3058: later than any deadline, and one a datetime can show.
 _LAST_TIME = 2**35
+# How the CLI's attempt frame shows the cursor's page: the browser tab and
+# frame it was opened in, then what the page's URL is built from. A start
+# whose page is unverified records only the first two.
+_TAB_KEYS = ("tab_id", "frame_page")
+_SHOWN_KEYS = ("show_incorrect_only", "page_state")
+_VIEW_KEYS = (*_TAB_KEYS, *_SHOWN_KEYS)
 
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -186,6 +195,11 @@ def _time_up(state: Mapping[str, Any]) -> bool:
     return timer is not None and timer["auto_submit"] and _server_now(timer) >= timer["ends_at"]
 
 
+def _view_keys(view: AttemptView) -> dict[str, Any]:
+    return {"tab_id": view.tab_id, "frame_page": view.frame_page, "show_incorrect_only": view.show_incorrect_only,
+            "page_state": None if view.state is None else dataclasses.asdict(view.state)}
+
+
 def _write_image(path: Path, data: bytes) -> None:
     # O_NONBLOCK: a FIFO planted under the image's name fails instead of blocking.
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -219,7 +233,7 @@ def _save_image(client: LighthouseClient, directory: Path, question: Mapping[str
 
 class LearnerWorkflow:
     def __init__(self, course_id: int, quiz_id: int) -> None:
-        learner_page_path(course_id, quiz_id, 1, 1)
+        identity(course_id, quiz_id)
         self.course_id, self.quiz_id = course_id, quiz_id
         self.connection = active_connection()
         self.store = CredentialStore(config_dir=self.connection.cookie_dir)
@@ -275,10 +289,35 @@ class LearnerWorkflow:
         # Only an unresolved start may lack its attempt and page.
         if state["operation"] != "start" or state.get("attempt_id") is not None or state.get("page") is not None:
             try:
-                learner_page_path(self.course_id, self.quiz_id, state.get("attempt_id"), state.get("page"))  # type: ignore[arg-type]
+                identity(state.get("attempt_id"), state.get("page"))  # type: ignore[arg-type]
             except ValueError:
                 raise LearnerWorkflowError(_INVALID) from None
+        # Cursors from before the CLI opened attempts as the browser does
+        # have none of the view; a start whose page is unverified has only
+        # its tab and frame, kept once verify finds that attempt submitted.
+        keys = tuple(key for key in _VIEW_KEYS if key in state)
+        if keys not in ((), _TAB_KEYS, _VIEW_KEYS) or (
+                keys == _TAB_KEYS and state["operation"] != "start" and state["status"] != "submitted") or (
+                keys and (state.get("attempt_id") is None or not valid_tab_id(state["tab_id"])
+                          or type(state["frame_page"]) is not int or not 0 < state["frame_page"] < 10**6)):
+            raise LearnerWorkflowError(_INVALID)
+        if keys == _VIEW_KEYS:
+            self._view(state)
         return state
+
+    def _view(self, state: Mapping[str, Any]) -> AttemptView | None:
+        """The attempt frame showing the cursor's page, or ``None`` for a cursor from an older CLI."""
+        if "show_incorrect_only" not in state:
+            return None
+        try:
+            shown = state["page_state"]
+            view = AttemptView(self.course_id, self.quiz_id, state["attempt_id"], state["frame_page"], state["tab_id"],
+                               state["show_incorrect_only"], None if shown is None else PageState(**shown))
+        except (TypeError, ValueError):
+            raise LearnerWorkflowError(_INVALID) from None
+        if view.page != state["page"]:
+            raise LearnerWorkflowError(_INVALID)
+        return view
 
     def _save(self, state: dict[str, Any]) -> None:
         self.store.write_artifact(self.path, metadata={}, secret=state)
@@ -295,8 +334,14 @@ class LearnerWorkflow:
             raise LearnerWorkflowError("The signed-in account could not be verified.")
         return _require_positive_endpoint_id(who.get("Identifier"), "account")
 
-    def _open(self, client: LighthouseClient, *, unverified_save: bool = False) -> dict[str, Any]:
-        """The saved cursor, if it is this account's and verified (or, for a read, only a save is unverified)."""
+    def _open(self, client: LighthouseClient, *, unverified_save: bool = False,
+              write: bool = False) -> tuple[dict[str, Any], AttemptView]:
+        """The saved cursor, if it is this account's and verified (or, for a read, only a save is unverified).
+
+        Also the attempt frame showing its page. A cursor from an older CLI
+        has none, so it is read as the frame first shows the page and never
+        written from.
+        """
         state = self._load()
         if state is None:
             raise LearnerWorkflowError(_NOT_OPEN)
@@ -313,11 +358,12 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_REOPEN)
             if not unverified_save:
                 raise LearnerWorkflowError(_SAVE_UNVERIFIED)
-        return state
-
-    def _identity(self, state: dict[str, Any]) -> dict[str, int]:
-        return {"course_id": self.course_id, "quiz_id": self.quiz_id,
-                "attempt_id": state["attempt_id"], "page": state["page"]}
+        view = self._view(state)
+        if view is None:
+            if write:
+                raise LearnerWorkflowError(_OLDER_CURSOR)
+            view = AttemptView(self.course_id, self.quiz_id, state["attempt_id"], state["page"], "", "true")
+        return state, view
 
     def _intent(self, state: dict[str, Any], operation: str, action: Callable[[], _T]) -> _T:
         """Record the intent durably, then run one write.
@@ -341,12 +387,13 @@ class LearnerWorkflow:
             self._save(state)
             raise
 
-    def _write(self, state: dict[str, Any], operation: str, action: Callable[[], LearnerPage]) -> LearnerPage:
-        """One write, then commit the page it read back."""
-        page = self._intent(state, operation, action)
-        state.update(status="active", operation=None, page=page.page)
+    def _write(self, state: dict[str, Any], operation: str,
+               action: Callable[[], tuple[LearnerPage, AttemptView]]) -> tuple[LearnerPage, AttemptView]:
+        """One write, then commit the page it read back and the attempt frame showing it."""
+        page, view = self._intent(state, operation, action)
+        state.update(status="active", operation=None, page=page.page, **_view_keys(view))
         self._save(state)
-        return page
+        return page, view
 
     def status(self) -> dict[str, Any]:
         """The local cursor, without contacting Brightspace."""
@@ -381,26 +428,36 @@ class LearnerWorkflow:
             refuse_while_processing(summary)
             if kept is not None and not summary.can_continue:
                 raise LearnerWorkflowError(_NOT_CONTINUABLE)
-            # The intent keeps the CLI's attempt and its limit, so a start that
-            # fails midway still names them for the next start and for verify.
+            # The intent keeps the CLI's attempt, its limit and its browser
+            # tab, so a start that fails midway still names them for the next
+            # start and for verify.
             state: dict[str, Any] = {
                 "version": 1, "origin": self.connection.origin, "mode": "learner", "actor_id": actor,
                 "course_id": self.course_id, "quiz_id": self.quiz_id, "status": "uncertain", "operation": "start",
                 "attempt_id": None if kept is None else kept["attempt_id"], "page": None if kept is None else kept["page"],
                 "timer": None if kept is None else kept.get("timer"),
                 "forward_only": info["forward_only"],
+                **({} if kept is None else {key: kept[key] for key in _VIEW_KEYS if key in kept}),
             }
             self._save(state)  # durable intent before the start request
 
-            def seal(attempt_id: int, page: int) -> None:
+            def seal(attempt_id: int, page: int, tab_id: str) -> None:
                 if kept is None or attempt_id == kept["attempt_id"]:  # never another attempt over the CLI's
-                    state.update(attempt_id=attempt_id, page=page)
+                    state.update(attempt_id=attempt_id, page=page, tab_id=tab_id, frame_page=page)
+                    for key in _SHOWN_KEYS:
+                        state.pop(key, None)
                     self._save(state)
 
             try:
-                page = start_learner(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                     continue_only=kept is not None, on_identity=seal, summary=summary)
-            except LearnerStartUnknownError:
+                started = start_learner(client, course_id=self.course_id, quiz_id=self.quiz_id,
+                                        continue_only=kept is not None, known_tab_id=kept.get("tab_id", "") if kept else "",
+                                        on_identity=seal, summary=summary)
+            except LearnerStartUnknownError as exc:
+                # The cursor stays uncertain, naming the attempt.
+                if exc.expired is not None:
+                    raise exc.expired from None
+                if exc.timer:
+                    raise LearnerWorkflowError(_TIMER) from None
                 raise
             except Exception:
                 # Refused or failed before the start request was sent.
@@ -409,18 +466,13 @@ class LearnerWorkflow:
                 else:
                     self._save(previous)
                 raise
+            page = started.page
             if kept is not None and page.attempt_id != kept["attempt_id"]:
                 raise LearnerWorkflowError(_OTHER_ATTEMPT)
-            # Read for every attempt, as special access can time one of an untimed quiz.
-            try:
-                timer = read_learner_timer(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                           attempt_id=page.attempt_id)
-            except SessionExpiredError:
-                raise
-            except Exception:  # the cursor stays uncertain, naming the attempt
-                raise LearnerWorkflowError(_TIMER) from None
+            # The timer is read for every attempt, as special access can time
+            # one of an untimed quiz.
             state.update(status="active", operation=None, attempt_id=page.attempt_id, page=page.page,
-                         timer=_cursor_timer(timer))
+                         timer=_cursor_timer(started.timer), **_view_keys(started.view))
             self._save(state)
             if _time_up(state):  # continued with its limit unknown, as a previous read of it failed
                 raise LearnerWorkflowError(_TIME_UP)
@@ -441,8 +493,8 @@ class LearnerWorkflow:
     def page(self) -> dict[str, Any]:
         """Read the cursor's page; this also settles an unverified answer save."""
         with self._locked(), self._client() as client:
-            state = self._open(client, unverified_save=True)
-            current = read_learner_page(client, **self._identity(state))
+            state, view = self._open(client, unverified_save=True)
+            current = read_learner_page(client, view)
             if state["status"] == "uncertain":
                 state.update(status="active", operation=None)
                 self._save(state)
@@ -456,40 +508,54 @@ class LearnerWorkflow:
         so a refused Next sends nothing.
         """
         with self._locked(), self._client() as client:
-            state = self._open(client)
-            identity = self._identity(state)
-            current = read_learner_page(client, **identity)
+            state, view = self._open(client, write=True)
+            current = read_learner_page(client, view)
             if advance:
-                if not current.has_next_control:
-                    raise PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)
+                plan_page_change(current, view, forward=True, forward_only=state.get("forward_only"),
+                                 origin=client.base_url)
                 if current.unanswered(current.intended(answers)) and not allow_unanswered:
                     raise PreviewRefusedError(REFUSE_LEARNER_UNANSWERED)
-            saved = self._write(state, "answer", lambda: save_learner_answers(
-                client, **identity, answers=answers, current=current))
+
+            def before_post() -> None:  # each answer is its own request
+                if _time_up(state):
+                    raise LearnerWorkflowError(_TIME_UP)
+
+            # The page as the browser holds it after the saves, which Next is sent from.
+            held: list[PageSnapshot] = []
+
+            def save() -> tuple[LearnerPage, AttemptView]:
+                page, snapshot = save_learner_answers(client, view, answers=answers, current=current,
+                                                      before_post=before_post)
+                held.append(snapshot)
+                return page, view
+
+            saved, _ = self._write(state, "answer", save)
             if advance:
-                saved = self._write(state, "next", lambda: advance_learner(
-                    client, **identity, allow_unanswered=allow_unanswered, current=saved))
+                saved, _ = self._write(state, "next", lambda: advance_learner(
+                    client, view, allow_unanswered=allow_unanswered, forward_only=state.get("forward_only"),
+                    current=saved, snapshot=held[0]))
             return {**saved.public_data(), "timer": _clock(state.get("timer"))}
 
-    def _turn(self, operation: str, change: Callable[..., LearnerPage], **options: Any) -> dict[str, Any]:
+    def _turn(self, operation: str, change: Callable[[LighthouseClient, AttemptView, LearnerPage, bool | None],
+                                                      tuple[LearnerPage, AttemptView]]) -> dict[str, Any]:
         """Change page from the cursor's page, read just before, and commit the page read back."""
         with self._locked(), self._client() as client:
-            state = self._open(client)
+            state, view = self._open(client, write=True)
             # The page's Previous control is the gate; the quiz's own setting backs it up.
             if operation == "previous" and state.get("forward_only"):
                 raise PreviewRefusedError(REFUSE_LEARNER_FIRST_PAGE)
-            identity = self._identity(state)
-            current = read_learner_page(client, **identity)
-            moved = self._write(state, operation, lambda: change(client, **identity, **options, current=current))
+            current = read_learner_page(client, view)
+            moved, _ = self._write(state, operation, lambda: change(client, view, current, state.get("forward_only")))
             return {**moved.public_data(), "timer": _clock(state.get("timer"))}
 
     def next(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
         """Move to the next page, keeping this page's saved answers."""
-        return self._turn("next", advance_learner, allow_unanswered=allow_unanswered)
+        return self._turn("next", lambda client, view, current, forward_only: advance_learner(
+            client, view, allow_unanswered=allow_unanswered, forward_only=forward_only, current=current))
 
     def previous(self) -> dict[str, Any]:
         """Move back to the previous page, keeping this page's saved answers."""
-        return self._turn("previous", retreat_learner)
+        return self._turn("previous", lambda client, view, current, _: retreat_learner(client, view, current=current))
 
     def submit(self, *, allow_unanswered: bool = False) -> dict[str, Any]:
         """Submit the attempt from its last page, once, and report the verified receipt.
@@ -498,11 +564,10 @@ class LearnerWorkflow:
         ``allow_unanswered``; the error lists them.
         """
         with self._locked(), self._client() as client:
-            state = self._open(client)
-            identity = self._identity(state)
-            current = read_learner_page(client, **identity)
+            state, view = self._open(client, write=True)
+            current = read_learner_page(client, view)
             receipt = self._intent(state, "submit", lambda: submit_learner(
-                client, **identity, allow_unanswered=allow_unanswered, current=current))
+                client, view, allow_unanswered=allow_unanswered, current=current))
             state.update(status="submitted", operation=None)
             self._save(state)
             return receipt
@@ -524,7 +589,7 @@ class LearnerWorkflow:
                 raise LearnerWorkflowError(_OTHER_ACCOUNT)
             try:
                 receipt = verify_learner_submission(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                                    attempt_id=state["attempt_id"])
+                                                    attempt_id=state["attempt_id"], frame_page=state.get("frame_page"))
             except LearnerNotSubmittedError:
                 if self._awaiting_submit(client, state):  # starting would only reopen it
                     raise LearnerWorkflowError(_AWAITING_SUBMIT) from None
@@ -544,7 +609,7 @@ class LearnerWorkflow:
             return False
         try:
             timer = read_learner_timer(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                       attempt_id=state["attempt_id"])
+                                       attempt_id=state["attempt_id"], frame_page=state.get("frame_page"))
         except SessionExpiredError:
             raise
         except Exception:  # the deadline the CLI has stands
@@ -556,8 +621,8 @@ class LearnerWorkflow:
     def images(self, *, question_id: int | None = None, directory: Path | None = None) -> dict[str, Any]:
         """Download the cursor page's images (or one question's) into ``directory`` or a new temporary one."""
         with self._locked(), self._client() as client:
-            state = self._open(client)
-            current = read_learner_page(client, **self._identity(state))
+            state, view = self._open(client)
+            current = read_learner_page(client, view)
             questions = [q for q in current.questions if question_id in (None, q["question_id"])]
             if not questions:
                 raise PreviewRefusedError(REFUSE_LEARNER_NOT_ON_PAGE)

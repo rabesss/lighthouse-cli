@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, TypeVar
 from urllib.parse import urlparse
 
@@ -55,6 +55,8 @@ REFUSE_LEARNER_LAST_PAGE = "This is the last page. Submit the quiz instead."
 REFUSE_LEARNER_FIRST_PAGE = "There is no previous page: this is the first page, or the quiz does not allow moving back."
 REFUSE_LEARNER_NOT_LAST_PAGE = "Move to the last page before submitting."
 REFUSE_LEARNER_UNANSWERED = "This page has unanswered questions. Answer them, or explicitly allow leaving them unanswered."
+REFUSE_LEARNER_FORM = ("This quiz page is not one the CLI can send as a browser would, so nothing was sent. "
+                       "Answer it in Brightspace in a browser.")
 
 
 def _id(value: object) -> int:
@@ -246,6 +248,217 @@ def hidden_form(body: bytes) -> tuple[Tag, dict[str, str]]:
             raise PreviewPageError()
         hidden[name] = value
     return form, hidden
+
+
+# What the browser's page script reads from a page to post its form: control
+# and scope names, the page id it deserializes and the attempt page's
+# fetch-transport switch, which must be off for a form post.
+_NAME = re.compile(r"[A-Za-z0-9_]{1,128}")
+_SCOPE = re.compile(r"[A-Za-z0-9_]{1,64}")
+_PAGE_ID = re.compile(r'D2L\.Serialization\.JsonDeserializerMin\.Deserialize\(\["[0-9a-f]{32}",([0-9]{1,9}),[0-9]{1,3},')
+_FETCH_FLAG = re.compile(r"\bvar\s+quizAttemptSaveFetchEnabled\s*=\s*([A-Za-z]+)\s*;")
+_TAB_ID = re.compile(r"[0-9]{0,20}")
+_RACE_FLAG = re.compile(r"function GoNextPage\(isFO, currPg, newPg, isPreviewFromQB\) \{\s*"
+                        r"const isForwardOnlyDialogRaceConditionFlagEnabled = '(True|False)' === 'True';")
+_FORM_REQUIRED = ("d2l_controlMapPrev", "d2l_action", "d2l_actionparam", "d2l_hitCode", "d2l_controlMap", "d2l_state",
+                  "d2l_referrer")
+# The fields the page script appends after the form's own controls.
+_FORM_APPENDED = ("d2l_multiedit", "d2l_stateScopes", "d2l_stateGroups", "d2l_statePageId")
+_NOT_POSTED = {"submit", "image", "reset", "button"}
+
+
+def _refuse() -> PreviewRefusedError:
+    return PreviewRefusedError(REFUSE_LEARNER_FORM)
+
+
+def _strict_json(value: str) -> Any:
+    """JSON with no repeated object key, which a browser would silently collapse."""
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("Repeated key.")
+            result[key] = item
+        return result
+    try:
+        return json.loads(value, object_pairs_hook=unique)
+    except (ValueError, RecursionError):
+        raise _refuse() from None
+
+
+def _js_order(mapping: Mapping[str, Any]) -> dict[str, Any]:
+    """Keys in a JavaScript object's order: array indices ascending, then the rest as written."""
+    def index(key: str) -> bool:
+        return re.fullmatch(r"0|[1-9][0-9]{0,9}", key) is not None and int(key) < 2 ** 32 - 1
+    indices = sorted((key for key in mapping if index(key)), key=int)
+    return {key: mapping[key] for key in [*indices, *(key for key in mapping if not index(key))]}
+
+
+def _compact(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _control_map(value: str) -> tuple[dict[str, list[Any]], dict[str, dict[str, list[Any]]]]:
+    """The page's control map: controls by name, and sub-controls by name and sub-name.
+
+    Each entry is a list whose first item is the control's form name.
+    """
+    cm = _strict_json(value)
+    if not (isinstance(cm, list) and len(cm) == 2 and isinstance(cm[0], dict) and isinstance(cm[1], dict)):
+        raise _refuse()
+
+    def entry(name: str, item: object) -> bool:
+        return (_NAME.fullmatch(name) is not None and isinstance(item, list) and bool(item)
+                and isinstance(item[0], str) and _NAME.fullmatch(item[0]) is not None)
+    if not all(entry(name, item) for name, item in cm[0].items()) or not all(
+            _NAME.fullmatch(name) and isinstance(group, dict) and all(entry(sub, item) for sub, item in group.items())
+            for name, group in cm[1].items()):
+        raise _refuse()
+    return cm[0], cm[1]
+
+
+def _scopes(scopes: object) -> str:
+    """``d2l_state``'s scopes as the page script posts them: compact JSON in JavaScript key order."""
+    if not isinstance(scopes, dict) or not all(
+            _SCOPE.fullmatch(key) and isinstance(names, list)
+            and all(isinstance(name, str) and _SCOPE.fullmatch(name) for name in names)
+            for key, names in scopes.items()) or sum(len(names) for names in scopes.values()) > 32:
+        raise _refuse()
+    return _compact(_js_order(scopes))
+
+
+def valid_scopes(text: object) -> bool:
+    """Whether ``text`` is scopes exactly as :func:`form_state` gives them, as a saved cursor must hold."""
+    if not isinstance(text, str) or len(text) > 4096:
+        return False
+    try:
+        return _scopes(_strict_json(text)) == text
+    except PreviewRefusedError:
+        return False
+
+
+def valid_tab_id(value: object) -> bool:
+    """Whether ``value`` is a browser tab id as the attempt's process page sets it (empty when it set none)."""
+    return isinstance(value, str) and _TAB_ID.fullmatch(value) is not None
+
+
+def _page_state(soup: BeautifulSoup, state_value: str) -> tuple[str, int]:
+    """The posted ``d2l_stateScopes`` and the page id, from ``d2l_state`` and the page's scripts."""
+    state = _strict_json(state_value)
+    if not (isinstance(state, list) and len(state) == 2 and state[1] == []):
+        raise _refuse()
+    scopes = _scopes(state[0])
+    ids = [match[1] for script in soup.find_all("script") for match in _PAGE_ID.finditer(script.get_text())]
+    if len(ids) != 1:
+        raise _refuse()
+    return scopes, int(ids[0])
+
+
+def _document(body: bytes) -> tuple[BeautifulSoup, Tag]:
+    """The page and its one form, templates dropped; any control a browser would read otherwise is refused."""
+    if not isinstance(body, bytes) or len(body) > MAX_PAGE_BYTES:
+        raise PreviewPageError()
+    soup = BeautifulSoup(body, "html.parser")
+    forms = soup.find_all("form")
+    if len(forms) != 1:
+        raise PreviewPageError()
+    form = forms[0]
+    _drop_templates(form)
+    controls = ["input", "select", "textarea", "button"]
+    # A control can join the form from outside it, and a browser running
+    # scripts reads noscript content as text, not controls.
+    if (soup.find_all(controls, attrs={"form": True})
+            or any(noscript.find(controls) for noscript in form.find_all("noscript"))):
+        raise _refuse()
+    return soup, form
+
+
+def form_state(body: bytes) -> tuple[str, int]:
+    """The ``d2l_stateScopes`` and page id the page script sends with this page's form and next URL."""
+    soup, form = _document(body)
+    states = [control.get("value", "") for control in form.find_all("input", attrs={"name": "d2l_state"})]
+    if len(states) != 1 or not isinstance(states[0], str):
+        raise _refuse()
+    return _page_state(soup, states[0])
+
+
+def _successful(form: Tag, answers: Mapping[str, str]) -> list[list[str]]:
+    """The form's controls a browser posts, in document order, with each answer control's value."""
+    pairs: list[list[str]] = []
+    used: set[str] = set()
+    for control in form.find_all(["input", "select", "textarea", "button"]):
+        kind = _input_type(control) if control.name == "input" else control.name
+        name = control.get("name")
+        # Buttons, and controls that are disabled or unnamed, are never posted.
+        if (kind in _NOT_POSTED or not isinstance(name, str) or not name or control.has_attr("disabled")
+                or _in_disabled_fieldset(control)):
+            continue
+        value = control.get("value", "")
+        if kind != "hidden" and (control.find_parent(class_="d2l-quiz-question-autosave-container") is None
+                                 or kind not in {"radio", "checkbox", "text"} or control.has_attr("dirname")):
+            raise _refuse()
+        if kind in {"radio", "checkbox"}:
+            value = control.get("value", "on")
+            if answers.get(name) != value:
+                continue
+        elif kind == "text":
+            if name not in answers:
+                raise _refuse()
+            value = answers[name]
+        if not isinstance(value, str):
+            raise _refuse()
+        if kind != "hidden":
+            used.add(name)
+        pairs.append([name, value])
+    if used != set(answers):
+        raise _refuse()
+    return pairs
+
+
+def browser_form(
+    body: bytes, protection: FormProtection, *, action: tuple[str, str], tab_id: str | None,
+    answers: Mapping[str, str] | None = None, overrides: Mapping[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    """The fields a browser posts for this page's one form, in its order. Secret-bearing.
+
+    These are the form's successful controls in document order with the
+    values the page script sets in place, then the four fields it appends.
+    ``answers`` maps each answer control's name to its value (a checked
+    checkbox's to ``"1"``), and ``overrides`` sets hidden fields the page
+    script changed since the page loaded. ``tab_id`` fills the attempt page's
+    ``QuizTabId``; it is None for a form with none (the quiz summary). A page
+    the CLI cannot send as the browser would is refused before any request.
+    """
+    answers = answers or {}
+    overrides = overrides or {}
+    soup, form = _document(body)
+    pairs = _successful(form, answers)
+    index = {name: position for position, (name, _) in enumerate(pairs)}
+    hidden = dict(pairs)
+    reserved = {*_FORM_REQUIRED, *_FORM_APPENDED, "QuizTabId"}
+    if (len(index) != len(pairs) or not all(name in index for name in _FORM_REQUIRED)
+            or any(name in index for name in _FORM_APPENDED) or ("QuizTabId" in index) != (tab_id is not None)
+            or not all(name in index and name not in reserved and name not in answers for name in overrides)
+            or hidden["d2l_referrer"] != protection.csrf_token):
+        raise _refuse()
+    # An attempt page posts its form only while its fetch transport is off.
+    flags = [match[1] for script in soup.find_all("script") for match in _FETCH_FLAG.finditer(script.get_text())]
+    if tab_id is not None and (not valid_tab_id(tab_id) or flags != ["false"]):
+        raise _refuse()
+    cm0, cm1 = _control_map(hidden["d2l_controlMap"])
+    previous = {"ID": {name: item[0] for name, item in _js_order(cm0).items()},
+                "SID": {name: {sub: item[0] for sub, item in _js_order(group).items()}
+                        for name, group in _js_order(cm1).items()}}
+    scopes, page_id = _page_state(soup, hidden["d2l_state"])
+    values = {**overrides, "d2l_action": action[0], "d2l_actionparam": action[1], "d2l_controlMapPrev": _compact(previous)}
+    if tab_id is not None:
+        values["QuizTabId"] = tab_id
+    values["d2l_hitCode"] = protection.next_hit_code()
+    for name, value in values.items():
+        pairs[index[name]][1] = value
+    return [(name, value) for name, value in pairs] + [
+        ("d2l_multiedit", '{"Controls":[]}'), ("d2l_stateScopes", scopes), ("d2l_stateGroups", ""),
+        ("d2l_statePageId", str(page_id))]
 
 
 @dataclass(frozen=True)
@@ -576,8 +789,9 @@ class LearnerPage(_AttemptPage):
     """A learner's attempt page. Choice, option and blank ids are strings."""
 
     _mode: ClassVar[str] = "learner"
-    # The page's own form protection, when it embeds one.
+    # The page's own form protection, when it embeds one, and the page itself.
     _protection: FormProtection | None = field(default=None, repr=False, compare=False)
+    _body: bytes = field(default=b"", repr=False, compare=False)
 
     def intended(self, answers: Mapping[int, object]) -> dict[int, tuple[str, ...]]:
         """Every question's value once ``answers`` are applied; others keep theirs.
@@ -618,40 +832,12 @@ class LearnerPage(_AttemptPage):
             return False
         return all(questions[qid]["saved"] is True for qid in answered if any(values[qid]))
 
-    def save_fields(self, values: Mapping[int, tuple[str, ...]], protection: FormProtection) -> dict[str, str]:
-        """The "Save All Responses" form. Returned fields are secret-bearing."""
-        return self._form(values, protection, f"1,{self.page}")
-
-    def advance_fields(self, protection: FormProtection, *, allow_unanswered: bool = False) -> dict[str, str]:
-        """Forward to the next page, which a visible, enabled Next control proves exists."""
-        if not self.has_next_control:
-            raise PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)
-        if self.unanswered() and allow_unanswered is not True:
-            raise PreviewRefusedError(REFUSE_LEARNER_UNANSWERED)
-        return self._form(self.intended({}), protection, f"2,{self.page + 1},{self.page}")
-
-    def retreat_fields(self, protection: FormProtection) -> dict[str, str]:
-        """Back to the previous page, which a visible, enabled Previous control after page 1 proves exists.
-
-        Empty answers are allowed: the page can be revisited, and Next and
-        submit still check them.
-        """
-        if not self.has_previous_control or self.page <= 1:
-            raise PreviewRefusedError(REFUSE_LEARNER_FIRST_PAGE)
-        return self._form(self.intended({}), protection, f"2,{self.page - 1},{self.page}")
-
-    def finish_fields(self, protection: FormProtection) -> dict[str, str]:
-        """The save that opens the submission confirmation page."""
-        if self.has_next_control:
-            raise PreviewRefusedError(REFUSE_LEARNER_NOT_LAST_PAGE)
-        return self._form(self.intended({}), protection, f"5,{self.page}")
-
-    def _form(self, values: Mapping[int, tuple[str, ...]], protection: FormProtection, action: str) -> dict[str, str]:
+    def _answers(self, values: Mapping[int, tuple[str, ...]]) -> dict[str, str]:
+        """Each answer control's name and posted value for ``values``."""
         # Checked again, as values may come from another page object.
         self.intended({})
-        if set(values) != set(self._groups) or self._hidden_fields.get("d2l_referrer") != protection.csrf_token:
+        if set(values) != set(self._groups):
             raise PreviewPageError()
-        fields = dict(self._hidden_fields)
         answers: dict[str, str] = {}
         for q in self.questions:
             group = self._groups[q["question_id"]][0]
@@ -664,11 +850,129 @@ class LearnerPage(_AttemptPage):
                 answers.update({f"{group}_{option}": "1" for option in value})
             else:
                 answers.update({f"{group}_{b['blank_id']}": text for b, text in zip(q["blanks"], value, strict=True)})
-        if set(answers) & set(fields):
-            raise PreviewPageError()
-        fields.update(answers)
-        fields.update(d2l_action="Update", d2l_actionparam=action, d2l_hitCode=protection.next_hit_code())
-        return fields
+        return answers
+
+    def _flag_names(self) -> tuple[str, dict[int, str]]:
+        """The form names of the attempt's saved-question count and of each question's saved flag.
+
+        The page script keeps them for every question of the attempt, not
+        only this page's, and posts them with every form.
+        """
+        cm0, _ = _control_map(self._hidden_fields.get("d2l_controlMap", ""))
+        count = cm0.get("hd_savedquestions")
+        flags = {int(key[9:]): item[0] for key, item in cm0.items() if re.fullmatch(r"hdn_resp_[1-9][0-9]{0,17}", key)}
+        names = [count[0], *flags.values()] if count is not None else []
+        if (not names or not set(self._groups) <= set(flags) or len(set(names)) != len(names)
+                or not all(name in self._hidden_fields for name in names)
+                or not re.fullmatch(r"0|[1-9][0-9]{0,5}", self._hidden_fields[names[0]])
+                or any(self._hidden_fields[name] not in {"0", "1"} for name in names[1:])):
+            raise _refuse()
+        return names[0], flags
+
+    def flags(self) -> dict[str, str]:
+        """The saved-question count and saved flags as this page renders them, by form name."""
+        count, flags = self._flag_names()
+        return {name: self._hidden_fields[name] for name in [count, *flags.values()]}
+
+    def snapshot(self) -> PageSnapshot:
+        """This page as the browser holds it once loaded."""
+        return PageSnapshot(self, self.intended({}), self.flags())
+
+    def same_questions(self, other: LearnerPage) -> bool:
+        """Whether ``other`` shows the same questions, choices and blanks, in the same order."""
+        def shape(page: LearnerPage) -> object:
+            return page._groups, [(q["question_id"], q["number"], q["kind"], [c["choice_id"] for c in q["choices"]],
+                                   [b["blank_id"] for b in q["blanks"]]) for q in page.questions]
+        return shape(self) == shape(other)
+
+    def handlers(self, label: str) -> list[str]:
+        """The script of every page-level button with this label, read from the control map as data."""
+        _, form = _document(self._body)
+        cm0, cm1 = _control_map(self._hidden_fields.get("d2l_controlMap", ""))
+        entries = [*cm0.values(), *(item for group in cm1.values() for item in group.values())]
+        handlers: list[str] = []
+        for button in form.find_all("button"):
+            if (button.get_text(" ", strip=True) != label
+                    or button.find_parent(class_="d2l-quiz-question-autosave-container") is not None):
+                continue
+            found = [item for item in entries if item[0] == button.get("id")]
+            script = found[0][2] if len(found) == 1 and len(found[0]) > 2 and found[0][1] == "Button" else None
+            if not (isinstance(script, list) and len(script) == 1 and isinstance(script[0], str)):
+                raise _refuse()
+            handlers.append(script[0])
+        return handlers
+
+    def race_flag(self) -> bool:
+        """Whether ``GoNextPage`` sends a forward-only move with ``isFONav`` (a server feature flag)."""
+        soup, _ = _document(self._body)
+        found = [match[1] for script in soup.find_all("script") for match in _RACE_FLAG.finditer(script.get_text())]
+        if len(found) != 1:
+            raise _refuse()
+        return bool(found[0] == "True")
+
+
+@dataclass(frozen=True)
+class PageSnapshot:
+    """A learner page as the browser holds it: as loaded, with the answers set and the saves applied since.
+
+    The browser posts every form from its live page, so the CLI builds each
+    one from this, never from a readback. Returned fields are secret-bearing.
+    """
+
+    page: LearnerPage
+    values: dict[int, tuple[str, ...]]
+    flags: dict[str, str]
+
+    def with_value(self, question_id: int, value: tuple[str, ...]) -> PageSnapshot:
+        return replace(self, values={**self.values, question_id: value})
+
+    def update_saved(self, saved: Iterable[int], unsaved: Iterable[int]) -> PageSnapshot:
+        """What the page script's ``UpdateSaved`` does: clear the unsaved flags, then set the saved ones."""
+        count_name, names = self.page._flag_names()
+        flags = dict(self.flags)
+        count = int(flags[count_name])
+        for ids, old, new, step in ((unsaved, "1", "0", -1), (saved, "0", "1", 1)):
+            for qid in ids:
+                if qid not in names:
+                    raise PreviewPageError()
+                if flags[names[qid]] == old:
+                    flags[names[qid]] = new
+                    count += step
+        flags[count_name] = str(count)
+        return replace(self, flags=flags)
+
+    def _fields(self, protection: FormProtection, action: str, tab_id: str) -> list[tuple[str, str]]:
+        return browser_form(self.page._body, protection, action=("Update", action), tab_id=tab_id,
+                            answers=self.page._answers(self.values), overrides=self.flags)
+
+    def autosave_fields(self, question_id: int, protection: FormProtection, tab_id: str) -> list[tuple[str, str]]:
+        """The save the browser sends when this question's answer changes."""
+        _, tid, tvid, number = self.page._groups[question_id]
+        return self._fields(protection, f"3,{self.page.page},{tid},{tvid},{number}", tab_id)
+
+    def advance_fields(self, protection: FormProtection, tab_id: str, *, allow_unanswered: bool = False) -> list[tuple[str, str]]:
+        """Forward to the next page, which a visible, enabled Next control proves exists."""
+        if not self.page.has_next_control:
+            raise PreviewRefusedError(REFUSE_LEARNER_LAST_PAGE)
+        if self.page.unanswered(self.values) and allow_unanswered is not True:
+            raise PreviewRefusedError(REFUSE_LEARNER_UNANSWERED)
+        return self._fields(protection, f"2,{self.page.page + 1},{self.page.page}", tab_id)
+
+    def retreat_fields(self, protection: FormProtection, tab_id: str) -> list[tuple[str, str]]:
+        """Back to the previous page, which a visible, enabled Previous control after page 1 proves exists.
+
+        Empty answers are allowed: the page can be revisited, and Next and
+        submit still check them.
+        """
+        if not self.page.has_previous_control or self.page.page <= 1:
+            raise PreviewRefusedError(REFUSE_LEARNER_FIRST_PAGE)
+        return self._fields(protection, f"2,{self.page.page - 1},{self.page.page}", tab_id)
+
+    def finish_fields(self, protection: FormProtection, tab_id: str) -> list[tuple[str, str]]:
+        """The save that opens the submission confirmation page."""
+        if self.page.has_next_control:
+            raise PreviewRefusedError(REFUSE_LEARNER_NOT_LAST_PAGE)
+        return self._fields(protection, f"5,{self.page.page}", tab_id)
 
 
 def _learner_value(question: dict[str, Any]) -> tuple[str, ...]:
@@ -853,7 +1157,7 @@ def parse_learner_page(
         protection = None
     return LearnerPage(course_id, quiz_id, attempt_id, page, tuple(questions),
                        _button_present(form, "Next Page", visible_only=True),
-                       _button_present(form, "Previous Page", visible_only=True), hidden, groups, protection)
+                       _button_present(form, "Previous Page", visible_only=True), hidden, groups, protection, body)
 
 
 _UNANSWERED_LINK = re.compile(
