@@ -58,8 +58,8 @@ from .request_protection import FormProtection, form_protection_from_homepage
 
 
 class LearnerStartUnknownError(NetworkError):
-    """``timer`` is set when the attempt opened but its timer frame could not be read, and ``expired`` when that
-    was because the session expired."""
+    """``timer`` is set when the attempt opened but its timer frame could not be read, and ``expired`` when the
+    session expired once the attempt was named."""
 
     def __init__(self, *, attempt_id: int | None = None, page: int | None = None, timer: bool = False,
                  expired: SessionExpiredError | None = None) -> None:
@@ -437,6 +437,8 @@ def start_learner(
             return _open_attempt(client, course_id, quiz_id, attempt_id, page, tab_id, start_frame)
         except LearnerStartUnknownError:
             raise
+        except SessionExpiredError as exc:
+            raise LearnerStartUnknownError(attempt_id=attempt_id, page=page, expired=exc) from None
         except Exception:  # the attempt exists; its page is unverified
             raise LearnerStartUnknownError(attempt_id=attempt_id, page=page) from None
     except LearnerStartUnknownError:
@@ -460,8 +462,8 @@ def _open_attempt(
         header, headers = _get_page(client, timer_path(course_id, quiz_id, attempt_id), _document_headers(client, frame_path))
         timer = _timer(header, headers, sent, quiz_id=quiz_id, attempt_id=attempt_id)
         view = AttemptView(course_id, quiz_id, attempt_id, page, tab_id, show_incorrect_only(header))
-    except SessionExpiredError as exc:
-        raise LearnerStartUnknownError(attempt_id=attempt_id, page=page, timer=True, expired=exc) from None
+    except SessionExpiredError:
+        raise
     except Exception:
         raise LearnerStartUnknownError(attempt_id=attempt_id, page=page, timer=True) from None
     return LearnerStart(_read_page(client, view, reload=False), view, timer)

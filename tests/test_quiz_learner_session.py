@@ -970,13 +970,13 @@ def test_a_limit_that_cannot_be_read_leaves_the_attempt_to_continue(remote):
     assert again.call_args.kwargs["known_tab_id"] == TAB
 
 
-def test_a_session_expiry_reading_the_limit_says_so_and_keeps_the_attempt(remote):
+def test_a_session_expiry_opening_the_attempt_says_so_and_keeps_the_attempt(remote):
     workflow = LearnerWorkflow(10, 20)
     expired = SessionExpiredError("Session expired.")
 
     def limit_expired(client, *, on_identity, **kwargs):
         on_identity(30, 1, TAB)
-        raise LearnerStartUnknownError(attempt_id=30, page=1, timer=True, expired=expired)
+        raise LearnerStartUnknownError(attempt_id=30, page=1, expired=expired)
     with patch(f"{SESSION}.start_learner", side_effect=limit_expired):
         with pytest.raises(SessionExpiredError) as exc_info:
             workflow.start()

@@ -1106,13 +1106,15 @@ def test_an_attempt_frame_that_cannot_be_read_is_unknown_with_the_attempt_identi
     client._request.assert_called_once()
 
 
-def test_a_session_expiry_reading_the_timer_is_kept_with_the_attempt_identity():
+@pytest.mark.parametrize("read, reads", [("frame", 5), ("header", 6), ("readback", 7)])
+def test_a_session_expiry_opening_the_attempt_is_kept_with_the_attempt_identity(read, reads):
     expired = SessionExpiredError("Session expired.")
-    client = start_client(summary(), header=expired)
+    client = start_client(summary(), **{read: expired})
     with pytest.raises(LearnerStartUnknownError) as exc_info:
         start_learner(client, course_id=10, quiz_id=20)
-    assert (exc_info.value.attempt_id, exc_info.value.page, exc_info.value.timer) == (30, 1, True)
+    assert (exc_info.value.attempt_id, exc_info.value.page, exc_info.value.timer) == (30, 1, False)
     assert exc_info.value.expired is expired
+    assert client.get_raw.call_count == reads
     client._request.assert_called_once()
 
 
