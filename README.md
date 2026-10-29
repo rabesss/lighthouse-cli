@@ -261,7 +261,9 @@ lighthouse student attempt forget COURSE_ID QUIZ_ID --yes --json
 ```
 
 `start` also returns the quiz's name, whether it is forward-only, its
-attempt limit and its time limit in minutes (`time_limit_minutes`). Answers use the ids `page` returns: a choice id for a
+attempt limit and its time limit in minutes (`time_limit_minutes`). Before a
+quiz opens, `start` starts nothing and says when it opens (with `--json`, the
+error's `opens_at` in UTC and `seconds_until_open`). Answers use the ids `page` returns: a choice id for a
 single-choice question, a list of option ids for a multi-select one, and a
 list of texts, one per blank, for a fill-in-the-blank one; questions left out
 keep their saved answers. Equations read as LaTeX and images as

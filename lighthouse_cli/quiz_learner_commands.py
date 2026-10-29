@@ -14,6 +14,7 @@ from .display import format_user_error
 from .quiz_attempt_page import PreviewPageError, PreviewRefusedError
 from .quiz_learner_finish import LearnerNotSubmittedError, LearnerUnansweredError
 from .quiz_learner_session import UNCERTAIN, LearnerWorkflow, LearnerWorkflowError, parse_answers
+from .quiz_learner_transport import LearnerNotOpenError
 
 _ID = click.IntRange(min=1, max=10**18 - 1)
 _CONFIRMED = {"start", "answer", "next", "previous", "submit", "forget"}
@@ -80,6 +81,8 @@ def _execute(operation: str, course_id: int, quiz_id: int, json_output: bool,
         error: dict[str, Any] = {"mode": "learner", "course_id": course_id, "quiz_id": quiz_id, "error": message}
         if unanswered is not None:
             error["unanswered"] = unanswered
+        if isinstance(exc, LearnerNotOpenError):
+            error.update(exc.public_data())
         fail(message + listed, json_output, error)
 
 

@@ -45,6 +45,7 @@ from lighthouse_cli.quiz_learner_transport import (
     REFUSE_START_PROCESSING,
     REFUSE_START_UNAVAILABLE,
     LearnerAdvanceUnknownError,
+    LearnerNotOpenError,
     LearnerSaveUnknownError,
     LearnerStart,
     LearnerStartUnknownError,
@@ -213,15 +214,16 @@ def test_unlimited_attempts_read_as_none():
         "name": None, "forward_only": False, "attempts_allowed": None, "time_limit_minutes": None}
 
 
-def test_a_refused_start_keeps_the_previous_cursor(remote):
+@pytest.mark.parametrize("refusal", [PreviewRefusedError(REFUSE_START_UNAVAILABLE), LearnerNotOpenError(1_800_000_000, None)])
+def test_a_refused_start_keeps_the_previous_cursor(remote, refusal):
     workflow = LearnerWorkflow(10, 20)
-    with patch(f"{SESSION}.start_learner", side_effect=PreviewRefusedError(REFUSE_START_UNAVAILABLE)):
+    with patch(f"{SESSION}.start_learner", side_effect=refusal):
         with pytest.raises(PreviewRefusedError):
             workflow.start()
     assert workflow.status()["status"] == "absent"
     start(workflow, open_page(2), resumed=True)
     with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
-            patch(f"{SESSION}.start_learner", side_effect=PreviewRefusedError(REFUSE_START_UNAVAILABLE)):
+            patch(f"{SESSION}.start_learner", side_effect=refusal):
         with pytest.raises(PreviewRefusedError):
             workflow.start()
     assert workflow.status() == {**ACTIVE, "page": 2}
@@ -1279,3 +1281,14 @@ def test_cli_errors_are_fixed_or_sanitized():
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"mode": "learner", "course_id": 10, "quiz_id": 20,
                                          "error": str(LearnerUnansweredError(unanswered)), "unanswered": unanswered}
+
+
+def test_a_start_before_the_quiz_opens_reports_when_it_opens():
+    refusal = LearnerNotOpenError(1_800_000_000, 1_800_000_000 - 9)
+    with patch("lighthouse_cli.quiz_learner_commands.LearnerWorkflow") as workflow:
+        workflow.return_value.start.side_effect = refusal
+        assert "(in 9 seconds). Nothing was started." in invoke("start", "10", "20", "--yes").stderr
+        result = invoke("start", "10", "20", "--yes", "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"mode": "learner", "course_id": 10, "quiz_id": 20, "error": str(refusal),
+                                         "opens_at": "2027-01-15T08:00:00Z", "seconds_until_open": 9}

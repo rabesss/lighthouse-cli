@@ -180,9 +180,11 @@ def submit_learner(
         confirmation, unanswered = _confirmation(client, protection, view, finish)
         if unanswered and not allow_unanswered:
             raise LearnerUnansweredError(unanswered)
-        # isRldbUse is the browser's Boolean() of a non-empty string.
+        # isRldbUse is the browser's Boolean() of a non-empty string. The
+        # attempt frame sends the call, its window's first request.
+        frame = FormProtection(protection.csrf_token, protection.hit_code_seed)
         body = rpc_body(view.quiz_id, view.attempt_id, rldb=bool(confirmation.get("HDN_isRldbUse", "")),
-                        token=protection.csrf_token, hit_code=protection.next_hit_code())
+                        token=protection.csrf_token, hit_code=frame.next_hit_code())
         rpc = attempt_frame_path(view.course_id, view.quiz_id, view.attempt_id, view.frame_page, rpc=True)
         response = client._request("POST", client.canonical_url(rpc), stream=True, data=body,
                                    headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": client.base_url,

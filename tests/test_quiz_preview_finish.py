@@ -44,6 +44,9 @@ def test_submit_is_preview_only_and_verifies_independent_receipt():
         '{"param1":"20","param2":"30","param3":true,"param4":true,"param5":true,"param6":false,"param7":""}'
     )
     assert client._request.call_count == 2  # one preparatory save, one final RPC
+    # Each window's first hit code: the page's save, then the attempt frame's call.
+    save = {key: value for key, (_, value) in client._request.call_args_list[0].kwargs["files"]}
+    assert save["d2l_hitCode"][-1] == rpc_call.kwargs["data"]["d2l_hitcode"][-1] == "2"
     prep.close.assert_called_once()
     rpc.close.assert_called_once()
 

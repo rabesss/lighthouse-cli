@@ -64,6 +64,11 @@ def test_declarative_form_bootstrap_is_parsed_without_executing_code():
     assert len({protection.next_hit_code() for _ in range(100)}) == 100
 
 
+def test_a_page_s_first_hit_code_is_its_second_as_page_init_spent_one():
+    protection = form_protection_from_homepage(xsrf_init(1234567890))
+    assert [protection.next_hit_code()[-1] for _ in range(11)] == list("23456789012")
+
+
 @pytest.mark.parametrize("seed", [1234567890, -1234567890, 0, 2**53 - 1, -(2**53) + 1])
 def test_hit_codes_start_with_the_seed_as_written(seed):
     # Some accounts get a negative seed; the browser's hit code then starts
