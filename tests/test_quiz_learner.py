@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import replace
 from datetime import datetime
 from email.utils import formatdate
@@ -1191,6 +1192,7 @@ def test_a_summary_just_read_is_not_requested_again():
     (summary(extra='<input type="hidden" name="d2l_stateScopes" value="">'), {}, REFUSE_LEARNER_FORM),
     # The open time is told only for a start the countdown holds back.
     (summary(**NOT_OPEN), {"continue_only": True}, REFUSE_NOTHING_IN_PROGRESS),
+    (summary(**IN_PROGRESS, **NOT_OPEN), {}, REFUSE_START_UNAVAILABLE),
     (summary(**NOT_OPEN, can_take="false"), {}, REFUSE_START_UNAVAILABLE),
     (summary(**NOT_OPEN, password="true"), {}, REFUSE_START_PASSWORD),  # pragma: allowlist secret
 ])
@@ -1219,11 +1221,25 @@ def test_a_summary_before_the_quiz_opens_names_the_open_time(calls):
 @pytest.mark.parametrize("calls", [
     countdown(OPENS_AT) + "\n" + countdown(OPENS_AT + 60),  # two open times
     countdown(946_684_799),  # before 2000
-    "StartCountdown(9999999999999999999);",  # after 9999
+    countdown(32_503_680_000),  # 3000 or later
+    "StartCountdown(9999999999999999999);",
 ])
 def test_an_implausible_countdown_is_rejected(calls):
     with pytest.raises(PreviewPageError):
         parse_learner_summary(summary(disabled=True, countdown=calls), course_id=10, quiz_id=20)
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Kolkata", "Pacific/Kiritimati", "America/Los_Angeles"])
+def test_the_latest_open_time_shows_in_every_zone(monkeypatch, zone):
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        page = parse_learner_summary(summary(disabled=True, countdown=countdown(32_503_679_999)), course_id=10,
+                                     quiz_id=20)
+        assert str(LearnerNotOpenError(page.opens_at, None)).startswith("This quiz opens at ")
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 @pytest.mark.parametrize("read_at, seconds, relative", [
@@ -1643,7 +1659,8 @@ RECEIPT_PATH = ("/d2l/lms/quizzing/user/quiz_submissions_attempt.d2l?qi=20&ai=30
 
 def test_submit_saves_confirms_and_verifies_the_receipt_and_list_row():
     client, prep, rpc = submit_client()
-    result = submit_learner(client, VIEW, current=LAST)
+    # A page of its own: the shared one's hit codes are spent by other tests.
+    result = submit_learner(client, VIEW, current=parse(body(ANSWERED)))
     assert result == {"mode": "learner", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "submitted": True,
                       "attempt_number": 1, "score": 6.0, "out_of": 25.0, "percent": 24.0}
     save, final = client._request.call_args_list

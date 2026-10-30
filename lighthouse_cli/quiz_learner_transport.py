@@ -133,10 +133,11 @@ _TIMER_VARS = {
 _UNIX_EPOCH_TICKS = 621_355_968_000_000_000
 # How far ahead of the server's clock an attempt's start may be, and the
 # earliest it may be (2000-01-01): an older one is no real start. A quiz's
-# open time lies between that and the last second of 9999.
+# open time lies between that and the end of 2999, a time every zone's local
+# clock can still show.
 _START_SKEW_SECONDS = 300
 _EARLIEST_START = 946_684_800
-_LATEST_OPEN = 253_402_300_799
+_LATEST_OPEN = 32_503_679_999
 # Before a quiz opens its summary calls the countdown that enables Start,
 # with the open time in .NET ticks, on its own line.
 _COUNTDOWN = re.compile(r"^[ \t]*StartCountdown\(\s*([0-9]{1,19})\s*\)\s*;[ \t\r]*$", re.MULTILINE)
