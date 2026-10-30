@@ -216,7 +216,7 @@ class LearnerSummary:
     def public_data(self) -> dict[str, Any]:
         return {"course_id": self.course_id, "quiz_id": self.quiz_id, "can_start": self.can_start,
                 "can_continue": self.can_continue, "attempt_in_progress": self.attempt_in_progress,
-                "attempt_processing": self.attempt_processing, "opens_at": self.opens_at}
+                "attempt_processing": self.attempt_processing}
 
 
 def _opens_at(scripts: str) -> float | None:

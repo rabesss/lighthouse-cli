@@ -900,7 +900,7 @@ PROCESSING = {"start": "false", "resume": "true", "disabled": True,
 def test_summary_reports_start_and_continue_state():
     fresh = parse_learner_summary(summary(), course_id=10, quiz_id=20)
     assert fresh.public_data() == {"course_id": 10, "quiz_id": 20, "can_start": True, "can_continue": False,
-                                   "attempt_in_progress": None, "attempt_processing": None, "opens_at": None}
+                                   "attempt_in_progress": None, "attempt_processing": None}
     assert "SESSION_SENTINEL" not in repr(fresh)
     resumed = parse_learner_summary(summary(**IN_PROGRESS), course_id=10, quiz_id=20)
     assert (resumed.can_start, resumed.can_continue, resumed.attempt_in_progress) == (False, True, 2)
@@ -913,7 +913,7 @@ def test_summary_reports_start_and_continue_state():
 def test_an_attempt_brightspace_is_still_submitting_can_be_neither_continued_nor_started(page):
     processing = parse_learner_summary(page, course_id=10, quiz_id=20)
     assert processing.public_data() == {"course_id": 10, "quiz_id": 20, "can_start": False, "can_continue": False,
-                                        "attempt_in_progress": None, "attempt_processing": 10, "opens_at": None}
+                                        "attempt_in_progress": None, "attempt_processing": 10}
 
 
 @pytest.mark.parametrize("page", [
@@ -1215,7 +1215,6 @@ def test_a_summary_without_its_own_countdown_call_has_no_open_time(calls):
 def test_a_summary_before_the_quiz_opens_names_the_open_time(calls):
     page = parse_learner_summary(summary(disabled=True, countdown=calls), course_id=10, quiz_id=20)
     assert (page.can_start, page.opens_at) == (True, OPENS_AT)
-    assert page.public_data()["opens_at"] == OPENS_AT
 
 
 @pytest.mark.parametrize("calls", [
