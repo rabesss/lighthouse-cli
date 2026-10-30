@@ -249,6 +249,14 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
   keeps it in the cursor. Whether a continued attempt's process page sets a
   new one was not recorded, so the CLI takes a new one if set and otherwise
   keeps the kept attempt's.
+- Scheduled open: a summary read before the quiz opens still flags
+  `canTakeQuiz` and `startQuiz`, but renders `Start Quiz!` disabled and
+  calls `StartCountdown(<.NET ticks, UTC>);` on a line of its own (every
+  summary defines that function; only this one calls it). The script asks
+  the RPC `GetTimeUntilGivenDate` for the time left, counts down and then
+  enables the button, without reloading the page. The CLI reads the ticks
+  as data and, while Start is disabled, refuses with the open time and,
+  from the summary's `Date`, how long until then.
 - Attempt frame: the process page opens
   `attempt/quiz_attempt_iframe_auto.d2l?qi&ai&isprv=&dnb=0&drc=&pg=1&cfql=0&rldbsv=1&fromQB=0&cft=&d2l_body_type=1&ou`
   (Referer the start's second frame). Its frames load with the frame URL as
@@ -337,6 +345,13 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
   (`%7B%22param1%22%3A%222002%22,%22param2%22%3A%223003%22,...%7D`), while
   `{ } " : [ ]` are percent-encoded. A form library's default encoding
   writes `%2C`, so the CLI encodes these values itself.
+- Hit codes: `d2l_hitCode` (`d2l_hitcode` in the RPC) is the session's
+  seed, the time in milliseconds modulo 10^8 and a counter modulo 10 kept
+  per window. Each page's `UI.Init` spends one as it loads, so a window's
+  first request ends in 2: the summary's start POST (3 after a countdown,
+  whose RPC spent 2), a page's first save, and the submit RPC, which the
+  attempt frame sends from its own window however many the page has spent.
+  The CLI counts the same way.
 - Reloads: the CLI also reads pages a browser does not request again (the
   summary, each command's first read of the cursor's page, a readback after
   a save, `verify`'s reads). It sends those as a reload does, with

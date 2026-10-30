@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import replace
+from datetime import datetime
 from email.utils import formatdate
 from html import escape
 from unittest.mock import Mock, patch
@@ -81,6 +83,7 @@ from lighthouse_cli.quiz_learner_transport import (
     REFUSE_START_ROLE,
     REFUSE_START_UNAVAILABLE,
     LearnerAdvanceUnknownError,
+    LearnerNotOpenError,
     LearnerSaveUnknownError,
     LearnerStartUnknownError,
     LearnerTimer,
@@ -859,12 +862,15 @@ def test_other_rpc_replies_are_rejected(chunks):
 
 def summary(*, impersonating: str = "false", can_take: str = "true", start: str = "true", resume: str = "false",
             password: str = "false", button: str | None = "Start Quiz!", disabled: bool = False, progress: str = "",
-            fields: dict[str, str] | None = None, protected: bool = True, extra: str = "") -> bytes:
+            fields: dict[str, str] | None = None, protected: bool = True, extra: str = "",
+            countdown: str = "") -> bytes:
     hidden = {"d2l_action": "", "d2l_actionparam": "", "d2l_hitCode": "", "d2l_rf": "", "d2l_controlMapPrev": "",
               "hps": "", "drc": "0", "LockDownBrowserUrl": "0", "LockDownBrowserLaunchTimeout": "0",
               "d2l_controlMap": "[{},{}]", "d2l_state": '[{"1":["pagenum"]},[]]', "d2l_referrer": "SESSION_SENTINEL",
               **(fields or {})}
-    script = (f"<script>var isImpersonatingRole = {impersonating};\nvar canTakeQuiz = {can_take};\n"
+    # Every summary defines the countdown; one before its quiz opens calls it.
+    script = ("<script>function StartCountdown(startDateTicks) {\n\tUI.GetControl('BTN_action');\n}</script>"
+              f"<script>{countdown}\n\tvar isImpersonatingRole = {impersonating};\nvar canTakeQuiz = {can_take};\n"
               f"var startQuiz = {start};\nvar continueQuiz = {resume};\nvar hasPass = {password};</script>"
               '<script>D2L.Serialization.JsonDeserializerMin.Deserialize(["abababababababababababababababab",77,1,[]])</script>')
     # The start button is rendered outside the form.
@@ -875,6 +881,16 @@ def summary(*, impersonating: str = "false", can_take: str = "true", start: str 
 
 
 IN_PROGRESS = {"start": "false", "resume": "true", "button": "Continue Quiz...", "progress": "Completed - 0 (Attempt 2 in progress)"}
+# Before a quiz opens (observed on Lighthouse): Start is flagged but rendered
+# disabled, and the summary counts down to the open time in .NET ticks.
+OPENS_AT = 1_800_000_000
+
+
+def countdown(opens_at: float) -> str:
+    return f"\tStartCountdown({621_355_968_000_000_000 + int(opens_at * 10**7)});"
+
+
+NOT_OPEN = {"disabled": True, "countdown": countdown(OPENS_AT)}
 # While Brightspace submits an attempt whose time ran out (observed in a
 # disposable Brightspace sandbox): Continue is flagged, Start Quiz! is disabled.
 PROCESSING = {"start": "false", "resume": "true", "disabled": True,
@@ -1038,6 +1054,8 @@ def test_start_posts_the_summary_form_once_and_opens_the_attempt_as_the_browser_
     client._request.assert_called_once()
     call = client._request.call_args
     assert call.args == ("POST", BASE + "/d2l/lms/quizzing/user/quiz_summary.d2l?qi=20&ou=10&cfql=0&inProgress=false")
+    # The summary's own load spent its first hit code.
+    assert {key: value for key, (_, value) in call.kwargs["files"]}["d2l_hitCode"].endswith("2")
     assert call.kwargs["headers"] == {**FORM_HEADERS, "Referer": BASE + summary_path(10, 20)}
     assert sent(call) == [
         ("d2l_action", "Custom"), ("d2l_actionparam", "1"), ("d2l_hitCode", "HIT"), ("d2l_rf", ""),
@@ -1172,12 +1190,92 @@ def test_a_summary_just_read_is_not_requested_again():
     (summary(**PROCESSING, password="true"), {}, REFUSE_START_PROCESSING.format(10)),  # pragma: allowlist secret
     (summary(fields={"d2l_controlMap": "[{},{},{}]"}), {}, REFUSE_LEARNER_FORM),
     (summary(extra='<input type="hidden" name="d2l_stateScopes" value="">'), {}, REFUSE_LEARNER_FORM),
+    # The open time is told only for a start the countdown holds back.
+    (summary(**NOT_OPEN), {"continue_only": True}, REFUSE_NOTHING_IN_PROGRESS),
+    (summary(**IN_PROGRESS, **NOT_OPEN), {}, REFUSE_START_UNAVAILABLE),
+    (summary(**NOT_OPEN, can_take="false"), {}, REFUSE_START_UNAVAILABLE),
+    (summary(**NOT_OPEN, password="true"), {}, REFUSE_START_PASSWORD),  # pragma: allowlist secret
 ])
 def test_start_refusals_send_nothing(page, kwargs, message):
     client = write_client(page)
-    with pytest.raises(PreviewRefusedError, match=re.escape(message)):
+    with pytest.raises(PreviewRefusedError, match=re.escape(message)) as exc_info:
         start_learner(client, course_id=10, quiz_id=20, **kwargs)
+    assert not isinstance(exc_info.value, LearnerNotOpenError)
     client._request.assert_not_called()
+
+
+@pytest.mark.parametrize("calls", ["", "function StartCountdown(startDateTicks) {}",
+                                   "window.StartCountdown(639355968000000000);", "StartCountdown(1, 2);",
+                                   "var x = StartCountdown(639355968000000000);"])
+def test_a_summary_without_its_own_countdown_call_has_no_open_time(calls):
+    assert parse_learner_summary(summary(countdown=calls), course_id=10, quiz_id=20).opens_at is None
+
+
+@pytest.mark.parametrize("calls", [countdown(OPENS_AT), countdown(OPENS_AT) + "\n" + countdown(OPENS_AT)])
+def test_a_summary_before_the_quiz_opens_names_the_open_time(calls):
+    page = parse_learner_summary(summary(disabled=True, countdown=calls), course_id=10, quiz_id=20)
+    assert (page.can_start, page.opens_at) == (True, OPENS_AT)
+
+
+@pytest.mark.parametrize("calls", [
+    countdown(OPENS_AT) + "\n" + countdown(OPENS_AT + 60),  # two open times
+    countdown(946_684_799),  # before 2000
+    countdown(32_503_680_000),  # 3000 or later
+    "StartCountdown(9999999999999999999);",
+])
+def test_an_implausible_countdown_is_rejected(calls):
+    with pytest.raises(PreviewPageError):
+        parse_learner_summary(summary(disabled=True, countdown=calls), course_id=10, quiz_id=20)
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Kolkata", "Pacific/Kiritimati", "America/Los_Angeles"])
+def test_the_latest_open_time_shows_in_every_zone(monkeypatch, zone):
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        page = parse_learner_summary(summary(disabled=True, countdown=countdown(32_503_679_999)), course_id=10,
+                                     quiz_id=20)
+        assert str(LearnerNotOpenError(page.opens_at, None)).startswith("This quiz opens at ")
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+@pytest.mark.parametrize("read_at, seconds, relative", [
+    (OPENS_AT - 9, 9, " (in 9 seconds)"),
+    (OPENS_AT - 0.5, 1, " (in 1 second)"),
+    (OPENS_AT - 60, 60, " (in 1 minute)"),
+    (OPENS_AT - 61, 61, " (in 2 minutes)"),
+    (OPENS_AT - 3600, 3600, ""),
+    (OPENS_AT + 5, 0, ""),
+    (None, None, ""),
+])
+def test_a_start_before_the_quiz_opens_says_when_and_sends_nothing(read_at, seconds, relative):
+    client = write_client()
+    page = parse_learner_summary(summary(**NOT_OPEN), course_id=10, quiz_id=20, read_at=read_at)
+    with pytest.raises(LearnerNotOpenError) as exc_info:
+        start_learner(client, course_id=10, quiz_id=20, summary=page)
+    local = datetime.fromtimestamp(OPENS_AT).astimezone()
+    assert str(exc_info.value) == (f"This quiz opens at {local:%H:%M} {local:%Z} on {local.day} {local:%B %Y}"
+                                   f"{relative}. Nothing was started.")
+    assert (exc_info.value.opens_at, exc_info.value.seconds_until_open) == (OPENS_AT, seconds)
+    assert exc_info.value.public_data() == {"opens_at": "2027-01-15T08:00:00Z", "seconds_until_open": seconds}
+    client._request.assert_not_called()
+
+
+def test_the_summary_s_server_time_counts_down_to_the_open_time():
+    client = write_client()
+    client.get_raw = Mock(return_value=(summary(**NOT_OPEN), {"Date": formatdate(OPENS_AT - 9, usegmt=True)}))
+    with pytest.raises(LearnerNotOpenError) as exc_info:
+        start_learner(client, course_id=10, quiz_id=20)
+    assert exc_info.value.seconds_until_open == 9
+    client._request.assert_not_called()
+
+
+def test_an_enabled_start_is_posted_even_with_a_countdown():
+    client = start_client(summary(countdown=countdown(OPENS_AT)))
+    assert start_learner(client, course_id=10, quiz_id=20).page.attempt_id == 30
+    client._request.assert_called_once()
 
 
 @pytest.mark.parametrize("change", [
@@ -1560,7 +1658,8 @@ RECEIPT_PATH = ("/d2l/lms/quizzing/user/quiz_submissions_attempt.d2l?qi=20&ai=30
 
 def test_submit_saves_confirms_and_verifies_the_receipt_and_list_row():
     client, prep, rpc = submit_client()
-    result = submit_learner(client, VIEW, current=LAST)
+    # A page of its own: the shared one's hit codes are spent by other tests.
+    result = submit_learner(client, VIEW, current=parse(body(ANSWERED)))
     assert result == {"mode": "learner", "course_id": 10, "quiz_id": 20, "attempt_id": 30, "submitted": True,
                       "attempt_number": 1, "score": 6.0, "out_of": 25.0, "percent": 24.0}
     save, final = client._request.call_args_list
@@ -1568,6 +1667,9 @@ def test_submit_saves_confirms_and_verifies_the_receipt_and_list_row():
     assert save.kwargs["headers"] == {**FORM_HEADERS, "Referer": BASE + PAGE1}
     fields = dict(sent(save))
     assert (fields["d2l_actionparam"], fields["QuizTabId"]) == ("5,1", TAB)
+    # The page spends its first hit code on this save, and the attempt
+    # frame its own first on the call below.
+    assert {key: value for key, (_, value) in save.kwargs["files"]}["d2l_hitCode"].endswith("2")
     confirm, submissions, receipt = client.get_raw.call_args_list
     assert confirm.args[0] == (ATTEMPT_ROUTE + "quiz_confirm_submit_auto.d2l?qi=20&ai=30&isprv=&drc=&impcf=&dnb=0&cfql=0"
                                "&btlp=1&fromQB=0&cft=&d2l_body_type=3&ou=10")
@@ -1579,7 +1681,7 @@ def test_submit_saves_confirms_and_verifies_the_receipt_and_list_row():
         re.escape("d2l_rf=ProcessQuizSubmission&params=%7B%22param1%22%3A%2220%22,%22param2%22%3A%2230%22,"
                   "%22param3%22%3Afalse,%22param4%22%3Atrue,%22param5%22%3Atrue,%22param6%22%3Afalse,"
                   "%22param7%22%3A%22%22%7D&d2l_referrer=SESSION_SENTINEL&d2l_hitcode=")
-        + "1234567890[0-9]+&d2l_action=rpc", final.kwargs["data"])
+        + "1234567890[0-9]+2&d2l_action=rpc", final.kwargs["data"])
     assert final.kwargs["headers"] == {"Content-Type": "application/x-www-form-urlencoded", "Origin": BASE,
                                        "Referer": BASE + FRAME1}
     assert (submissions.args[0], submissions.kwargs["headers"]) == (

@@ -49,7 +49,9 @@ class FormProtection:
     csrf_token: str = field(repr=False)
     hit_code_seed: str = field(repr=False)
     _last_tick: int = field(default=-1, repr=False)
-    _counter: int = field(default=0, repr=False)
+    # Each instance is one page's: its UI.Init spends the first hit code as it
+    # loads, so the page's first request sends the second, as the browser does.
+    _counter: int = field(default=1, repr=False)
     _lock: Lock = field(default_factory=Lock, repr=False)
 
     def next_hit_code(self) -> str:

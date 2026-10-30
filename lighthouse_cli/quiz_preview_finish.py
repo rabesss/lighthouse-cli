@@ -23,7 +23,7 @@ from .quiz_attempt_page import (
     rpc_script,
 )
 from .quiz_preview_transport import page_path, read_current_preview
-from .request_protection import form_protection_from_homepage
+from .request_protection import FormProtection, form_protection_from_homepage
 
 
 class PreviewSubmitUnknownError(NetworkError):
@@ -120,12 +120,14 @@ def submit_preview(
         rpc_url = client.canonical_url(parent_path + "file?" + urlencode({**context, "d2l_rh": "rpc", "d2l_rt": "call"}))
         params = {"param1": str(quiz_id), "param2": str(attempt_id), "param3": True,
                   "param4": retain, "param5": integration_flag, "param6": False, "param7": ""}
+        # The attempt frame sends the call, its window's first request.
+        frame = FormProtection(protection.csrf_token, protection.hit_code_seed)
         response = client._request("POST", rpc_url, stream=True,
                                    data={"d2l_rf": "ProcessQuizSubmission",
                                          # Brightspace rejects this RPC (error redirect) unless the
                                          # params JSON is compact, as the browser sends it.
                                          "params": json.dumps(params, separators=(",", ":")),
-                                         "d2l_referrer": protection.csrf_token, "d2l_hitcode": protection.next_hit_code(),
+                                         "d2l_referrer": protection.csrf_token, "d2l_hitcode": frame.next_hit_code(),
                                          "d2l_action": "rpc"},
                                    headers={"Referer": client.canonical_url(parent_path + "?" + urlencode(context))})
         expected = f"parent.QuizDone({quiz_id},{attempt_id},'1','0','0','gotoSv','')"

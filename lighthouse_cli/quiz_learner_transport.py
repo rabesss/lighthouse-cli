@@ -9,11 +9,13 @@ reported as unknown and never retried here: the caller re-reads the server.
 from __future__ import annotations
 
 import dataclasses
+import math
 import posixpath
 import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qs, unquote, urldefrag, urlparse
@@ -80,6 +82,28 @@ class LearnerAdvanceUnknownError(NetworkError):
         super().__init__("Page change could not be verified. Run attempt start to reopen the attempt where Brightspace has it.")
 
 
+class LearnerNotOpenError(PreviewRefusedError):
+    """A start before the quiz opens. ``opens_at`` is a Unix time; ``seconds_until_open`` is counted on the
+    server's clock, or ``None`` without its time. The message holds only these numbers."""
+
+    def __init__(self, opens_at: float, read_at: float | None) -> None:
+        self.opens_at = opens_at
+        self.seconds_until_open = None if read_at is None else max(0, math.ceil(opens_at - read_at))
+        local = datetime.fromtimestamp(opens_at).astimezone()
+        relative = ""
+        if self.seconds_until_open is not None and 0 < self.seconds_until_open < 3600:
+            seconds = self.seconds_until_open
+            count, unit = (seconds, "second") if seconds < 60 else (math.ceil(seconds / 60), "minute")
+            relative = f" (in {count} {unit}{'' if count == 1 else 's'})"
+        super().__init__(f"This quiz opens at {local:%H:%M} {local:%Z} on {local.day} {local:%B %Y}{relative}. "
+                         "Nothing was started.")
+
+    def public_data(self) -> dict[str, Any]:
+        opens_at = datetime.fromtimestamp(self.opens_at, timezone.utc)
+        return {"opens_at": opens_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "seconds_until_open": self.seconds_until_open}
+
+
 REFUSE_START_UNAVAILABLE = "This quiz cannot be started or continued now (closed, not yet open or out of attempts)."
 REFUSE_NOTHING_IN_PROGRESS = "No attempt of this quiz is in progress."
 REFUSE_START_PASSWORD = "This quiz needs a password, which the CLI does not support."  # pragma: allowlist secret
@@ -108,9 +132,15 @@ _TIMER_VARS = {
 # .NET ticks (100 ns since 0001-01-01 UTC) at the Unix epoch.
 _UNIX_EPOCH_TICKS = 621_355_968_000_000_000
 # How far ahead of the server's clock an attempt's start may be, and the
-# earliest it may be (2000-01-01): an older one is no real start.
+# earliest it may be (2000-01-01): an older one is no real start. A quiz's
+# open time lies between that and the end of 2999, a time every zone's local
+# clock can still show.
 _START_SKEW_SECONDS = 300
 _EARLIEST_START = 946_684_800
+_LATEST_OPEN = 32_503_679_999
+# Before a quiz opens its summary calls the countdown that enables Start,
+# with the open time in .NET ticks, on its own line.
+_COUNTDOWN = re.compile(r"^[ \t]*StartCountdown\(\s*([0-9]{1,19})\s*\)\s*;[ \t\r]*$", re.MULTILINE)
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 # Raster formats an agent can view, by their leading bytes.
 _IMAGE_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
@@ -164,6 +194,8 @@ class LearnerSummary:
     ``attempt_processing`` is the number of an attempt Brightspace is still
     submitting after its time ran out. Until it has, the summary flags
     Continue, yet that attempt cannot be continued and no new one started.
+    ``opens_at`` is the Unix time a quiz not yet open opens, and ``_read_at``
+    the server's time when the page was read.
     """
 
     course_id: int
@@ -172,12 +204,14 @@ class LearnerSummary:
     can_continue: bool
     attempt_in_progress: int | None
     attempt_processing: int | None
+    opens_at: float | None
     _flags: dict[str, bool] = field(repr=False, compare=False)
     _hidden_fields: dict[str, str] = field(repr=False, compare=False)
     _password_input: bool = field(repr=False, compare=False)
     _button: str | None = field(repr=False, compare=False)
     _protection: FormProtection | None = field(repr=False, compare=False)
     _body: bytes = field(default=b"", repr=False, compare=False)
+    _read_at: float | None = field(default=None, repr=False, compare=False)
 
     def public_data(self) -> dict[str, Any]:
         return {"course_id": self.course_id, "quiz_id": self.quiz_id, "can_start": self.can_start,
@@ -185,7 +219,18 @@ class LearnerSummary:
                 "attempt_processing": self.attempt_processing}
 
 
-def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int) -> LearnerSummary:
+def _opens_at(scripts: str) -> float | None:
+    """The open time the summary counts down to, or ``None`` when it counts down to none."""
+    found = {int(ticks) for ticks in _COUNTDOWN.findall(scripts)}
+    if not found:
+        return None
+    opens_at = (found.pop() - _UNIX_EPOCH_TICKS) / 10**7
+    if found or not _EARLIEST_START <= opens_at <= _LATEST_OPEN:
+        raise PreviewPageError()
+    return opens_at
+
+
+def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int, read_at: float | None = None) -> LearnerSummary:
     """Read the summary page's start state as data; its scripts never run."""
     identity(course_id, quiz_id)
     form, hidden = hidden_form(body)
@@ -219,16 +264,16 @@ def parse_learner_summary(body: bytes, *, course_id: int, quiz_id: int) -> Learn
         can_start=takeable and flags["startQuiz"] and not flags["continueQuiz"],
         can_continue=takeable and flags["continueQuiz"] and not flags["startQuiz"] and not processing,
         attempt_in_progress=int(progress[0]) if progress else None,
-        attempt_processing=int(processing[0]) if processing else None,
+        attempt_processing=int(processing[0]) if processing else None, opens_at=_opens_at(scripts),
         _flags=flags, _hidden_fields=hidden,
         _password_input=bool(form.select('input[type="password"]') or soup.select('input[name="password"]')),
-        _button=labels[0] if labels else None, _protection=protection, _body=body,
+        _button=labels[0] if labels else None, _protection=protection, _body=body, _read_at=read_at,
     )
 
 
 def read_learner_summary(client: LighthouseClient, *, course_id: int, quiz_id: int) -> LearnerSummary:
-    body, _ = _get_page(client, summary_path(course_id, quiz_id), _document_headers(client, reload=True))
-    return parse_learner_summary(body, course_id=course_id, quiz_id=quiz_id)
+    body, headers = _get_page(client, summary_path(course_id, quiz_id), _document_headers(client, reload=True))
+    return parse_learner_summary(body, course_id=course_id, quiz_id=quiz_id, read_at=_server_time(headers))
 
 
 @dataclass(frozen=True)
@@ -333,6 +378,9 @@ def _start_fields(summary: LearnerSummary, *, continue_only: bool) -> tuple[list
     if continue_only and not resume:
         raise PreviewRefusedError(REFUSE_NOTHING_IN_PROGRESS)
     if summary._button != ("Continue Quiz..." if resume else "Start Quiz!"):
+        # Start stays disabled until the quiz opens.
+        if not resume and summary._button is None and summary.opens_at is not None:
+            raise LearnerNotOpenError(summary.opens_at, summary._read_at)
         raise PreviewRefusedError(REFUSE_START_UNAVAILABLE)
     fields = summary._hidden_fields
     if fields.get("hps") or fields.get("LockDownBrowserUrl", "0") != "0":
