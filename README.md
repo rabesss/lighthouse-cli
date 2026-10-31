@@ -241,6 +241,9 @@ lighthouse instructor preview reconcile COURSE_ID QUIZ_ID --confirm-no-remote-at
 **Learner quiz attempts** (`student attempt`) take your own graded attempt
 of a quiz, timed or not, a page at a time:
 
+For an agent's discovery, opening-time, answer and recovery loop, see
+[Taking a teacher's quiz with an agent](docs/agent-quizzes.md).
+
 ```bash
 # Continue the attempt in progress, or start a new one (uses one of your attempts):
 lighthouse student attempt start COURSE_ID QUIZ_ID --yes --json
@@ -277,7 +280,10 @@ reported. If one cannot be verified, `page` settles an answer save, and
 `start` continues the attempt on the page Brightspace has. Once `start` has
 opened an attempt, until it is submitted `start` continues only that attempt
 and never begins a new one: if it ended elsewhere, `verify` checks whether it was submitted, and
-`forget` drops the CLI's record of it. `submit` is refused
+`forget` drops the CLI's record of it. An unverified start also only continues:
+if its attempt ID was never received and Brightspace offers no Continue,
+inspect Brightspace before deliberately using `forget` to allow a fresh attempt.
+`verify` cannot check a receipt without that ID. `submit` is refused
 before anything is saved unless the cursor is on the last page; unless
 `--allow-unanswered`, it then stops while any question of the quiz is
 unanswered, listing them under `unanswered` (only the page's own answers were

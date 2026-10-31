@@ -262,18 +262,67 @@ def test_an_unknown_start_submitted_elsewhere_is_closed_by_verify(remote):
     assert workflow.status() == {**ACTIVE, "status": "submitted"}
 
 
-def test_an_unknown_start_without_an_identity_is_kept(remote):
+def test_an_unknown_start_without_an_identity_never_starts_another_attempt(remote):
     workflow = LearnerWorkflow(10, 20)
     with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
         with pytest.raises(LearnerStartUnknownError):
             workflow.start()
     status = workflow.status()
     assert (status["status"], status["attempt_id"], status["page"]) == ("uncertain", None, None)
-    # No attempt is known to exist, so starting again may start one.
-    with patch(f"{SESSION}.start_learner", return_value=opened()) as started:
-        workflow.start()
-    assert started.call_args.kwargs["continue_only"] is False
+    # The start may have reached Brightspace and even ended before recovery.
+    # No Continue is not evidence that no graded attempt was created.
+    before = workflow.path.read_bytes()
+    with patch(f"{SESSION}.start_learner") as started:
+        for _ in range(2):
+            with pytest.raises(LearnerWorkflowError, match="attempt ID is unknown"):
+                workflow.start()
+    started.assert_not_called()
+    assert workflow.path.read_bytes() == before
+
+
+def test_an_unknown_start_without_an_identity_can_only_continue(remote):
+    workflow = LearnerWorkflow(10, 20)
+    with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+
+    def continued(client, *, on_identity, **kwargs):
+        on_identity(30, 1, TAB)
+        assert saved(workflow)["attempt_id"] == 30
+        return opened()
+
+    with patch(f"{SESSION}.read_learner_summary", return_value=summary_state(resumed=True)), \
+            patch(f"{SESSION}.start_learner", side_effect=continued) as started:
+        result = workflow.start()
+    assert started.call_args.kwargs["continue_only"] is True
     assert started.call_args.kwargs["known_tab_id"] == ""
+    assert result["resumed"] is True
+    assert workflow.status() == ACTIVE
+
+
+def test_verifying_an_unknown_identity_preserves_the_cursor_and_explains_recovery(remote):
+    workflow = LearnerWorkflow(10, 20)
+    with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+    before = workflow.path.read_bytes()
+    with patch(f"{SESSION}.verify_learner_submission") as verify:
+        with pytest.raises(LearnerWorkflowError, match="attempt ID is unknown"):
+            workflow.verify()
+    verify.assert_not_called()
+    assert workflow.path.read_bytes() == before
+
+
+def test_forgetting_an_unknown_start_explicitly_allows_a_fresh_attempt(remote):
+    workflow = LearnerWorkflow(10, 20)
+    with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
+        with pytest.raises(LearnerStartUnknownError):
+            workflow.start()
+    assert workflow.forget()["forgotten"] is True
+    with patch(f"{SESSION}.start_learner", return_value=opened()) as started:
+        result = workflow.start()
+    assert result["resumed"] is False
+    assert started.call_args.kwargs["continue_only"] is False
 
 
 @pytest.mark.parametrize("change", [
@@ -648,8 +697,11 @@ def test_verify_reads_only_this_accounts_started_attempt(remote):
     with patch(f"{SESSION}.start_learner", side_effect=LearnerStartUnknownError()):
         with pytest.raises(LearnerStartUnknownError):
             workflow.start()
-    assert_refused(workflow, "Run attempt start", ("verify",))
-    start(workflow)
+    state["actor"] = 8
+    assert_refused(workflow, "different signed-in account", ("verify",))
+    state["actor"] = 7
+    assert_refused(workflow, "attempt ID is unknown", ("verify",))
+    start(workflow, resumed=True)
     state["actor"] = 8
     assert_refused(workflow, "different signed-in account", ("verify",))
     state["actor"] = 7
