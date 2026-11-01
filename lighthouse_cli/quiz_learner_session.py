@@ -87,6 +87,9 @@ _OTHER_UNSETTLED = ("A change by a different signed-in account to this quiz coul
                     "Sign in as that account and run attempt start to settle it.")
 _NOT_CONTINUABLE = ("The attempt the CLI was taking is no longer in progress, so no new attempt was started. "
                     "Run attempt verify to check whether it was submitted, or attempt forget to drop the CLI's record of it.")
+_START_NO_ID = ("The last quiz start could not be verified, and its attempt ID is unknown. "
+                "If Brightspace offers Continue, run attempt start. Otherwise check the quiz in Brightspace "
+                "before using attempt forget to allow a new graded attempt.")
 _OTHER_ATTEMPT = ("Brightspace has a different attempt in progress than the one the CLI was taking, so the CLI did "
                   "not take it over. Run attempt verify to check whether the CLI's attempt was submitted, "
                   "or attempt forget to drop the CLI's record of it.")
@@ -419,6 +422,10 @@ class LearnerWorkflow:
             # may be continued: if it ended elsewhere, a new start would use
             # another graded attempt.
             kept = own if own is not None and own["status"] != "submitted" and own["attempt_id"] is not None else None
+            # A lost start reply is not proof that no attempt was created.
+            # Keep identity matching separate: an unknown ID cannot be compared.
+            recovering_start = own is not None and own["status"] == "uncertain" and own["operation"] == "start"
+            continue_only = kept is not None or recovering_start
             if kept is not None and _time_up(kept):
                 raise LearnerWorkflowError(_TIME_UP)
             info = quiz_info(client.get_quiz_detail(self.course_id, self.quiz_id))
@@ -426,8 +433,8 @@ class LearnerWorkflow:
             # Refused whether or not the CLI kept that attempt (after forget,
             # or on another computer, it did not), before anything is written.
             refuse_while_processing(summary)
-            if kept is not None and not summary.can_continue:
-                raise LearnerWorkflowError(_NOT_CONTINUABLE)
+            if continue_only and not summary.can_continue:
+                raise LearnerWorkflowError(_START_NO_ID if kept is None else _NOT_CONTINUABLE)
             # The intent keeps the CLI's attempt, its limit and its browser
             # tab, so a start that fails midway still names them for the next
             # start and for verify.
@@ -450,7 +457,7 @@ class LearnerWorkflow:
 
             try:
                 started = start_learner(client, course_id=self.course_id, quiz_id=self.quiz_id,
-                                        continue_only=kept is not None, known_tab_id=kept.get("tab_id", "") if kept else "",
+                                        continue_only=continue_only, known_tab_id=kept.get("tab_id", "") if kept else "",
                                         on_identity=seal, summary=summary)
             except LearnerStartUnknownError as exc:
                 # The cursor stays uncertain, naming the attempt.
@@ -583,10 +590,10 @@ class LearnerWorkflow:
             state = self._load()
             if state is None:
                 raise LearnerWorkflowError(_NOT_OPEN)
-            if state["attempt_id"] is None:
-                raise LearnerWorkflowError(_REOPEN)
             if self._actor(client) != state["actor_id"]:
                 raise LearnerWorkflowError(_OTHER_ACCOUNT)
+            if state["attempt_id"] is None:
+                raise LearnerWorkflowError(_START_NO_ID)
             try:
                 receipt = verify_learner_submission(client, course_id=self.course_id, quiz_id=self.quiz_id,
                                                     attempt_id=state["attempt_id"], frame_page=state.get("frame_page"))
