@@ -106,8 +106,9 @@ Brightspace posts the whole page form. Do not try to skip it with
 Password-protected quizzes and quizzes requiring a browser step such as
 LockDown Browser are also refused. So is any quiz page, the summary that
 `start` posts included, whose form the CLI cannot send as a browser would
-("This quiz page is not one the CLI can send as a browser would"): nothing
-is sent, so complete that quiz through Brightspace.
+("This quiz page is not one the CLI can send as a browser would"), or that
+it cannot read ("Brightspace did not return a supported current page of
+this attempt"): nothing is sent, so complete that quiz through Brightspace.
 
 ## Submit and verify
 

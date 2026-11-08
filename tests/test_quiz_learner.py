@@ -1194,7 +1194,7 @@ def test_a_summary_just_read_is_not_requested_again():
     (summary().replace(b'<input type="hidden" name="d2l_controlMapPrev" value="">', b""), {}, REFUSE_LEARNER_FORM),
     (summary(fields={"d2l_state": '[{"1":["pagenum"]},[1]]'}), {}, REFUSE_LEARNER_FORM),
     (summary(extra='<input type="hidden" name="QuizTabId" value="1234567890123">'), {}, REFUSE_LEARNER_FORM),
-    (summary(extra='<input type="text" name="note" value="">'), {}, REFUSE_LEARNER_FORM),
+    (summary(extra='<input type="checkbox" name="agree" value="1">'), {}, REFUSE_LEARNER_FORM),
     (summary().replace(b"JsonDeserializerMin.Deserialize", b"JsonDeserializerMin.Read"), {}, REFUSE_LEARNER_FORM),
     # The open time is told only for a start the countdown holds back.
     (summary(**NOT_OPEN), {"continue_only": True}, REFUSE_NOTHING_IN_PROGRESS),
@@ -1466,24 +1466,25 @@ def test_unverified_save_is_unknown_and_not_retried(post, readback):
 FIRST_SAVED = body(questions(sc=("o2",), saved=("True", "False", "False")))
 
 
-@pytest.mark.parametrize("second, readback", [
-    (posted(saved_reply("102"), status=500), None),
-    (NetworkError("connection reset"), None),
-    (SessionExpiredError("session expired"), None),
-    (posted(saved_reply("102")), FIRST_SAVED),  # 200 without the second answer persisted
-    (posted(saved_reply("102")), SessionExpiredError("session expired")),
+@pytest.mark.parametrize("second, readback, reads", [
+    (posted(saved_reply("102"), status=500), None, 2),
+    (NetworkError("connection reset"), None, 2),
+    (SessionExpiredError("session expired"), None, 2),
+    (posted(saved_reply("102")), FIRST_SAVED, 3),  # 200 without the second answer persisted
+    (posted(saved_reply("102")), SessionExpiredError("session expired"), 3),
 ], ids=["server-error", "network-error", "post-auth-expiry", "not-persisted", "readback-auth-expiry"])
-def test_a_failure_after_the_first_verified_save_is_unknown_and_not_retried(second, readback):
+def test_a_failure_after_the_first_verified_save_is_unknown_and_not_retried(second, readback, reads):
     # The first answer is saved and verified; only the second fails, inside
-    # the per-answer check rather than before its POST.
+    # the per-answer check rather than before its POST. A third answer is
+    # pending, so two POSTs also show the save stopped instead of going on.
     first = posted(saved_reply("101"))
     pages = [body(questions()), FIRST_SAVED] + ([] if readback is None else [readback])
     client = write_client(*pages, posts=[first, second])
     with pytest.raises(LearnerSaveUnknownError) as exc_info:
-        save_learner_answers(client, VIEW, answers={101: "o2", 102: ["o11"]})
+        save_learner_answers(client, VIEW, answers={101: "o2", 102: ["o11"], 103: ["four", "six"]})
     assert type(exc_info.value) is LearnerSaveUnknownError
     assert client._request.call_count == 2
-    assert client.get_raw.call_count == len(pages)
+    assert client.get_raw.call_count == reads
     for response in (first, second):
         if isinstance(response, Mock):
             response.close.assert_called_once()

@@ -236,8 +236,11 @@ with one question on each of two pages, forward-only) added:
 A graded attempt was recorded in a browser on Lighthouse (Brightspace
 20.26.10): ten pages, one single-choice question on each, forward-only. The
 CLI's learner commands send the same request shapes, fields and Referers
-(the CLI saves a change made twice to one answer once). Values
-here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
+(the start request was compared only by URL and headers; see Form fields),
+but not the same number of saves: the browser autosaves every change to an
+answer, while one `attempt answer` saves only the final value it is given
+(two commands save twice). Values here are placeholders (`ou=1001`,
+`qi=2002`, `ai=3003`, question ids 4xxx).
 
 - Start: the summary is `quiz_summary.d2l?qi=2002&ou=1001`, and the start
   POST goes to the same URL plus `&cfql=0&inProgress=false` (`true` to
@@ -279,14 +282,15 @@ here are placeholders (`ou=1001`, `qi=2002`, `ai=3003`, question ids 4xxx).
   327 on the summary). The summary form has no `QuizTabId`. The CLI
   refuses, with nothing sent, a page whose form it cannot fill this way.
   The start form is built the same way, so `attempt start` assumes the
-  summary is shaped like the recorded one: one form, each of those
-  bookkeeping controls once, `d2l_state` as `[scopes, []]`, one
-  `Deserialize` call, no `QuizTabId`, and no visible control outside a
-  question. The recorded summary passed this (the replay's start request
+  summary is shaped like the recorded one: one form, every control named
+  once (those bookkeeping controls among them), `d2l_state` as
+  `[scopes, []]`, one `Deserialize` call, no `QuizTabId`, and no visible
+  control outside a question. The recorded summary passed this (the replay's start request
   matched the browser's URL and headers), but its fields were not compared
   one by one and the tests use a synthetic summary, so a summary shaped
-  otherwise is a known limitation: `attempt start` refuses it before
-  sending anything.
+  otherwise is a known limitation: `attempt start` stops before sending
+  anything (a second form or a repeated hidden field makes the summary an
+  unsupported page; anything else above is this refusal).
 - Answer: each change is one autosave, a multipart POST to
   `quiz_attempt_save_auto.d2l?d2l_body_type=3&ou=1001&fromQB=0` with
   `3,<page>,<tid>,<tvid>,<question number>` and the whole page form,
