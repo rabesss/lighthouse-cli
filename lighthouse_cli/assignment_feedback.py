@@ -27,9 +27,9 @@ import hashlib
 import html
 import json
 import os
-import re
 import stat
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any
 
 import requests
@@ -89,9 +89,65 @@ def _html(text: str) -> str:
     return "<p>" + html.escape(text, quote=True).replace("\n", "<br />") + "</p>"
 
 
-_OPEN = re.compile(r"^\s*<p\b[^>]*>", re.IGNORECASE)
-_CLOSE = re.compile(r"</p>\s*$", re.IGNORECASE)
-_BREAK = re.compile(r"<br\s*/?>|</p>\s*<p\b[^>]*>", re.IGNORECASE)
+# ASCII whitespace, the only markup-level whitespace allowed outside the paragraph.
+_HTML_SPACE = " \t\n\r\f"
+
+
+class _RejectedMarkupError(Exception):
+    """The readback Html is not the structure the command sent."""
+
+
+class _CommentMarkup(HTMLParser):
+    """Line segments of exactly one attribute-free ``<p>`` holding only text and ``<br>``.
+
+    Entity spelling is normalized by the parser; tag case and ``<br>``,
+    ``<br/>`` or ``<br />`` are the same tokens. Every other tag, attribute,
+    comment, declaration, processing instruction or second paragraph raises
+    :class:`_RejectedMarkupError`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.state = "before"  # before -> inside -> after
+        self.segments = [""]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if attrs:
+            raise _RejectedMarkupError
+        if tag == "p" and self.state == "before":
+            self.state = "inside"
+        elif tag == "br" and self.state == "inside":
+            self.segments.append("")
+        else:
+            raise _RejectedMarkupError
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "br":
+            raise _RejectedMarkupError
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "p" or self.state != "inside":
+            raise _RejectedMarkupError
+        self.state = "after"
+
+    def handle_data(self, data: str) -> None:
+        if self.state == "inside":
+            self.segments[-1] += data
+        elif data.strip(_HTML_SPACE):
+            raise _RejectedMarkupError
+
+    def handle_comment(self, data: str) -> None:
+        raise _RejectedMarkupError
+
+    def handle_decl(self, decl: str) -> None:
+        raise _RejectedMarkupError
+
+    def handle_pi(self, data: str) -> None:
+        raise _RejectedMarkupError
+
+    def unknown_decl(self, data: str) -> None:
+        raise _RejectedMarkupError
 
 
 def _comparable(text: str) -> str:
@@ -99,11 +155,31 @@ def _comparable(text: str) -> str:
 
 
 def _html_text(markup: str) -> str | None:
-    """The text of paragraph/line-break-only markup, or ``None`` if it has any other markup."""
-    body = _BREAK.sub("\n", _CLOSE.sub("", _OPEN.sub("", _normalize(markup), count=1), count=1))
-    if "<" in body:
+    """The text of markup shaped exactly like :func:`_html` output, or ``None`` for any other structure.
+
+    Allowed reformatting: whitespace outside the paragraph, one line break
+    directly after ``<p>``/``<br>`` or before ``<br>``/``</p>``, entity
+    spelling, tag case and ``<br>`` vs ``<br/>``. Any other raw line break is
+    rejected because it renders as a space, not a line break.
+    """
+    parser = _CommentMarkup()
+    try:
+        parser.feed(_normalize(markup))
+        # Anything the parser holds back (an unfinished tag or comment) is not the sent structure.
+        if parser.rawdata.strip(_HTML_SPACE):
+            return None
+        parser.close()
+    except _RejectedMarkupError:
         return None
-    return _comparable(html.unescape(body))
+    if parser.state != "after":
+        return None
+    lines = []
+    for segment in parser.segments:
+        segment = segment.removeprefix("\n").removesuffix("\n")
+        if "\n" in segment:
+            return None
+        lines.append(segment)
+    return _comparable("\n".join(lines))
 
 
 def feedback_payload(text: str) -> dict[str, Any]:

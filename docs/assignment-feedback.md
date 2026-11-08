@@ -16,7 +16,7 @@ LE 1.93) and the RichText definition in `basic/conventions.html`:
 | Preflight | `GET .../dropbox/folders/{folder}/submissions/user/{user}` (EntityDropbox, 1.88+) | Exactly one block for this user (`EntityType` User, integer `EntityId`); at least one submission; a `Feedback` key present (null or an object); `Status` 1 (Submitted) or 2 (Draft) as an integer or digit string, never 3 (Published), 0 or unknown; existing feedback must be a complete DropboxFeedbackOut with `IsGraded` exactly `false`, no `Score` or `GradedSymbol`, and empty rubric assessments, files and links; existing draft text, or an existing feedback object whose comment is null or empty (`{}`), only with `--replace-draft` |
 | Re-check | Both reads again, after an interactive confirmation | A digest of the record's status and existing feedback must match the first preflight; otherwise nothing is sent |
 | Save | `POST .../feedback/user/{user}`, one attempt, CSRF header fetched before the preflight | Body `{"Score": null, "Feedback": {"Text": ..., "Html": ...}, "RubricAssessments": [], "IsGraded": false, "GradedSymbol": null}`. The reference marks `Feedback` as RichText. Only HTTP 200, the documented success, counts; the response body is undocumented and ignored |
-| Readback 1 | `GET .../feedback/user/{user}` (DropboxFeedbackOut) | The same draft-only checks as the preflight. Every comment part that is present, even an empty string, must match: `Text` equal to the comment (line endings normalized), `Html` equal to what was sent, or markup made only of `<p>` and `<br>` whose text is the comment (entities decoded, non-breaking spaces as spaces, outer line breaks ignored). Any other markup is a mismatch, and at least one part must be present |
+| Readback 1 | `GET .../feedback/user/{user}` (DropboxFeedbackOut) | The same draft-only checks as the preflight. Every comment part that is present, even an empty string, must match: `Text` equal to the comment (line endings normalized), `Html` equal to what was sent, or the same structure: exactly one `<p>` with no attributes holding only text and attribute-free `<br>` line breaks, whose text is the comment. Only harmless reformatting is allowed: whitespace outside the paragraph, one line break next to a `<p>`, `<br>` or `</p>` tag, entity spelling, tag case and `<br>`/`<br/>`/`<br />` (non-breaking spaces count as spaces, outer line breaks are ignored). Any attribute, other element, comment, second paragraph or other raw line break is a mismatch and gives `unknown`. At least one part must be present |
 | Readback 2 | `GET .../submissions/user/{user}` | Same user block, `Status` 2 (Draft), and its `Feedback` passes the same draft-only and comment checks as readback 1 |
 
 `IsGraded: false` is the documented draft state ("If true, the feedback is in
@@ -52,7 +52,8 @@ synthetic course, assignment and test learner that you own:
    that learner is unchanged.
 5. If the command reports `"outcome": "unknown"` after a save that worked,
    record the readback shape (`Text`, `Html`, `Status`), because the check
-   needs adjusting. The likely causes are D2L rewriting `Text`, keeping
+   needs adjusting. The likely causes are D2L rewriting `Text`, storing `Html`
+   with attributes, extra elements or more than one paragraph, keeping
    `Status` at 1, or answering the POST with a status other than 200.
 6. Add a draft with a rubric assessment or an attachment in the UI and confirm
    the command refuses it.
