@@ -193,3 +193,84 @@ def assignment_create(course_id: int, name: str, instructions: str, submission_t
     from .assessment_api import assignment_payload
     payload = _settings(lambda: assignment_payload(name, instructions, submission_type), json_output)
     _create(course_id, "assignment", payload, yes, dry_run, json_output)
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _feedback(ids: dict[str, int], path: str, replace_draft: bool, yes: bool, dry_run: bool, json_output: bool) -> None:
+    from .assignment_feedback import FeedbackInputError, read_feedback_file
+
+    def refuse(message: str, **extra: Any) -> None:
+        fail(message, json_output, {**ids, **extra, "data": None, "error": message})
+
+    try:
+        text = read_feedback_file(path)
+    except FeedbackInputError as exc:
+        refuse(str(exc))
+    if not (dry_run or yes or _interactive()):
+        fail("Feedback cancelled. Use --yes for non-interactive saving.", json_output, {"cancelled": True})
+
+    from .api import LighthouseClient
+    from .assessment_api import AssessmentAPI, AssessmentWriteUnknownError
+    from .assignment_feedback import VISIBILITY, FeedbackRefusedError, preflight, save_draft
+
+    client = None
+    try:
+        client = LighthouseClient(read_only_auth=dry_run)
+        api = AssessmentAPI(client, ids["course_id"])
+        target = preflight(api, ids["folder_id"], ids["user_id"], replace_draft=replace_draft)
+        summary = {**ids, "host": client.cookie_host, "visibility": VISIBILITY,
+                   "replaces_draft": target.replaces_draft, "feedback_characters": len(text)}
+        if dry_run:
+            emit({**ids, "host": client.cookie_host, "dry_run": True, "operation": "save-draft-feedback",
+                  **{k: summary[k] for k in ("visibility", "replaces_draft", "feedback_characters")}}, json_output)
+            return
+        replacing = ", replacing the existing draft comment" if target.replaces_draft else ""
+        if not yes:
+            if not click.confirm(
+                f"Save DRAFT feedback (not published, not visible to the learner, no score) for user "
+                f"{ids['user_id']} in assignment {ids['folder_id']}, course {ids['course_id']} on "
+                f"{client.cookie_host}{replacing}?", err=True,
+            ):
+                fail("Feedback cancelled.", json_output, {"cancelled": True})
+            # The prompt can take minutes; check again just before the write.
+            if preflight(api, ids["folder_id"], ids["user_id"], replace_draft=replace_draft) != target:
+                raise FeedbackRefusedError(
+                    "The feedback changed while you were confirming. Nothing was sent; run the command again.")
+        save_draft(api, ids["folder_id"], ids["user_id"], text)
+        emit({**summary, "outcome": "saved-draft", "is_graded": False}, json_output)
+    except AssessmentWriteUnknownError as exc:
+        refuse(str(exc), outcome="unknown")
+    except FeedbackRefusedError as exc:
+        refuse(str(exc))
+    except Exception as exc:
+        refuse(format_user_error(exc))
+    finally:
+        if client is not None:
+            client._session.close()
+
+
+@id_command(instructor, "assignment-feedback", "course_id", "folder_id", "user_id")
+# A plain string, checked inside the command: click.Path would echo the path
+# in its usage error.
+@click.option("--file", "feedback_file", required=True, metavar="PATH",
+              help="UTF-8 text file holding the comment (at most 65536 characters).")
+@click.option("--replace-draft", is_flag=True, help="Replace an existing text-only draft comment.")
+@WRITE_OPTIONS
+def assignment_feedback(course_id: int, folder_id: int, user_id: int, feedback_file: str, replace_draft: bool,
+                        yes: bool, dry_run: bool, json_output: bool) -> None:
+    """Save a draft comment on one learner's assignment submission.
+
+    The feedback stays a draft: it is not published, the learner cannot see
+    it and no score is set. Publish it in Brightspace. It refuses published,
+    scored, rubric or attached feedback, and group assignments. The comment
+    text is read from --file and never printed. --dry-run checks the target
+    without saving.
+
+    Built and tested offline against D2L's documented API only; run the live
+    check in docs/assignment-feedback.md once before relying on it.
+    """
+    _feedback({"course_id": course_id, "folder_id": folder_id, "user_id": user_id},
+              feedback_file, replace_draft, yes, dry_run, json_output)

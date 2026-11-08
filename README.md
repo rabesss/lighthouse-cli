@@ -136,6 +136,8 @@ stderr. `--help` remains human-readable.
   the local download root (`--output-dir`, default `~/Downloads/lighthouse`).
 - **[REMOTE WRITE]:** `submit` sends a file to Brightspace. Instructor
   `quiz-create` and `assignment-create` create hidden assessments.
+  Instructor `assignment-feedback` saves a draft comment on one learner's
+  submission (not published, no score).
   `student attempt start`, `answer`, `next`, `previous` and `submit` change
   your own graded quiz attempt. These commands require confirmation unless `--yes` is supplied.
 
@@ -170,7 +172,20 @@ lighthouse instructor quiz-attempts COURSE_ID QUIZ_ID --json
 lighthouse instructor submissions COURSE_ID FOLDER_ID --json
 lighthouse instructor quiz-create COURSE_ID --name 'Practice' --layout one-way --dry-run --json
 lighthouse instructor assignment-create COURSE_ID --name 'Practice' --submission-type file --dry-run --json
+lighthouse instructor assignment-feedback COURSE_ID FOLDER_ID USER_ID --file comment.txt --dry-run --json
 ```
+
+`assignment-feedback` saves a **draft** comment on one learner's individual
+submission: it is not published, the learner cannot see it, and no score is
+set. You publish it in Brightspace. It reads the comment from a UTF-8 file and
+never prints it. It refuses published or graded feedback, drafts that already
+have a score, rubric assessment or attachment, and group assignments. It
+replaces an existing draft comment only with `--replace-draft`. After the save
+it reads the feedback back; if it cannot confirm a draft it reports
+`"outcome": "unknown"` and does not retry. It was built against D2L's
+documented API and tested offline only: run the
+[live check](docs/assignment-feedback.md#owner-live-check) once before relying
+on it.
 
 Both groups also provide `quiz`, `quizzes`, `assignment`, `assignments`, and
 the shared course reads above. Their JSON envelope is
@@ -310,7 +325,7 @@ off), `verify` reads the new limit and the attempt can be continued with
 `start`. Without auto-submit, answers can still be saved and submitted after
 the limit; the quiz's late-submission setting decides how they count.
 
-Question authoring, teacher grading and full
+Question authoring, teacher grading (beyond draft assignment comments) and full
 course-administration parity are **not implemented** yet. Instructor question
 definitions must not be treated as a student's currently accessible attempt
 page. See [Brightspace assessment protocol notes](docs/quiz-protocol.md).

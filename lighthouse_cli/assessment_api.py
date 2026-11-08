@@ -211,15 +211,21 @@ class AssessmentAPI:
         except (ValueError, OverflowError):  # unparseable, or out of range once in UTC
             return None
 
-    def write(self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None) -> Any:
+    def send_once(self, method: str, path: str, data: dict[str, Any]) -> requests.Response:
+        """Send one same-origin, CSRF-protected write; never replayed.
+
+        Any failure after dispatch that could hide an accepted write raises
+        :class:`AssessmentWriteUnknownError`. Documented refusals (other 4xx)
+        keep their status. Callers own closing the returned response.
+        """
         if method not in {"POST", "PUT"}:
             raise ValueError("Unsupported assessment operation.")
-        url = self.client.canonical_url(self.path(resource, identifier))
+        url = self.client.canonical_url(path)
         # Homepage protection is a read-only prerequisite. If it fails, no
         # assessment write was attempted and callers may safely retry it.
         csrf_token = self.client.get_csrf_token()
         try:
-            response = self.client._request(method, url, json=data, headers={"X-Csrf-Token": csrf_token})
+            return self.client._request(method, url, json=data, headers={"X-Csrf-Token": csrf_token})
         except (NetworkError, SessionExpiredError):
             raise AssessmentWriteUnknownError(_WRITE_UNKNOWN) from None
         except requests.HTTPError as exc:
@@ -227,6 +233,11 @@ class AssessmentAPI:
             if status == 429 or (isinstance(status, int) and status >= 500):
                 raise AssessmentWriteUnknownError(_WRITE_UNKNOWN) from None
             raise
+
+    def write(self, method: str, resource: str, data: dict[str, Any], identifier: int | None = None) -> Any:
+        if method not in {"POST", "PUT"}:
+            raise ValueError("Unsupported assessment operation.")
+        response = self.send_once(method, self.path(resource, identifier), data)
         try:
             if response.status_code == 204:
                 if method == "POST":

@@ -4,7 +4,9 @@ The fixtures below are synthetic and follow the documented D2L shapes
 (docs.valence.desire2learn.com/res/dropbox.html): Dropbox.EntityDropbox from
 ``GET .../submissions/user/(userId)`` and Dropbox.DropboxFeedbackOut from
 ``GET .../feedback/user/(userId)``. ``IsGraded: false`` is the documented draft
-state; ENTITYDROPBOXSTATUS_T 3 is Published. No live request is made.
+state; ENTITYDROPBOXSTATUS_T is 0 Unsubmitted, 1 Submitted, 2 Draft, 3 Published.
+Feedback is a RichText block (``{"Text", "Html"}``, either part may be absent).
+No live request is made.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ ENTITY_NO_FEEDBACK: dict[str, Any] = {
 
 def draft_feedback_out(content: str = TEXT, **overrides: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "Score": None, "Feedback": {"Text": content, "Html": "", "Content": content, "Type": "Text"},
+        "Score": None, "Feedback": {"Text": content, "Html": ""},
         "RubricAssessments": [], "IsGraded": False, "Files": [], "Links": [], "GradedSymbol": None,
     }
     out.update(overrides)
@@ -161,9 +163,14 @@ def assert_no_leak(result: Any) -> None:
 
 def test_payload_is_comment_only_and_draft():
     assert feedback_payload("Note") == {
-        "Score": None, "Feedback": {"Content": "Note", "Type": "Text"},
+        "Score": None, "Feedback": {"Text": "Note", "Html": "<p>Note</p>"},
         "RubricAssessments": [], "IsGraded": False, "GradedSymbol": None,
     }
+
+
+def test_payload_html_part_is_escaped():
+    assert feedback_payload('<b>"x" & y</b>\nz')["Feedback"]["Html"] == (
+        "<p>&lt;b&gt;&quot;x&quot; &amp; y&lt;/b&gt;<br />z</p>")
 
 
 @pytest.mark.parametrize("text", ["", "   \n\t", "a\x00b", "x" * (MAX_FEEDBACK_CHARS + 1)])
@@ -173,7 +180,7 @@ def test_payload_rejects_unsafe_text(text):
 
 
 def test_payload_accepts_the_maximum_length():
-    assert feedback_payload("x" * MAX_FEEDBACK_CHARS)["Feedback"]["Content"] == "x" * MAX_FEEDBACK_CHARS
+    assert feedback_payload("x" * MAX_FEEDBACK_CHARS)["Feedback"]["Text"] == "x" * MAX_FEEDBACK_CHARS
 
 
 def test_file_is_strict_utf8_with_bom_stripped_and_newlines_normalized(tmp_path):
@@ -196,11 +203,20 @@ def test_bad_file_fails_before_any_client_or_request(tmp_path, content):
     client.assert_not_called()
 
 
-def test_missing_file_is_a_usage_error_without_client(tmp_path):
+@pytest.mark.parametrize("json_flag", [["--json"], []], ids=["json", "human"])
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_unreadable_path_fails_without_client_or_echoing_the_path(tmp_path, json_flag, kind):
+    path = tmp_path / "NEVER_PRINT secret path"
+    if kind == "directory":
+        path.mkdir()
     with patch("lighthouse_cli.api.LighthouseClient") as client:
         result = CliRunner().invoke(cli, ["instructor", "assignment-feedback", "12", "34", "56",
-                                          "--file", str(tmp_path / "absent.txt"), "--yes", "--json"])
-    assert result.exit_code != 0
+                                          "--file", str(path), "--yes", *json_flag])
+    assert result.exit_code == 1
+    assert "NEVER_PRINT" not in result.stdout + result.stderr
+    if json_flag:
+        assert json.loads(result.stdout) == {"course_id": 12, "folder_id": 34, "user_id": 56,
+                                             "data": None, "error": "Could not read the feedback file."}
     client.assert_not_called()
 
 
@@ -234,8 +250,10 @@ def test_empty_draft_feedback_object_is_not_a_replacement():
     assert check_feedback_target([entity_with(blank)], USER, replace_draft=False).replaces_draft is False
 
 
-def test_existing_draft_text_needs_replace_draft():
-    data = [entity_with(draft_feedback_out("Older synthetic draft"), Status=2)]
+@pytest.mark.parametrize("rich", [{"Text": "Older synthetic draft", "Html": None},
+                                  {"Html": "<p>Older synthetic draft</p>"}], ids=["text", "html-only"])
+def test_existing_draft_text_needs_replace_draft(rich):
+    data = [entity_with(draft_feedback_out(Feedback=rich), Status=2)]
     with pytest.raises(FeedbackRefusedError, match="--replace-draft"):
         check_feedback_target(data, USER, replace_draft=False)
     assert check_feedback_target(data, USER, replace_draft=True).replaces_draft is True
@@ -252,7 +270,13 @@ REFUSALS: dict[str, Any] = {
     "no-submissions": [entity_with(Submissions=[])],
     "submissions-not-list": [entity_with(Submissions="1")],
     "published-status": [entity_with(draft_feedback_out(), Status=3)],
-    "published-status-text": [entity_with(None, Status="Published")],
+    "string-status": [entity_with(None, Status="1")],
+    "published-name-status": [entity_with(None, Status="Published")],
+    "bool-status": [entity_with(None, Status=True)],
+    "missing-status": [{k: v for k, v in ENTITY_NO_FEEDBACK.items() if k != "Status"}],
+    "unknown-status": [entity_with(None, Status=7)],
+    "unsubmitted-status": [entity_with(None, Status=0)],
+    "draft-status-without-feedback": [entity_with(None, Status=2)],
     "graded-feedback": [entity_with(draft_feedback_out(IsGraded=True))],
     "missing-is-graded": [entity_with({k: v for k, v in draft_feedback_out().items() if k != "IsGraded"})],
     "string-is-graded": [entity_with(draft_feedback_out(IsGraded="false"))],
@@ -265,7 +289,8 @@ REFUSALS: dict[str, Any] = {
     "files-not-list": [entity_with(draft_feedback_out("", Files="x"))],
     "feedback-not-dict": [entity_with("text")],
     "rich-text-not-dict": [entity_with(draft_feedback_out(Feedback="text"))],
-    "content-not-str": [entity_with(draft_feedback_out(Feedback={"Content": 5, "Type": "Text"}))],
+    "text-not-str": [entity_with(draft_feedback_out(Feedback={"Text": 5, "Html": ""}))],
+    "html-not-str": [entity_with(draft_feedback_out(Feedback={"Text": "", "Html": ["x"]}))],
     "not-json-object": ["text"],
     "scalar": 5,
 }
@@ -337,7 +362,7 @@ def test_non_interactive_without_yes_cancels_before_any_request(feedback_file):
 
 def test_declined_confirmation_names_destination_and_visibility_and_sends_no_write(feedback_file):
     fake = FakeLMS({("GET", SUBMISSIONS_URL): [lambda: response(200, [ENTITY_NO_FEEDBACK])]})
-    with patch("sys.stdin.isatty", return_value=True), patch("click.confirm", return_value=False) as confirm:
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), patch("click.confirm", return_value=False) as confirm:
         result = invoke(fake, "--file", str(feedback_file), "--json")
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"cancelled": True}
@@ -349,10 +374,48 @@ def test_declined_confirmation_names_destination_and_visibility_and_sends_no_wri
     assert fake.methods("POST") == []
 
 
+def test_confirmed_save_checks_the_target_again_just_before_the_post(feedback_file):
+    fake = FakeLMS(happy_routes(get_submissions=[
+        lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [ENTITY_NO_FEEDBACK]),
+        lambda: response(200, [entity_with(draft_feedback_out(), Status=2)])]))
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), patch("click.confirm", return_value=True):
+        result = invoke(fake, "--file", str(feedback_file), "--json")
+    assert result.exit_code == 0, result.output
+    assert [(m, u) for m, u, _k in fake.calls] == [
+        ("GET", SUBMISSIONS_URL), ("GET", SUBMISSIONS_URL), ("POST", FEEDBACK_URL),
+        ("GET", FEEDBACK_URL), ("GET", SUBMISSIONS_URL),
+    ]
+
+
+@pytest.mark.parametrize("later", [
+    [entity_with(draft_feedback_out(IsGraded=True))],
+    [entity_with(draft_feedback_out(), Status=3)],
+    [entity_with(draft_feedback_out("Another assessor's synthetic draft"), Status=2)],
+], ids=["graded-meanwhile", "published-meanwhile", "draft-added-meanwhile"])
+def test_target_changed_during_confirmation_sends_nothing(feedback_file, later):
+    fake = FakeLMS({("GET", SUBMISSIONS_URL): [lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, later)]})
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), patch("click.confirm", return_value=True):
+        result = invoke(fake, "--file", str(feedback_file), "--json")
+    assert result.exit_code == 1
+    assert "Nothing was sent" in json.loads(result.stdout)["error"]
+    assert fake.methods("POST") == []
+    assert_no_leak(result)
+
+
+def test_replace_draft_refuses_if_the_draft_changes_during_confirmation(feedback_file):
+    older = [entity_with(draft_feedback_out("Older synthetic draft"), Status=2)]
+    fake = FakeLMS({("GET", SUBMISSIONS_URL): [lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, older)]})
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), patch("click.confirm", return_value=True):
+        result = invoke(fake, "--file", str(feedback_file), "--replace-draft", "--json")
+    assert result.exit_code == 1
+    assert "changed while you were confirming" in json.loads(result.stdout)["error"]
+    assert fake.methods("POST") == []
+
+
 def test_confirmation_says_when_a_draft_is_replaced(feedback_file):
     data = [entity_with(draft_feedback_out("Older synthetic draft"), Status=2)]
     fake = FakeLMS({("GET", SUBMISSIONS_URL): [lambda: response(200, data)]})
-    with patch("sys.stdin.isatty", return_value=True), patch("click.confirm", return_value=False) as confirm:
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), patch("click.confirm", return_value=False) as confirm:
         invoke(fake, "--file", str(feedback_file), "--replace-draft", "--json")
     assert "replacing the existing draft" in confirm.call_args.args[0]
 
@@ -446,6 +509,7 @@ BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
     "score-present": {"get_feedback": [lambda: response(200, draft_feedback_out(Score=3))]},
     "symbol-present": {"get_feedback": [lambda: response(200, draft_feedback_out(GradedSymbol="A"))]},
     "rich-text-missing": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback=None))]},
+    "html-only-mismatch": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback={"Html": "<p>other</p>"}))]},
     "not-object": {"get_feedback": [lambda: response(200, ["x"])]},
     "non-json": {"get_feedback": [lambda: response(200, raw=b"<html>NEVER_PRINT</html>")]},
     "feedback-read-500": {"get_feedback": [lambda: response(500, {})]},
@@ -455,6 +519,10 @@ BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
     "entity-feedback-graded": {"get_submissions": [
         lambda: response(200, [ENTITY_NO_FEEDBACK]),
         lambda: response(200, [entity_with(draft_feedback_out(IsGraded=True), Status=2)])]},
+    "status-still-submitted": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [entity_with(draft_feedback_out(), Status=1)])]},
+    "entity-feedback-missing": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [entity_with(None, Status=2)])]},
     "entity-gone": {"get_submissions": [lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [])]},
     "submissions-read-500": {"get_submissions": [lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(500, {})]},
 }
@@ -476,6 +544,13 @@ def test_unverified_readback_is_unknown_never_success(feedback_file, changes):
 def test_readback_tolerates_crlf_newlines_from_the_server(feedback_file):
     crlf = TEXT.replace("\n", "\r\n")
     fake = FakeLMS(happy_routes(get_feedback=[lambda: response(200, draft_feedback_out(crlf))]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 0, result.output
+
+
+def test_readback_accepts_the_html_part_alone_when_it_matches_what_was_sent(feedback_file):
+    sent = feedback_payload(TEXT)["Feedback"]["Html"]
+    fake = FakeLMS(happy_routes(get_feedback=[lambda: response(200, draft_feedback_out(Feedback={"Html": sent}))]))
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
     assert result.exit_code == 0, result.output
 
