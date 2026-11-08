@@ -89,14 +89,21 @@ def _html(text: str) -> str:
     return "<p>" + html.escape(text, quote=True).replace("\n", "<br />") + "</p>"
 
 
+_OPEN = re.compile(r"^\s*<p\b[^>]*>", re.IGNORECASE)
+_CLOSE = re.compile(r"</p>\s*$", re.IGNORECASE)
 _BREAK = re.compile(r"<br\s*/?>|</p>\s*<p\b[^>]*>", re.IGNORECASE)
-_TAG = re.compile(r"<[^>]*>")
 
 
-def _html_text(markup: str) -> str:
-    """The plain text of simple paragraph/line-break markup, for comparison only."""
-    text = html.unescape(_TAG.sub("", _BREAK.sub("\n", _normalize(markup))))
-    return text.replace("\xa0", " ").strip()
+def _comparable(text: str) -> str:
+    return text.replace("\xa0", " ").strip("\n")
+
+
+def _html_text(markup: str) -> str | None:
+    """The text of paragraph/line-break-only markup, or ``None`` if it has any other markup."""
+    body = _BREAK.sub("\n", _CLOSE.sub("", _OPEN.sub("", _normalize(markup), count=1), count=1))
+    if "<" in body:
+        return None
+    return _comparable(html.unescape(body))
 
 
 def feedback_payload(text: str) -> dict[str, Any]:
@@ -291,11 +298,15 @@ def preflight(api: AssessmentAPI, folder_id: int, user_id: int, *, replace_draft
 
 def _check_saved_comment(feedback: Any, text: str) -> None:
     """A draft-only DropboxFeedbackOut whose comment is ``text``."""
-    saved_text, saved_html = _rich_text(_check_draft_only(feedback))
-    text_ok = _normalize(saved_text) == text
-    html_ok = saved_html == _html(text) or _html_text(saved_html) == text.strip()
-    # Every part that is present must say the same thing, and at least one must match.
-    if (saved_text and not text_ok) or (saved_html and not html_ok) or not (text_ok or html_ok):
+    _rich_text(_check_draft_only(feedback))  # refuses a malformed shape
+    rich = feedback["Feedback"] or {}
+    saved_text, saved_html = rich.get("Text"), rich.get("Html")
+    # Every part that is present (even "") must say exactly the same thing, and one must be present.
+    if saved_text is None and saved_html is None:
+        raise _UnexpectedError()
+    if saved_text is not None and _normalize(saved_text) != text:
+        raise _UnexpectedError()
+    if saved_html is not None and saved_html != _html(text) and _html_text(saved_html) != _comparable(text):
         raise _UnexpectedError()
 
 

@@ -30,6 +30,8 @@ from lighthouse_cli.assignment_feedback import (
     MAX_FEEDBACK_CHARS,
     FeedbackInputError,
     FeedbackRefusedError,
+    _check_saved_comment,
+    _UnexpectedError,
     check_feedback_target,
     feedback_payload,
     read_feedback_file,
@@ -60,7 +62,7 @@ ENTITY_NO_FEEDBACK: dict[str, Any] = {
 
 def draft_feedback_out(content: str = TEXT, **overrides: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "Score": None, "Feedback": {"Text": content, "Html": ""},
+        "Score": None, "Feedback": {"Text": content, "Html": None},
         "RubricAssessments": [], "IsGraded": False, "Files": [], "Links": [], "GradedSymbol": None,
     }
     out.update(overrides)
@@ -634,6 +636,15 @@ BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
     "entity-text-matches-html-differs": {"get_submissions": [
         lambda: response(200, [ENTITY_NO_FEEDBACK]),
         lambda: response(200, [entity_with(draft_feedback_out(Feedback={"Text": TEXT, "Html": "<p>Other</p>"}), Status=2)])]},
+    "text-empty-html-matches": {"get_feedback": [
+        lambda: response(200, draft_feedback_out(Feedback={"Text": "", "Html": feedback_payload(TEXT)["Feedback"]["Html"]}))]},
+    "text-matches-html-empty": {"get_feedback": [
+        lambda: response(200, draft_feedback_out(Feedback={"Text": TEXT, "Html": ""}))]},
+    "entity-text-empty-html-matches": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]),
+        lambda: response(200, [entity_with(draft_feedback_out(Feedback={"Text": "", "Html": feedback_payload(TEXT)["Feedback"]["Html"]}), Status=2)])]},
+    "html-extra-markup": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback={
+        "Text": TEXT, "Html": "<p>Synthetic draft note: revisit the second proof.<br>Line two.</p><img src=\"x\">"}))]},
     "html-only-mismatch": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback={"Html": "<p>other</p>"}))]},
     "not-object": {"get_feedback": [lambda: response(200, ["x"])]},
     "non-json": {"get_feedback": [lambda: response(200, raw=b"<html>NEVER_PRINT</html>")]},
@@ -708,6 +719,30 @@ def test_readback_accepts_html_reformatted_with_the_same_text(feedback_file, mar
     fake = FakeLMS(happy_routes(get_feedback=[lambda: response(200, draft_feedback_out(Feedback={"Text": TEXT, "Html": markup}))]))
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("rich,text", [
+    ({"Html": "<p>hello</p>"}, "  hello  "),
+    ({"Html": "<p>hello</p><img src=\"x\">"}, "hello"),
+    ({"Html": "<p><b>hello</b></p>"}, "hello"),
+    ({"Html": "<div>hello</div>"}, "hello"),
+    ({"Html": "<p>hello there</p>"}, "hello  there"),
+    ({"Text": "", "Html": "<p>hello</p>"}, "hello"),
+    ({"Text": "hello", "Html": ""}, "hello"),
+    ({"Text": None, "Html": None}, "hello"),
+], ids=["outer-spaces", "extra-image", "bold", "div", "inner-spaces", "empty-text", "empty-html", "both-null"])
+def test_saved_comment_check_rejects_any_difference(rich, text):
+    with pytest.raises(_UnexpectedError):
+        _check_saved_comment(draft_feedback_out(Feedback=rich), text)
+
+
+@pytest.mark.parametrize("rich,text", [
+    ({"Text": "hello\n", "Html": "<p>hello</p>"}, "hello\n"),
+    ({"Text": None, "Html": "<p>a &amp; b<br />c</p>"}, "a & b\nc"),
+    ({"Text": "a\u00a0b", "Html": "<p>a&nbsp;b</p>"}, "a\u00a0b"),
+], ids=["trailing-newline-dropped-in-html", "html-only-escaped", "nbsp"])
+def test_saved_comment_check_accepts_equivalent_parts(rich, text):
+    _check_saved_comment(draft_feedback_out(Feedback=rich), text)
 
 
 def test_csrf_bootstrap_failure_means_nothing_was_sent(feedback_file):
