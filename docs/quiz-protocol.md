@@ -513,7 +513,7 @@ host), up to 5 MB, and only when its bytes are PNG, JPEG, GIF or WebP.
 | Area | Missing workflows / validation |
 | --- | --- |
 | Quiz authoring | Question creation/import/edit, sections/pools, settings updates, special access, grading |
-| Assignments | Learner text submission, group submission, instructor feedback/rubric grading |
+| Assignments | Learner text submission, group submission, feedback scores, publishing, rubric grading, group or attached feedback (draft comments only: [assignment-feedback](assignment-feedback.md)) |
 | Discussions | Create/reply/edit, attachments, moderation |
 | Checklists and surveys | Learner completion/response and instructor authoring |
 | Groups and sections | Membership changes, self-enrollment, group creation |
