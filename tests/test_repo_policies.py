@@ -125,9 +125,14 @@ def _unpinned_actions(workflow: str) -> list[str]:
     return [ref for ref in refs if not ref.startswith("./") and not _FULL_SHA_USES.match(ref)]
 
 
-# Vendor-generated workflows ("DO NOT EDIT") whose installer tracks a major
-# tag. Listed explicitly so any other floating ref, or a new one here, fails.
-_VENDOR_MANAGED_ACTIONS = {"pullfrog.yml": ["pullfrog/pullfrog@v0"]}
+# Explicitly accepted vendor-managed floating refs; all others must use a SHA.
+# Pullfrog tracks a major tag. Droid has no moving major tag, so it tracks
+# Factory's main, which occasionally runs ahead of a release (see issue #88).
+_VENDOR_MANAGED_ACTIONS = {
+    "pullfrog.yml": ["pullfrog/pullfrog@v0"],
+    "droid.yml": ["Factory-AI/droid-action@main"],
+    "droid-review.yml": ["Factory-AI/droid-action@main"],
+}
 
 
 def _read_lock(name: str) -> tuple[dict[str, str], list[str]]:
