@@ -214,12 +214,22 @@ def _feedback(ids: dict[str, int], path: str, replace_draft: bool, yes: bool, dr
 
     from .api import LighthouseClient
     from .assessment_api import AssessmentAPI, AssessmentWriteUnknownError
-    from .assignment_feedback import VISIBILITY, FeedbackRefusedError, preflight, save_draft
+    from .assignment_feedback import (
+        UNVERIFIED,
+        VISIBILITY,
+        FeedbackRefusedError,
+        FeedbackSaveRefusedError,
+        preflight,
+        save_draft,
+    )
 
     client = None
     try:
         client = LighthouseClient(read_only_auth=dry_run)
         api = AssessmentAPI(client, ids["course_id"])
+        if not dry_run:
+            # Bootstrap request protection first so the last read is right before the POST.
+            client.get_csrf_token()
         target = preflight(api, ids["folder_id"], ids["user_id"], replace_draft=replace_draft)
         summary = {**ids, "host": client.cookie_host, "visibility": VISIBILITY,
                    "replaces_draft": target.replaces_draft, "feedback_characters": len(text)}
@@ -229,20 +239,29 @@ def _feedback(ids: dict[str, int], path: str, replace_draft: bool, yes: bool, dr
             return
         replacing = ", replacing the existing draft comment" if target.replaces_draft else ""
         if not yes:
-            if not click.confirm(
-                f"Save DRAFT feedback (not published, not visible to the learner, no score) for user "
-                f"{ids['user_id']} in assignment {ids['folder_id']}, course {ids['course_id']} on "
-                f"{client.cookie_host}{replacing}?", err=True,
-            ):
+            try:
+                confirmed = click.confirm(
+                    f"Save DRAFT feedback (not published, not visible to the learner, no score) for user "
+                    f"{ids['user_id']} in assignment {ids['folder_id']}, course {ids['course_id']} on "
+                    f"{client.cookie_host}{replacing}?", err=True,
+                )
+            except click.Abort:
+                confirmed = False
+            if not confirmed:
                 fail("Feedback cancelled.", json_output, {"cancelled": True})
             # The prompt can take minutes; check again just before the write.
             if preflight(api, ids["folder_id"], ids["user_id"], replace_draft=replace_draft) != target:
                 raise FeedbackRefusedError(
                     "The feedback changed while you were confirming. Nothing was sent; run the command again.")
-        save_draft(api, ids["folder_id"], ids["user_id"], text)
+        try:
+            save_draft(api, ids["folder_id"], ids["user_id"], text)
+        except KeyboardInterrupt:
+            refuse(UNVERIFIED, outcome="unknown")
         emit({**summary, "outcome": "saved-draft", "is_graded": False}, json_output)
     except AssessmentWriteUnknownError as exc:
         refuse(str(exc), outcome="unknown")
+    except FeedbackSaveRefusedError as exc:
+        refuse(str(exc), outcome="refused")
     except FeedbackRefusedError as exc:
         refuse(str(exc))
     except Exception as exc:

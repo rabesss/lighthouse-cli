@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from click.testing import CliRunner
 from lighthouse_cli.api import LighthouseClient
 from lighthouse_cli.assessment_api import AssessmentAPI
 from lighthouse_cli.assignment_feedback import (
+    _FEEDBACK_KEYS,
     MAX_FEEDBACK_CHARS,
     FeedbackInputError,
     FeedbackRefusedError,
@@ -42,6 +44,8 @@ COOKIE = "synthetic-cookie-NEVER_PRINT"
 ROOT = "https://lighthouse.manipal.edu/d2l/api/le/1.93"
 SUBMISSIONS_URL = f"{ROOT}/{COURSE}/dropbox/folders/{FOLDER}/submissions/user/{USER}"
 FEEDBACK_URL = f"{ROOT}/{COURSE}/dropbox/folders/{FOLDER}/feedback/user/{USER}"
+FOLDER_URL = f"{ROOT}/{COURSE}/dropbox/folders/{FOLDER}"
+INDIVIDUAL_FOLDER = {"Id": FOLDER, "Name": "Synthetic assignment", "GroupTypeId": None}
 WHOAMI_URL = "https://lighthouse.manipal.edu/d2l/api/lp/1.47/users/whoami"
 
 ENTITY_NO_FEEDBACK: dict[str, Any] = {
@@ -87,6 +91,7 @@ class FakeLMS:
 
     def __init__(self, routes: dict[tuple[str, str], list[Any]]) -> None:
         self.routes = {key: list(value) for key, value in routes.items()}
+        self.routes.setdefault(("GET", FOLDER_URL), [lambda: response(200, INDIVIDUAL_FOLDER)])
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
     def __call__(self, method: str, url: str, **kwargs: Any) -> requests.Response:
@@ -238,6 +243,10 @@ def test_there_is_no_score_or_publish_option(feedback_file):
 # -- preflight -----------------------------------------------------------------
 
 
+def test_preflight_accepts_the_status_as_a_digit_string():
+    assert check_feedback_target([entity_with(None, Status="1")], USER, replace_draft=False).replaces_draft is False
+
+
 def test_preflight_accepts_a_single_object_or_a_one_item_list():
     assert check_feedback_target(ENTITY_NO_FEEDBACK, USER, replace_draft=False).replaces_draft is False
     assert check_feedback_target([ENTITY_NO_FEEDBACK], USER, replace_draft=False).replaces_draft is False
@@ -270,7 +279,6 @@ REFUSALS: dict[str, Any] = {
     "no-submissions": [entity_with(Submissions=[])],
     "submissions-not-list": [entity_with(Submissions="1")],
     "published-status": [entity_with(draft_feedback_out(), Status=3)],
-    "string-status": [entity_with(None, Status="1")],
     "published-name-status": [entity_with(None, Status="Published")],
     "bool-status": [entity_with(None, Status=True)],
     "missing-status": [{k: v for k, v in ENTITY_NO_FEEDBACK.items() if k != "Status"}],
@@ -291,6 +299,10 @@ REFUSALS: dict[str, Any] = {
     "rich-text-not-dict": [entity_with(draft_feedback_out(Feedback="text"))],
     "text-not-str": [entity_with(draft_feedback_out(Feedback={"Text": 5, "Html": ""}))],
     "html-not-str": [entity_with(draft_feedback_out(Feedback={"Text": "", "Html": ["x"]}))],
+    "empty-feedback-object": [entity_with({})],
+    **{f"feedback-missing-{key}": [entity_with({k: v for k, v in draft_feedback_out("").items() if k != key})]
+       for key in _FEEDBACK_KEYS},
+    "rubric-null": [entity_with(draft_feedback_out("", RubricAssessments=None))],
     "not-json-object": ["text"],
     "scalar": 5,
 }
@@ -309,7 +321,7 @@ def test_cli_preflight_refusal_sends_no_write(feedback_file, case):
     assert result.exit_code == 1
     document = json.loads(result.stdout)
     assert document["data"] is None and document["error"]
-    assert [(m, u) for m, u, _k in fake.calls] == [("GET", SUBMISSIONS_URL)]
+    assert [(m, u) for m, u, _k in fake.calls] == [("GET", FOLDER_URL), ("GET", SUBMISSIONS_URL)]
     assert_no_leak(result)
 
 
@@ -322,6 +334,30 @@ def test_cli_preflight_permission_or_identity_errors_send_no_write(feedback_file
     assert phrase in json.loads(result.stdout)["error"]
     assert fake.methods("POST") == []
     assert_no_leak(result)
+
+
+@pytest.mark.parametrize("folder", [
+    lambda: response(200, {**INDIVIDUAL_FOLDER, "GroupTypeId": 77}),
+    lambda: response(200, ["not", "a", "folder"]),
+    lambda: response(403, {}),
+    lambda: response(404, {}),
+], ids=["group-folder", "not-object", "403", "404"])
+def test_folder_preflight_refuses_group_or_unreadable_assignments(feedback_file, folder):
+    fake = FakeLMS({("GET", FOLDER_URL): [folder], ("GET", WHOAMI_URL): [lambda: response(200, {"Identifier": "1"})]})
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 1
+    assert "Nothing was sent" in json.loads(result.stdout)["error"]
+    assert ("GET", SUBMISSIONS_URL) not in [(m, u) for m, u, _k in fake.calls]
+    assert fake.methods("POST") == []
+
+
+def test_group_folder_with_a_user_shaped_record_is_still_refused(feedback_file):
+    fake = FakeLMS({("GET", FOLDER_URL): [lambda: response(200, {**INDIVIDUAL_FOLDER, "GroupTypeId": 77})],
+                    ("GET", SUBMISSIONS_URL): [lambda: response(200, [ENTITY_NO_FEEDBACK])]})
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 1
+    assert "group assignment" in json.loads(result.stdout)["error"]
+    assert fake.methods("POST") == []
 
 
 # -- dry run and confirmation --------------------------------------------------
@@ -340,7 +376,7 @@ def test_dry_run_reads_with_read_only_auth_and_never_writes(feedback_file):
         "visibility": "draft: not published, not visible to the learner, no score",
         "replaces_draft": False, "feedback_characters": len(TEXT),
     }
-    assert [method for method, _u, _k in fake.calls] == ["GET"]
+    assert [(m, u) for m, u, _k in fake.calls] == [("GET", FOLDER_URL), ("GET", SUBMISSIONS_URL)]
     assert_no_leak(result)
 
 
@@ -382,8 +418,8 @@ def test_confirmed_save_checks_the_target_again_just_before_the_post(feedback_fi
         result = invoke(fake, "--file", str(feedback_file), "--json")
     assert result.exit_code == 0, result.output
     assert [(m, u) for m, u, _k in fake.calls] == [
-        ("GET", SUBMISSIONS_URL), ("GET", SUBMISSIONS_URL), ("POST", FEEDBACK_URL),
-        ("GET", FEEDBACK_URL), ("GET", SUBMISSIONS_URL),
+        ("GET", FOLDER_URL), ("GET", SUBMISSIONS_URL), ("GET", FOLDER_URL), ("GET", SUBMISSIONS_URL),
+        ("POST", FEEDBACK_URL), ("GET", FEEDBACK_URL), ("GET", SUBMISSIONS_URL),
     ]
 
 
@@ -400,6 +436,30 @@ def test_target_changed_during_confirmation_sends_nothing(feedback_file, later):
     assert "Nothing was sent" in json.loads(result.stdout)["error"]
     assert fake.methods("POST") == []
     assert_no_leak(result)
+
+
+def test_replace_draft_refuses_if_the_draft_text_changes_during_confirmation(feedback_file):
+    first = [entity_with(draft_feedback_out("Older synthetic draft"), Status=2)]
+    later = [entity_with(draft_feedback_out("Another assessor's newer synthetic draft"), Status=2)]
+    fake = FakeLMS({("GET", SUBMISSIONS_URL): [lambda: response(200, first), lambda: response(200, later)]})
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), patch("click.confirm", return_value=True):
+        result = invoke(fake, "--file", str(feedback_file), "--replace-draft", "--json")
+    assert result.exit_code == 1
+    assert "changed while you were confirming" in json.loads(result.stdout)["error"]
+    assert fake.methods("POST") == []
+    assert "Another assessor" not in result.stdout + result.stderr
+
+
+def test_ctrl_c_at_the_prompt_is_a_cancel(feedback_file):
+    import click
+
+    fake = FakeLMS({("GET", SUBMISSIONS_URL): [lambda: response(200, [ENTITY_NO_FEEDBACK])]})
+    with patch("lighthouse_cli.assessment_commands._interactive", return_value=True), \
+            patch("click.confirm", side_effect=click.Abort()):
+        result = invoke(fake, "--file", str(feedback_file), "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"cancelled": True}
+    assert fake.methods("POST") == []
 
 
 def test_replace_draft_refuses_if_the_draft_changes_during_confirmation(feedback_file):
@@ -440,7 +500,8 @@ def test_save_posts_once_then_verifies_draft_through_readback(feedback_file):
     assert kwargs["json"] == feedback_payload(TEXT)
     assert kwargs["headers"]["X-Csrf-Token"] == CSRF
     assert [(m, u) for m, u, _k in fake.calls] == [
-        ("GET", SUBMISSIONS_URL), ("POST", FEEDBACK_URL), ("GET", FEEDBACK_URL), ("GET", SUBMISSIONS_URL),
+        ("GET", FOLDER_URL), ("GET", SUBMISSIONS_URL), ("POST", FEEDBACK_URL), ("GET", FEEDBACK_URL),
+        ("GET", SUBMISSIONS_URL),
     ]
     assert_no_leak(result)
 
@@ -487,19 +548,49 @@ def test_ambiguous_post_status_is_unknown_and_not_retried(feedback_file, post):
     assert result.exit_code == 1
     assert json.loads(result.stdout)["outcome"] == "unknown"
     assert len(fake.methods("POST")) == 1
-    assert [(m, u) for m, u, _k in fake.calls] == [("GET", SUBMISSIONS_URL), ("POST", FEEDBACK_URL)]
+    assert [(m, u) for m, u, _k in fake.calls] == [("GET", FOLDER_URL), ("GET", SUBMISSIONS_URL), ("POST", FEEDBACK_URL)]
 
 
-@pytest.mark.parametrize("status", [403, 404])
+@pytest.mark.parametrize("status", [400, 403, 404])
 def test_documented_post_refusal_is_reported_as_refused_not_saved(feedback_file, status):
     fake = FakeLMS(happy_routes(post_feedback=[lambda: response(status, {"Detail": "NEVER_PRINT"})]))
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
     assert result.exit_code == 1
     document = json.loads(result.stdout)
     assert f"HTTP {status}" in document["error"]
-    assert document.get("outcome") != "saved-draft"
+    assert document["outcome"] == "refused"
     assert len(fake.methods("POST")) == 1
     assert_no_leak(result)
+
+
+@pytest.mark.parametrize("status", [405, 408, 409, 412, 422])
+def test_undocumented_post_status_is_unknown_not_a_refusal(feedback_file, status):
+    fake = FakeLMS(happy_routes(post_feedback=[lambda: response(status, {"Detail": "NEVER_PRINT"})]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["outcome"] == "unknown"
+    assert len(fake.methods("POST")) == 1
+    assert_no_leak(result)
+
+
+def test_interrupt_during_the_save_reports_unknown(feedback_file):
+    fake = FakeLMS(happy_routes(post_feedback=[KeyboardInterrupt()]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["outcome"] == "unknown"
+    assert len(fake.methods("POST")) == 1
+
+
+@pytest.mark.parametrize("readback", [
+    lambda: response(200, draft_feedback_out(IsGraded=True)),
+    lambda: response(200, draft_feedback_out(Score=4)),
+], ids=["graded", "scored"])
+def test_readback_showing_published_or_graded_says_so(feedback_file, readback):
+    fake = FakeLMS(happy_routes(get_feedback=[readback]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    document = json.loads(result.stdout)
+    assert document["outcome"] == "unknown"
+    assert "published or graded" in document["error"] and "do not retry" in document["error"]
 
 
 BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
@@ -508,6 +599,12 @@ BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
     "text-mismatch": {"get_feedback": [lambda: response(200, draft_feedback_out("Different synthetic text"))]},
     "score-present": {"get_feedback": [lambda: response(200, draft_feedback_out(Score=3))]},
     "symbol-present": {"get_feedback": [lambda: response(200, draft_feedback_out(GradedSymbol="A"))]},
+    "rubric-added": {"get_feedback": [lambda: response(200, draft_feedback_out(RubricAssessments=[{"RubricId": 1}]))]},
+    "file-added": {"get_feedback": [lambda: response(200, draft_feedback_out(Files=[{"FileId": 1}]))]},
+    "readback-incomplete": {"get_feedback": [lambda: response(200, {k: v for k, v in draft_feedback_out().items() if k != "Files"})]},
+    "entity-feedback-file": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]),
+        lambda: response(200, [entity_with(draft_feedback_out(Files=[{"FileId": 1}]), Status=2)])]},
     "rich-text-missing": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback=None))]},
     "html-only-mismatch": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback={"Html": "<p>other</p>"}))]},
     "not-object": {"get_feedback": [lambda: response(200, ["x"])]},
@@ -539,6 +636,19 @@ def test_unverified_readback_is_unknown_never_success(feedback_file, changes):
     assert "saved-draft" not in result.stdout
     assert len(fake.methods("POST")) == 1
     assert_no_leak(result)
+
+
+def test_fifo_path_is_refused_without_hanging(tmp_path):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    with pytest.raises(FeedbackInputError, match="Could not read"):
+        read_feedback_file(str(fifo))
+
+
+def test_lone_carriage_returns_are_normalized(tmp_path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"one\rtwo\r\nthree")
+    assert read_feedback_file(str(path)) == "one\ntwo\nthree"
 
 
 def test_readback_tolerates_crlf_newlines_from_the_server(feedback_file):

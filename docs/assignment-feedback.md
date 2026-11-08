@@ -12,20 +12,23 @@ LE 1.93) and the RichText definition in `basic/conventions.html`:
 
 | Step | Request | Checked |
 | --- | --- | --- |
-| Preflight | `GET .../dropbox/folders/{folder}/submissions/user/{user}` (EntityDropbox, 1.88+) | Exactly one block for this user (`EntityType` User, integer `EntityId`); at least one submission; `Status` an integer 1 (Submitted) or 2 (Draft), never 3 (Published), 0 or unknown; existing feedback `IsGraded` exactly `false`, no `Score`, `GradedSymbol`, rubric assessments, files or links; existing draft text only with `--replace-draft` |
-| Re-check | The same GET, after an interactive confirmation | The result must match the first preflight; otherwise nothing is sent |
-| Save | `POST .../feedback/user/{user}`, one attempt, CSRF header | Body `{"Score": null, "Feedback": {"Text": ..., "Html": ...}, "RubricAssessments": [], "IsGraded": false, "GradedSymbol": null}`. The reference marks `Feedback` as RichText. The response body is undocumented and ignored |
-| Readback 1 | `GET .../feedback/user/{user}` (DropboxFeedbackOut) | `IsGraded` `false`, no score or symbol, and `Text` equal to the comment (or `Html` equal to what was sent) |
-| Readback 2 | `GET .../submissions/user/{user}` | Same user block, `Status` 2 (Draft), `Feedback.IsGraded` `false` |
+| Folder | `GET .../dropbox/folders/{folder}` | `GroupTypeId` absent or null (an individual-submission folder) |
+| Preflight | `GET .../dropbox/folders/{folder}/submissions/user/{user}` (EntityDropbox, 1.88+) | Exactly one block for this user (`EntityType` User, integer `EntityId`); at least one submission; `Status` 1 (Submitted) or 2 (Draft) as an integer or digit string, never 3 (Published), 0 or unknown; existing feedback must be a complete DropboxFeedbackOut with `IsGraded` exactly `false`, no `Score` or `GradedSymbol`, and empty rubric assessments, files and links; existing draft text only with `--replace-draft` |
+| Re-check | Both reads again, after an interactive confirmation | A digest of the record's status and existing feedback must match the first preflight; otherwise nothing is sent |
+| Save | `POST .../feedback/user/{user}`, one attempt, CSRF header fetched before the preflight | Body `{"Score": null, "Feedback": {"Text": ..., "Html": ...}, "RubricAssessments": [], "IsGraded": false, "GradedSymbol": null}`. The reference marks `Feedback` as RichText. The response body is undocumented and ignored |
+| Readback 1 | `GET .../feedback/user/{user}` (DropboxFeedbackOut) | The same draft-only checks as the preflight, and `Text` equal to the comment (or `Html` equal to what was sent) |
+| Readback 2 | `GET .../submissions/user/{user}` | Same user block, `Status` 2 (Draft), and its `Feedback` passes the same draft-only checks |
 
 `IsGraded: false` is the documented draft state ("If true, the feedback is in
 a graded state; otherwise, it's still in draft state"), and the learner's own
 `mysubmissions` read includes feedback only once it is published.
 
-A network error, expired session, HTTP 429, 5xx or redirect after the POST was
-sent, or any readback that does not match, gives `"outcome": "unknown"` with
-exit 1. The command never retries. Check the submission in Brightspace before
-running it again. A 403 or 404 on the POST is a refusal.
+A network error, expired session, redirect, interrupt, or any HTTP status other
+than 400, 403 and 404 after the POST was sent, or any readback that does not
+match, gives `"outcome": "unknown"` with exit 1. If the readback shows the
+feedback as published or graded, the message says so. The command never
+retries. Check the submission in Brightspace before running it again. A 400,
+403 or 404 on the POST gives `"outcome": "refused"`.
 
 D2L has no conditional write. Another assessor could still publish or grade in
 the short gap between the last preflight read and the POST.
@@ -36,8 +39,10 @@ This was not run against the real LMS. Before relying on the command, with a
 synthetic course, assignment and test learner that you own:
 
 1. Run `--dry-run --json` on a submission with no feedback. Note what the
-   submission record's `Feedback` and `Status` look like (null or an empty
-   object; 1 or something else).
+   submission record's `Feedback` and `Status` look like (null, `{}` or a
+   partial object; 1, `"1"` or something else). The command refuses `{}`, a
+   partial feedback object and unknown statuses, which would make it unusable
+   if Brightspace returns those for a fresh submission.
 2. Save a draft. In the instructor UI, confirm the feedback shows as a draft
    with the comment text intact, including line breaks and characters such as
    `<`, `&` and quotes.
