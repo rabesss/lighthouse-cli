@@ -740,10 +740,9 @@ def test_saved_comment_check_rejects_any_difference(rich, text):
 
 
 @pytest.mark.parametrize("rich,text", [
-    ({"Text": "hello\n", "Html": "<p>hello</p>"}, "hello\n"),
     ({"Text": None, "Html": "<p>a &amp; b<br />c</p>"}, "a & b\nc"),
     ({"Text": "a\u00a0b", "Html": "<p>a&nbsp;b</p>"}, "a\u00a0b"),
-], ids=["trailing-newline-dropped-in-html", "html-only-escaped", "nbsp"])
+], ids=["html-only-escaped", "nbsp"])
 def test_saved_comment_check_accepts_equivalent_parts(rich, text):
     _check_saved_comment(draft_feedback_out(Feedback=rich), text)
 
@@ -781,6 +780,27 @@ _REJECTED_HTML = {
     "entity-after": ("<p>hello</p>&nbsp;", "hello"),
     "raw-newline-inside": ("<p>x\ny</p>", "x\ny"),
     "two-newlines-after-br": ("<p>x<br>\n\ny</p>", "x\ny"),
+    "trailing-break-dropped": ("<p>hello</p>", "hello\n"),
+    "extra-outer-breaks": ("<p><br>hello<br><br></p>", "hello"),
+    "extra-leading-break": ("<p><br>hello</p>", "hello"),
+    "invalid-charref": ("<p>he&#1;llo</p>", "hello"),
+    "c1-charref": ("<p>he&#x80;llo</p>", "he\x80llo"),
+    "zero-charref": ("<p>he&#0;llo</p>", "hello"),
+    "huge-charref": ("<p>he&#x110000;llo</p>", "hello"),
+    "surrogate-charref": ("<p>he&#xD800;llo</p>", "hello"),
+    "newline-charref": ("<p>a&#10;b</p>", "a\nb"),
+    "unterminated-charref": ("<p>&#38 x</p>", "& x"),
+    "unknown-entity": ("<p>a&bogus;b</p>", "ab"),
+    "unterminated-entity": ("<p>a&amp b</p>", "a& b"),
+    "end-tag-attribute": ("<p>hello</p hidden=x>", "hello"),
+    "end-tag-junk": ("<p>hello</p foo>", "hello"),
+    "end-tag-slash": ("<p>hello</p/>", "hello"),
+    "empty-end-tag": ("<p>he</>llo</p>", "hello"),
+    "empty-end-tag-after": ("<p>hello</p></>", "hello"),
+    "slash-attribute-p": ("<p/hidden>hello</p>", "hello"),
+    "slash-junk-br": ("<p>a<br/x>b</p>", "a\nb"),
+    "marked-section": ("<p>x<![ x</p>", "x"),
+    "vertical-tab-in-tag": ("<p\x0b>hello</p>", "hello"),
 }
 
 
@@ -802,7 +822,8 @@ _ACCEPTED_HTML = {
                          "&&& \"\"\" ''' >>> <3"),
     "raw-lt-text": ("<p>x < y <3</p>", "x < y <3"),
     "nbsp": ("<p>a&nbsp;b&#160;c</p>", "a b c"),
-    "trailing-break-dropped": ("<p>hello</p>", "hello\n"),
+    "bare-ampersand": ("<p>a & b &; x&</p>", "a & b &; x&"),
+    "outer-breaks-kept": ("<p><br>hello<br></p>", "\nhello\n"),
 }
 
 

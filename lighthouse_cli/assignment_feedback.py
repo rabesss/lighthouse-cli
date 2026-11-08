@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import html.entities
 import json
 import os
 import stat
@@ -89,37 +90,51 @@ def _html(text: str) -> str:
     return "<p>" + html.escape(text, quote=True).replace("\n", "<br />") + "</p>"
 
 
-# ASCII whitespace, the only markup-level whitespace allowed outside the paragraph.
-_HTML_SPACE = " \t\n\r\f"
+# ASCII whitespace after line-ending normalization.
+_HTML_SPACE = " \t\n\f"
 
 
 class _RejectedMarkupError(Exception):
     """The readback Html is not the structure the command sent."""
 
 
-class _CommentMarkup(HTMLParser):
-    """Line segments of exactly one attribute-free ``<p>`` holding only text and ``<br>``.
+def _bare_tag(raw: str, prefix: str, name: str, *, slash: bool = False) -> bool:
+    """``raw`` is ``<name>``/``</name>`` with only whitespace (and, for ``<br/>``, one slash) before ``>``."""
+    head = prefix + name
+    if raw[:len(head)].lower() != head or not raw.endswith(">"):
+        return False
+    rest = raw[len(head):-1].strip(_HTML_SPACE)
+    return rest == "" or (slash and rest == "/")
 
-    Entity spelling is normalized by the parser; tag case and ``<br>``,
-    ``<br/>`` or ``<br />`` are the same tokens. Every other tag, attribute,
-    comment, declaration, processing instruction or second paragraph raises
-    :class:`_RejectedMarkupError`.
+
+class _CommentMarkup(HTMLParser):
+    """Raw token spans of markup that may be one attribute-free ``<p>`` holding only ``<br>``.
+
+    The parser finds the tokens; the raw text of every tag is then checked
+    exactly, and the text between tags is sliced from the source, so a token
+    the parser drops or rewrites cannot slip through. Comments, declarations,
+    processing instructions and any other tag raise :class:`_RejectedMarkupError`.
     """
 
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.state = "before"  # before -> inside -> after
-        self.segments = [""]
+    def __init__(self, markup: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.markup = markup
+        self._line_starts = [0] + [index + 1 for index, char in enumerate(markup) if char == "\n"]
+        self.tags: list[tuple[str, int, int]] = []  # (token, start, end)
+
+    def _add(self, token: str, raw: str) -> None:
+        line, offset = self.getpos()
+        start = self._line_starts[line - 1] + offset
+        end = start + len(raw)
+        if self.markup[start:end] != raw or (self.tags and start < self.tags[-1][2]):
+            raise _RejectedMarkupError
+        self.tags.append((token, start, end))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if attrs:
+        raw = self.get_starttag_text() or ""
+        if attrs or tag not in ("p", "br") or not _bare_tag(raw, "<", tag, slash=tag == "br"):
             raise _RejectedMarkupError
-        if tag == "p" and self.state == "before":
-            self.state = "inside"
-        elif tag == "br" and self.state == "inside":
-            self.segments.append("")
-        else:
-            raise _RejectedMarkupError
+        self._add(tag, raw)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "br":
@@ -127,15 +142,12 @@ class _CommentMarkup(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag != "p" or self.state != "inside":
+        line, offset = self.getpos()
+        start = self._line_starts[line - 1] + offset
+        raw = self.markup[start:self.markup.find(">", start) + 1]
+        if tag != "p" or not _bare_tag(raw, "</", tag):
             raise _RejectedMarkupError
-        self.state = "after"
-
-    def handle_data(self, data: str) -> None:
-        if self.state == "inside":
-            self.segments[-1] += data
-        elif data.strip(_HTML_SPACE):
-            raise _RejectedMarkupError
+        self._add("/p", raw)
 
     def handle_comment(self, data: str) -> None:
         raise _RejectedMarkupError
@@ -150,8 +162,56 @@ class _CommentMarkup(HTMLParser):
         raise _RejectedMarkupError
 
 
+def _character(reference: str) -> str | None:
+    """The character a complete ``&...;`` reference renders as, or ``None`` if it is not a plain, valid one."""
+    body = reference[1:-1]
+    if not body.startswith("#"):
+        return html.entities.html5.get(body + ";")
+    digits, base = (body[2:], 16) if body[1:2] in ("x", "X") else (body[1:], 10)
+    allowed = "0123456789abcdefABCDEF" if base == 16 else "0123456789"
+    if not 0 < len(digits) <= 8 or any(char not in allowed for char in digits):
+        return None
+    number = int(digits, base)
+    if number == 9 or 0x20 <= number < 0x7F or (
+        0xA0 <= number <= 0x10FFFF and not 0xD800 <= number <= 0xDFFF
+        and not 0xFDD0 <= number <= 0xFDEF and number & 0xFFFE != 0xFFFE
+    ):
+        return chr(number)
+    return None
+
+
+def _decode_text(raw: str) -> str | None:
+    """Text content of raw paragraph text, or ``None`` for markup or an unclear reference.
+
+    A ``<`` that would open a tag, comment or declaration is refused; a ``<``
+    or ``&`` that browsers show as-is stays literal. A reference must be
+    complete (with ``;``) and name a valid, printable character.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(raw):
+        char, following = raw[index], raw[index + 1:index + 2]
+        if char == "<" and (following == "" or (following.isascii() and (following.isalpha() or following in "/!?"))):
+            return None
+        if char != "&" or not (following == "#" or (following.isascii() and following.isalnum())):
+            out.append(char)
+            index += 1
+            continue
+        end = index + 1
+        while end < len(raw) and raw[end].isascii() and (raw[end].isalnum() or (raw[end] == "#" and end == index + 1)):
+            end += 1
+        if raw[end:end + 1] != ";":
+            return None
+        value = _character(raw[index:end + 1])
+        if value is None:
+            return None
+        out.append(value)
+        index = end + 1
+    return "".join(out)
+
+
 def _comparable(text: str) -> str:
-    return text.replace("\xa0", " ").strip("\n")
+    return text.replace("\xa0", " ")
 
 
 def _html_text(markup: str) -> str | None:
@@ -160,25 +220,28 @@ def _html_text(markup: str) -> str | None:
     Allowed reformatting: whitespace outside the paragraph, one line break
     directly after ``<p>``/``<br>`` or before ``<br>``/``</p>``, entity
     spelling, tag case and ``<br>`` vs ``<br/>``. Any other raw line break is
-    rejected because it renders as a space, not a line break.
+    rejected because it renders as a space, not a line break. Line breaks are
+    compared exactly, leading and trailing ones included.
     """
-    parser = _CommentMarkup()
+    markup = _normalize(markup)
+    parser = _CommentMarkup(markup)
     try:
-        parser.feed(_normalize(markup))
-        # Anything the parser holds back (an unfinished tag or comment) is not the sent structure.
-        if parser.rawdata.strip(_HTML_SPACE):
-            return None
+        parser.feed(markup)
         parser.close()
-    except _RejectedMarkupError:
+    except Exception:  # any parser failure means "not the sent structure"
         return None
-    if parser.state != "after":
+    tokens = [token for token, _, _ in parser.tags]
+    if len(tokens) < 2 or tokens[0] != "p" or tokens[-1] != "/p" or any(t != "br" for t in tokens[1:-1]):
+        return None
+    if markup[:parser.tags[0][1]].strip(_HTML_SPACE) or markup[parser.tags[-1][2]:].strip(_HTML_SPACE):
         return None
     lines = []
-    for segment in parser.segments:
-        segment = segment.removeprefix("\n").removesuffix("\n")
-        if "\n" in segment:
+    for (_, _, start), (_, end, _) in zip(parser.tags, parser.tags[1:], strict=False):
+        segment = markup[start:end].removeprefix("\n").removesuffix("\n")
+        text = None if "\n" in segment else _decode_text(segment)
+        if text is None or "\n" in text or "\r" in text:
             return None
-        lines.append(segment)
+        lines.append(text)
     return _comparable("\n".join(lines))
 
 
