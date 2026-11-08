@@ -14,7 +14,7 @@ repos:
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Keep in sync with ruff in requirements-dev.txt (tests/test_repo_policies.py checks it)
-    rev: v0.16.9
+    rev: v0.17.2
     hooks:
       - id: ruff
         args: [--fix]
