@@ -47,8 +47,10 @@ _REFUSED_STATUSES = (400, 403, 404)
 VISIBILITY = "draft: not published, not visible to the learner, no score"
 UNVERIFIED = ("Feedback outcome unknown: it may have been saved, but it could not be verified as a draft. "
                "Inspect it in Brightspace before retrying.")
-_APPEARS_PUBLISHED = ("Feedback outcome unknown: the readback shows this feedback as published or graded, "
+_APPEARS_PUBLISHED = ("Feedback outcome unknown: the readback shows this feedback as published, graded or scored, "
                       "so the learner may see it. Check it in Brightspace now; do not retry.")
+# The only documented success status of the feedback POST.
+_SAVED_STATUS = 200
 
 
 class FeedbackInputError(ValueError):
@@ -209,7 +211,9 @@ def _fingerprint(block: dict[str, Any]) -> str:
 
 
 def _existing_comment(block: dict[str, Any]) -> str:
-    feedback = block.get("Feedback")
+    if "Feedback" not in block:
+        raise _UnexpectedError("The submission record is incomplete.")
+    feedback = block["Feedback"]
     if feedback is None:
         if _status(block) == _DRAFT:
             raise _UnexpectedError("The submission is marked as having draft feedback, but none was returned.")
@@ -267,27 +271,37 @@ def preflight(api: AssessmentAPI, folder_id: int, user_id: int, *, replace_draft
     return check_feedback_target(_preflight_read(api, submissions_route), user_id, replace_draft=replace_draft)
 
 
-def _verify_saved(api: AssessmentAPI, folder_id: int, user_id: int, text: str) -> None:
-    submissions_route, feedback_route = _routes(api, folder_id, user_id)
-    feedback = _check_draft_only(api.client.get_json(feedback_route))
-    saved_text, saved_html = _rich_text(feedback)
+def _check_saved_comment(feedback: Any, text: str) -> None:
+    """A draft-only DropboxFeedbackOut whose comment is ``text``."""
+    saved_text, saved_html = _rich_text(_check_draft_only(feedback))
     if _normalize(saved_text) != text and saved_html != _html(text):
         raise _UnexpectedError()
+
+
+def _verify_saved(api: AssessmentAPI, folder_id: int, user_id: int, text: str) -> None:
+    submissions_route, feedback_route = _routes(api, folder_id, user_id)
+    _check_saved_comment(api.client.get_json(feedback_route), text)
     block = _user_entity(api.client.get_json(submissions_route), user_id)
     if _status(block) != _DRAFT:
         raise _UnexpectedError()
-    _check_draft_only(block.get("Feedback"))
+    _check_saved_comment(block.get("Feedback"), text)
 
 
 def _send(api: AssessmentAPI, route: str, payload: dict[str, Any]) -> None:
     try:
-        _close_response(api.send_once("POST", route, payload))
+        response = api.send_once("POST", route, payload)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else None
         if status in _REFUSED_STATUSES:
             raise FeedbackSaveRefusedError(
                 f"Brightspace refused the save (HTTP {status}); the feedback was not saved.") from None
         raise AssessmentWriteUnknownError(UNVERIFIED) from None
+    try:
+        # A 3xx or other 2xx the transport passed through is not the documented success.
+        if response.status_code != _SAVED_STATUS:
+            raise AssessmentWriteUnknownError(UNVERIFIED)
+    finally:
+        _close_response(response)
 
 
 def save_draft(api: AssessmentAPI, folder_id: int, user_id: int, text: str) -> None:

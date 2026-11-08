@@ -303,6 +303,7 @@ REFUSALS: dict[str, Any] = {
     **{f"feedback-missing-{key}": [entity_with({k: v for k, v in draft_feedback_out("").items() if k != key})]
        for key in _FEEDBACK_KEYS},
     "rubric-null": [entity_with(draft_feedback_out("", RubricAssessments=None))],
+    "feedback-key-absent": [{k: v for k, v in ENTITY_NO_FEEDBACK.items() if k != "Feedback"}],
     "not-json-object": ["text"],
     "scalar": 5,
 }
@@ -573,6 +574,18 @@ def test_undocumented_post_status_is_unknown_not_a_refusal(feedback_file, status
     assert_no_leak(result)
 
 
+@pytest.mark.parametrize("status", [201, 202, 204, 300, 304])
+def test_post_status_other_than_documented_200_is_unknown(feedback_file, status):
+    fake = FakeLMS(happy_routes(post_feedback=[lambda: response(status, None)]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 1
+    document = json.loads(result.stdout)
+    assert document["outcome"] == "unknown"
+    assert "saved-draft" not in result.stdout
+    assert len(fake.methods("POST")) == 1
+    assert [m for m, _u, _k in fake.calls].count("GET") == 2
+
+
 def test_interrupt_during_the_save_reports_unknown(feedback_file):
     fake = FakeLMS(happy_routes(post_feedback=[KeyboardInterrupt()]))
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
@@ -590,7 +603,7 @@ def test_readback_showing_published_or_graded_says_so(feedback_file, readback):
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
     document = json.loads(result.stdout)
     assert document["outcome"] == "unknown"
-    assert "published or graded" in document["error"] and "do not retry" in document["error"]
+    assert "published, graded or scored" in document["error"] and "do not retry" in document["error"]
 
 
 BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
@@ -620,6 +633,12 @@ BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
         lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [entity_with(draft_feedback_out(), Status=1)])]},
     "entity-feedback-missing": {"get_submissions": [
         lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [entity_with(None, Status=2)])]},
+    "entity-text-mismatch": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]),
+        lambda: response(200, [entity_with(draft_feedback_out("Different synthetic text"), Status=2)])]},
+    "entity-feedback-key-absent": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]),
+        lambda: response(200, [{**{k: v for k, v in ENTITY_NO_FEEDBACK.items() if k != "Feedback"}, "Status": 2}])]},
     "entity-gone": {"get_submissions": [lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(200, [])]},
     "submissions-read-500": {"get_submissions": [lambda: response(200, [ENTITY_NO_FEEDBACK]), lambda: response(500, {})]},
 }
