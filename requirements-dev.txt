@@ -6,13 +6,13 @@ backports-tarfile==1.2.0
     # via jaraco-context
 beautifulsoup4==4.15.0
     # via lighthouse-cli (pyproject.toml)
-certifi==2026.7.22
+certifi==2026.10.23
     # via requests
 cffi==2.1.1
     # via cryptography
 cfgv==3.5.0
     # via pre-commit
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
     # via requests
 click==8.5.0
     # via
@@ -23,7 +23,7 @@ colorama==0.4.6
     # via radon
 coverage==7.16.1
     # via pytest-cov
-cryptography==50.0.1
+cryptography==50.0.2
     # via
     #   lighthouse-cli (pyproject.toml)
     #   secretstorage
@@ -102,7 +102,7 @@ pluggy==1.6.0
     #   pytest-cov
 pre-commit==4.6.2
     # via lighthouse-cli (pyproject.toml)
-pycparser==3.0
+pycparser==3.11
     # via cffi
 pyee==13.0.1
     # via playwright
