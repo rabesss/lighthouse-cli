@@ -31,6 +31,9 @@ from lighthouse_cli.assignment_feedback import (
     FeedbackInputError,
     FeedbackRefusedError,
     _check_saved_comment,
+    _comparable,
+    _html,
+    _html_text,
     _UnexpectedError,
     check_feedback_target,
     feedback_payload,
@@ -712,9 +715,9 @@ def test_readback_accepts_the_html_part_alone_when_it_matches_what_was_sent(feed
 
 @pytest.mark.parametrize("markup", [
     "<p>Synthetic draft note: revisit the second proof.<br>Line two.</p>",
-    "<p>Synthetic draft note: revisit the second proof.</p>\n<p>Line two.</p>",
-    '<p style="x">Synthetic draft note:&nbsp;revisit the second proof.<BR/>Line two.</p>',
-], ids=["br", "paragraphs", "attributes-nbsp"])
+    "<P>Synthetic draft note:&nbsp;revisit the second proof.<BR/>Line two.</P>",
+    "\n  <p>\nSynthetic draft note: revisit the second proof.<br />\nLine two.\n</p>\n",
+], ids=["br", "case-nbsp", "pretty-printed"])
 def test_readback_accepts_html_reformatted_with_the_same_text(feedback_file, markup):
     fake = FakeLMS(happy_routes(get_feedback=[lambda: response(200, draft_feedback_out(Feedback={"Text": TEXT, "Html": markup}))]))
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
@@ -737,12 +740,115 @@ def test_saved_comment_check_rejects_any_difference(rich, text):
 
 
 @pytest.mark.parametrize("rich,text", [
-    ({"Text": "hello\n", "Html": "<p>hello</p>"}, "hello\n"),
     ({"Text": None, "Html": "<p>a &amp; b<br />c</p>"}, "a & b\nc"),
     ({"Text": "a\u00a0b", "Html": "<p>a&nbsp;b</p>"}, "a\u00a0b"),
-], ids=["trailing-newline-dropped-in-html", "html-only-escaped", "nbsp"])
+], ids=["html-only-escaped", "nbsp"])
 def test_saved_comment_check_accepts_equivalent_parts(rich, text):
     _check_saved_comment(draft_feedback_out(Feedback=rich), text)
+
+
+_REJECTED_HTML = {
+    "p-hidden": ("<p hidden>hello</p>", "hello"),
+    "p-style": ('<p style="display:none">hello</p>', "hello"),
+    "p-class": ('<p class="sr-only">hello</p>', "hello"),
+    "p-id": ("<p id=x>hello</p>", "hello"),
+    "br-attribute": ('<p>a<br class="x">b</p>', "a\nb"),
+    "span": ("<p><span>hello</span></p>", "hello"),
+    "nested-p-in-div": ("<div><p>hello</p></div>", "hello"),
+    "extra-image": ('<p>hello</p><img src="x">', "hello"),
+    "script-inside": ("<p>hello<script>x()</script></p>", "hello"),
+    "script-after": ("<p>hello</p><script>x()</script>", "hello"),
+    "style-inside": ("<p>hello<style>p{}</style></p>", "hello"),
+    "comment-inside": ("<p>hello<!-- note --></p>", "hello"),
+    "comment-before": ("<!-- note --><p>hello</p>", "hello"),
+    "unfinished-comment": ("<p>hello</p><!--", "hello"),
+    "bogus-comment": ("<p>hello</ x></p>", "hello"),
+    "doctype": ("<!DOCTYPE html><p>hello</p>", "hello"),
+    "cdata": ("<p>hello<![CDATA[x]]></p>", "hello"),
+    "processing-instruction": ("<p>hello<?x?></p>", "hello"),
+    "second-paragraph": ("<p>hello</p><p>there</p>", "hello\nthere"),
+    "empty-second-paragraph": ("<p>hello</p><p></p>", "hello"),
+    "unclosed-second-paragraph": ("<p>hello</p><p>", "hello"),
+    "self-closing-p": ("<p/>hello</p>", "hello"),
+    "unclosed": ("<p>hello", "hello"),
+    "no-paragraph": ("hello", "hello"),
+    "stray-close-first": ("</p><p>hello</p>", "hello"),
+    "double-close": ("<p>hello</p></p>", "hello"),
+    "end-br": ("<p>a</br>b</p>", "a\nb"),
+    "unfinished-tag-after": ("<p>hello</p><b", "hello"),
+    "text-after": ("<p>hello</p>junk", "hello"),
+    "entity-after": ("<p>hello</p>&nbsp;", "hello"),
+    "raw-newline-inside": ("<p>x\ny</p>", "x\ny"),
+    "two-newlines-after-br": ("<p>x<br>\n\ny</p>", "x\ny"),
+    "trailing-break-dropped": ("<p>hello</p>", "hello\n"),
+    "extra-outer-breaks": ("<p><br>hello<br><br></p>", "hello"),
+    "extra-leading-break": ("<p><br>hello</p>", "hello"),
+    "invalid-charref": ("<p>he&#1;llo</p>", "hello"),
+    "c1-charref": ("<p>he&#x80;llo</p>", "he\x80llo"),
+    "zero-charref": ("<p>he&#0;llo</p>", "hello"),
+    "huge-charref": ("<p>he&#x110000;llo</p>", "hello"),
+    "surrogate-charref": ("<p>he&#xD800;llo</p>", "hello"),
+    "newline-charref": ("<p>a&#10;b</p>", "a\nb"),
+    "unterminated-charref": ("<p>&#38 x</p>", "& x"),
+    "unknown-entity": ("<p>a&bogus;b</p>", "ab"),
+    "unterminated-entity": ("<p>a&amp b</p>", "a& b"),
+    "end-tag-attribute": ("<p>hello</p hidden=x>", "hello"),
+    "end-tag-junk": ("<p>hello</p foo>", "hello"),
+    "end-tag-slash": ("<p>hello</p/>", "hello"),
+    "empty-end-tag": ("<p>he</>llo</p>", "hello"),
+    "empty-end-tag-after": ("<p>hello</p></>", "hello"),
+    "slash-attribute-p": ("<p/hidden>hello</p>", "hello"),
+    "slash-junk-br": ("<p>a<br/x>b</p>", "a\nb"),
+    "marked-section": ("<p>x<![ x</p>", "x"),
+    "vertical-tab-in-tag": ("<p\x0b>hello</p>", "hello"),
+}
+
+
+@pytest.mark.parametrize("markup,text", list(_REJECTED_HTML.values()), ids=list(_REJECTED_HTML))
+def test_saved_comment_check_rejects_html_with_a_different_structure(markup, text):
+    with pytest.raises(_UnexpectedError):
+        _check_saved_comment(draft_feedback_out(Feedback={"Text": text, "Html": markup}), text)
+
+
+_ACCEPTED_HTML = {
+    "exact": ("<p>a &amp; b<br />c</p>", "a & b\nc"),
+    "br-spellings": ("<p>a<br>b<br/>c<br />d<BR>e<br/ >f</p>", "a\nb\nc\nd\ne\nf"),
+    "tag-case": ("<P>hello</P>", "hello"),
+    "space-inside-tags": ("<p >hello</p >", "hello"),
+    "outer-whitespace": ("\n\t <p>hello</p> \r\n", "hello"),
+    "line-breaks-next-to-tags": ("<p>\na<br />\nb\n<br>c\n</p>", "a\nb\nc"),
+    "crlf-next-to-tags": ("<p>\r\na<br />\r\nb\r\n</p>", "a\nb"),
+    "entity-spellings": ("<p>&#38;&#x26;&amp; &quot;\"&#34; &#39;&#x27;' &gt;&#62;> &lt;3</p>",
+                         "&&& \"\"\" ''' >>> <3"),
+    "raw-lt-text": ("<p>x < y <3</p>", "x < y <3"),
+    "nbsp": ("<p>a&nbsp;b&#160;c</p>", "a b c"),
+    "bare-ampersand": ("<p>a & b &; x&</p>", "a & b &; x&"),
+    "outer-breaks-kept": ("<p><br>hello<br></p>", "\nhello\n"),
+}
+
+
+@pytest.mark.parametrize("markup,text", list(_ACCEPTED_HTML.values()), ids=list(_ACCEPTED_HTML))
+def test_saved_comment_check_accepts_known_reformatting(markup, text):
+    _check_saved_comment(draft_feedback_out(Feedback={"Text": None, "Html": markup}), text)
+
+
+@pytest.mark.parametrize("text", [
+    "hello", "\nleading break", "trailing break\n", "\n\nboth\n\n", "a\n\nb", "<b>\"x\" & 'y'</b>",
+    "tab\there", "  outer spaces  ", "nbsp here", "</p><p hidden>x", "<!-- c -->", "&amp; literal",
+    "x<y and y>z", "unicode é中\U0001f600",
+])
+def test_html_matcher_accepts_exactly_what_was_sent(text):
+    assert _html_text(_html(text)) == _comparable(text)
+
+
+def test_attribute_paragraph_with_matching_text_reports_unknown(feedback_file):
+    hidden = feedback_payload(TEXT)["Feedback"]["Html"].replace("<p>", "<p hidden>", 1)
+    fake = FakeLMS(happy_routes(get_feedback=[
+        lambda: response(200, draft_feedback_out(Feedback={"Text": TEXT, "Html": hidden}))]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["outcome"] == "unknown"
+    assert "saved-draft" not in result.stdout
 
 
 def test_csrf_bootstrap_failure_means_nothing_was_sent(feedback_file):
