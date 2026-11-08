@@ -27,6 +27,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from typing import Any
@@ -86,6 +87,16 @@ def _normalize(text: str) -> str:
 
 def _html(text: str) -> str:
     return "<p>" + html.escape(text, quote=True).replace("\n", "<br />") + "</p>"
+
+
+_BREAK = re.compile(r"<br\s*/?>|</p>\s*<p\b[^>]*>", re.IGNORECASE)
+_TAG = re.compile(r"<[^>]*>")
+
+
+def _html_text(markup: str) -> str:
+    """The plain text of simple paragraph/line-break markup, for comparison only."""
+    text = html.unescape(_TAG.sub("", _BREAK.sub("\n", _normalize(markup))))
+    return text.replace("\xa0", " ").strip()
 
 
 def feedback_payload(text: str) -> dict[str, Any]:
@@ -210,7 +221,8 @@ def _fingerprint(block: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _existing_comment(block: dict[str, Any]) -> str:
+def _existing_comment(block: dict[str, Any]) -> str | None:
+    """The existing draft comment, ``""`` for none, or ``None`` if a draft exists but its comment is unreadable."""
     if "Feedback" not in block:
         raise _UnexpectedError("The submission record is incomplete.")
     feedback = block["Feedback"]
@@ -218,7 +230,11 @@ def _existing_comment(block: dict[str, Any]) -> str:
         if _status(block) == _DRAFT:
             raise _UnexpectedError("The submission is marked as having draft feedback, but none was returned.")
         return ""
-    text, markup = _rich_text(_check_draft_only(feedback))
+    rich = _check_draft_only(feedback)["Feedback"]
+    if not isinstance(rich, dict) or not any(isinstance(rich.get(key), str) for key in ("Text", "Html")):
+        _rich_text(feedback)  # refuses a malformed shape
+        return None
+    text, markup = _rich_text(feedback)
     return text if text.strip() else markup
 
 
@@ -232,10 +248,12 @@ def check_feedback_target(data: Any, user_id: int, *, replace_draft: bool) -> Fe
         existing = _existing_comment(block)
     except _UnexpectedError as exc:
         raise FeedbackRefusedError(f"{exc} Nothing was sent.") from None
-    if existing.strip() and not replace_draft:
+    replaces = existing is None or bool(existing.strip())
+    if replaces and not replace_draft:
+        what = "a draft comment" if existing else "draft feedback whose comment could not be read"
         raise FeedbackRefusedError(
-            "This submission already has a draft comment. Pass --replace-draft to replace it. Nothing was sent.")
-    return FeedbackTarget(replaces_draft=bool(existing.strip()), fingerprint=_fingerprint(block))
+            f"This submission already has {what}. Pass --replace-draft to replace it. Nothing was sent.")
+    return FeedbackTarget(replaces_draft=replaces, fingerprint=_fingerprint(block))
 
 
 def check_individual_folder(folder: Any) -> None:
@@ -274,7 +292,10 @@ def preflight(api: AssessmentAPI, folder_id: int, user_id: int, *, replace_draft
 def _check_saved_comment(feedback: Any, text: str) -> None:
     """A draft-only DropboxFeedbackOut whose comment is ``text``."""
     saved_text, saved_html = _rich_text(_check_draft_only(feedback))
-    if _normalize(saved_text) != text and saved_html != _html(text):
+    text_ok = _normalize(saved_text) == text
+    html_ok = saved_html == _html(text) or _html_text(saved_html) == text.strip()
+    # Every part that is present must say the same thing, and at least one must match.
+    if (saved_text and not text_ok) or (saved_html and not html_ok) or not (text_ok or html_ok):
         raise _UnexpectedError()
 
 

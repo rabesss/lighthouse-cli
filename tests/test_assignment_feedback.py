@@ -255,8 +255,16 @@ def test_preflight_accepts_a_single_object_or_a_one_item_list():
 def test_empty_draft_feedback_object_is_not_a_replacement():
     empty = draft_feedback_out(content="")
     assert check_feedback_target([entity_with(empty)], USER, replace_draft=False).replaces_draft is False
-    blank = draft_feedback_out(Feedback=None)
-    assert check_feedback_target([entity_with(blank)], USER, replace_draft=False).replaces_draft is False
+    both_empty = draft_feedback_out(Feedback={"Text": "", "Html": ""})
+    assert check_feedback_target([entity_with(both_empty)], USER, replace_draft=False).replaces_draft is False
+
+
+@pytest.mark.parametrize("rich", [None, {}, {"Text": None, "Html": None}], ids=["null", "empty-object", "null-parts"])
+def test_existing_feedback_with_an_unreadable_comment_needs_replace_draft(rich):
+    data = [entity_with(draft_feedback_out(Feedback=rich), Status=2)]
+    with pytest.raises(FeedbackRefusedError, match="--replace-draft"):
+        check_feedback_target(data, USER, replace_draft=False)
+    assert check_feedback_target(data, USER, replace_draft=True).replaces_draft is True
 
 
 @pytest.mark.parametrize("rich", [{"Text": "Older synthetic draft", "Html": None},
@@ -619,6 +627,13 @@ BAD_READBACKS: dict[str, dict[str, list[Any]]] = {
         lambda: response(200, [ENTITY_NO_FEEDBACK]),
         lambda: response(200, [entity_with(draft_feedback_out(Files=[{"FileId": 1}]), Status=2)])]},
     "rich-text-missing": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback=None))]},
+    "text-matches-html-differs": {"get_feedback": [
+        lambda: response(200, draft_feedback_out(Feedback={"Text": TEXT, "Html": "<p>Different synthetic text</p>"}))]},
+    "html-matches-text-differs": {"get_feedback": [
+        lambda: response(200, draft_feedback_out(Feedback={"Text": "Different synthetic text", "Html": feedback_payload(TEXT)["Feedback"]["Html"]}))]},
+    "entity-text-matches-html-differs": {"get_submissions": [
+        lambda: response(200, [ENTITY_NO_FEEDBACK]),
+        lambda: response(200, [entity_with(draft_feedback_out(Feedback={"Text": TEXT, "Html": "<p>Other</p>"}), Status=2)])]},
     "html-only-mismatch": {"get_feedback": [lambda: response(200, draft_feedback_out(Feedback={"Html": "<p>other</p>"}))]},
     "not-object": {"get_feedback": [lambda: response(200, ["x"])]},
     "non-json": {"get_feedback": [lambda: response(200, raw=b"<html>NEVER_PRINT</html>")]},
@@ -680,6 +695,17 @@ def test_readback_tolerates_crlf_newlines_from_the_server(feedback_file):
 def test_readback_accepts_the_html_part_alone_when_it_matches_what_was_sent(feedback_file):
     sent = feedback_payload(TEXT)["Feedback"]["Html"]
     fake = FakeLMS(happy_routes(get_feedback=[lambda: response(200, draft_feedback_out(Feedback={"Html": sent}))]))
+    result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("markup", [
+    "<p>Synthetic draft note: revisit the second proof.<br>Line two.</p>",
+    "<p>Synthetic draft note: revisit the second proof.</p>\n<p>Line two.</p>",
+    '<p style="x">Synthetic draft note:&nbsp;revisit the second proof.<BR/>Line two.</p>',
+], ids=["br", "paragraphs", "attributes-nbsp"])
+def test_readback_accepts_html_reformatted_with_the_same_text(feedback_file, markup):
+    fake = FakeLMS(happy_routes(get_feedback=[lambda: response(200, draft_feedback_out(Feedback={"Text": TEXT, "Html": markup}))]))
     result = invoke(fake, "--file", str(feedback_file), "--yes", "--json")
     assert result.exit_code == 0, result.output
 
